@@ -38,6 +38,10 @@ hand, move `Textures/` along with it.
   ~2:23) — walks through all 5 steps in order (Blueprint → Walls → Stairs → Doors → Props) plus
   Separate by Floor/Room, on one level built up step by step, with captions pointing at which
   panel setting to use.
+- **Room Shapes & Corridor Stairs**
+  ([docs/tutorial_room_shapes.mp4](docs/tutorial_room_shapes.mp4), ~2:07) — Rectangular, Round,
+  and Mixed room layouts, Cave Mode's organic tunnel networks, and Corridor Stairs (a 1-wide
+  stairwell flush with the corridor, no separate room needed).
 
 ## Basic workflow
 
