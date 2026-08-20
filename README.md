@@ -42,6 +42,11 @@ hand, move `Textures/` along with it.
   ([docs/tutorial_room_shapes.mp4](docs/tutorial_room_shapes.mp4), ~2:07) — Rectangular, Round,
   and Mixed room layouts, Cave Mode's organic tunnel networks, and Corridor Stairs (a 1-wide
   stairwell flush with the corridor, no separate room needed).
+- **Materials & Per-Floor Overrides**
+  ([docs/tutorial_materials.mp4](docs/tutorial_materials.mp4), ~2:02) — Simple Viewport Colors
+  vs. Style mode's procedural shaders, and Per-Floor Overrides (room size blending smoothly
+  between breakpoints while shape and style switch), with a same-scale side-by-side of a small
+  floor-0 room next to a large floor-3 room.
 
 ## Basic workflow
 
