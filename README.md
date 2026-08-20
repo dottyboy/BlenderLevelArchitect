@@ -47,6 +47,9 @@ hand, move `Textures/` along with it.
   vs. Style mode's procedural shaders, and Per-Floor Overrides (room size blending smoothly
   between breakpoints while shape and style switch), with a same-scale side-by-side of a small
   floor-0 room next to a large floor-3 room.
+- **Props & Lighting** ([docs/tutorial_props_lighting.mp4](docs/tutorial_props_lighting.mp4),
+  ~2:03) — wall torches (a mesh plus a real Point light per lit torch), scattered crate/barrel/
+  cone decoration, and a fully populated level with everything together.
 
 ## Basic workflow
 
