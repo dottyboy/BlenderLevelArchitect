@@ -6,6 +6,12 @@ for walls and stairs).
 
 ![Example generated level -- rooms, corridors, doors, stairs, torches and decoration, each room individually colored](screenshot.png)
 
+**Watch it generate:** [docs/showcase.mp4](docs/showcase.mp4) — Generate Blueprint, Separate by
+Floor/Room (real per-room color), Cave Mode's organic tunnels, a full populated level, and
+Per-Floor Overrides, ~19 seconds.
+
+<video src="docs/showcase.mp4" controls width="100%"></video>
+
 **Status: early testing release.** Feedback welcome, expect rough edges.
 
 License: GPL-3.0-or-later (see `game_level_architect/LICENSE`).
