@@ -32,6 +32,13 @@ The `Textures/` folder bundled inside the zip must stay next to the add-on's Pyt
 used for the built-in flat-color material set. If you ever move the installed add-on folder by
 hand, move `Textures/` along with it.
 
+## Tutorials
+
+- **Getting Started** ([docs/tutorial_getting_started.mp4](docs/tutorial_getting_started.mp4),
+  ~2:23) — walks through all 5 steps in order (Blueprint → Walls → Stairs → Doors → Props) plus
+  Separate by Floor/Room, on one level built up step by step, with captions pointing at which
+  panel setting to use.
+
 ## Basic workflow
 
 The panel is organized into tabs (Setup / Walls / Stairs / Doors / Props, icon row at the top) —
