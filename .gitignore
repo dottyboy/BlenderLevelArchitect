@@ -1,0 +1,22 @@
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Blender auto-backup files -- never meaningful to track
+*.blend1
+*.blend2
+
+# Ad hoc manual test/scratch .blend files kept at the repo root
+/*.blend
+
+# Build output -- regenerate with ./build_package.sh
+/dist/game_level_architect/
+/dist/game_level_architect.zip
+
+# Generated test .blend files -- regenerate with ./generate_test_blends.sh
+# and tests/generate_cave_gallery.py
+/test_blends/
+
+# OS cruft
+.DS_Store
+Thumbs.db

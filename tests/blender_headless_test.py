@@ -1,0 +1,1229 @@
+# Headless Blender verification for Game Level Architect.
+#
+# Runs the addon inside a REAL Blender process -- unlike the stub_bpy mock
+# harness used during normal development (fast, but can't construct or
+# evaluate a Geometry Nodes graph at all), this actually builds and
+# evaluates the GN modifier, so it's the only thing in this project that
+# can catch GN node-type/socket-name mistakes, mesh winding problems, and
+# collection-linking issues before a human ever opens the file.
+#
+# Usage:
+#   blender --background --factory-startup --python tests/blender_headless_test.py
+#
+# Exits with a non-zero status if any check fails, so it's safe to use in
+# a script/CI context, not just interactively.
+
+import importlib.util
+import os
+import sys
+
+import bpy
+
+ADDON_PATH = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "levelArchitect_v2.py")
+)
+
+failures = []
+
+
+def check(name, condition, detail=""):
+    if condition:
+        print(f"[PASS] {name}")
+    else:
+        msg = f"[FAIL] {name}" + (f" -- {detail}" if detail else "")
+        print(msg)
+        failures.append(name)
+
+
+def evaluated_counts(obj):
+    """Realizes obj's modifier stack (Geometry Nodes included) through the
+    active depsgraph and returns (vertex_count, face_count) of the actual
+    result a viewport/render would show -- reading obj.data directly would
+    only see the sparse pre-modifier point cloud, not what the GN graph
+    actually produced."""
+    deps = bpy.context.evaluated_depsgraph_get()
+    eval_obj = obj.evaluated_get(deps)
+    mesh = eval_obj.to_mesh()
+    counts = (len(mesh.vertices), len(mesh.polygons))
+    eval_obj.to_mesh_clear()
+    return counts
+
+
+def per_box_aabbs(obj, n_verts_per_box=8):
+    """Every add_box-style builder in this file emits vertices in
+    sequential 8-per-box groups (regardless of how many logical
+    tiles/runs got merged into that box) -- this reads them back as a
+    list of (x0,x1,y0,y1,z0,z1) world-space bounding boxes, one per box,
+    for geometric sanity checks a pure vertex/face COUNT can't catch."""
+    aabbs = []
+    verts = obj.data.vertices
+    n_boxes = len(verts) // n_verts_per_box
+    for b in range(n_boxes):
+        base = b * n_verts_per_box
+        coords = [obj.matrix_world @ verts[base + k].co for k in range(n_verts_per_box)]
+        xs = [c.x for c in coords]
+        ys = [c.y for c in coords]
+        zs = [c.z for c in coords]
+        aabbs.append((min(xs), max(xs), min(ys), max(ys), min(zs), max(zs)))
+    return aabbs
+
+
+def aabb_overlap(a, b, eps=0.02):
+    """eps shrinks each box slightly before testing -- two boxes that are
+    merely flush/touching (e.g. a stair's walkway edge against a wall's
+    inner face, which is completely normal) shouldn't count as
+    overlapping; only genuine interpenetration should."""
+    ax0, ax1, ay0, ay1, az0, az1 = a
+    bx0, bx1, by0, by1, bz0, bz1 = b
+    return (
+        ax0 < bx1 - eps and ax1 > bx0 + eps
+        and ay0 < by1 - eps and ay1 > by0 + eps
+        and az0 < bz1 - eps and az1 > bz0 + eps
+    )
+
+
+print(f"Loading addon from: {ADDON_PATH}")
+spec = importlib.util.spec_from_file_location("levelArchitect_v2", ADDON_PATH)
+addon = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(addon)
+addon.register()
+
+scene = bpy.context.scene
+
+# -- Configure a moderate, varied level: corridor stairs, continuous
+# elevation, and a ceiling all on at once, since those are exactly the
+# features that touch GN or were only ever verified through the mock. --
+scene.wfc_width = 22
+scene.wfc_length = 22
+scene.wfc_height = 3
+scene.wfc_seed = 12345
+scene.wfc_random_seed = False
+scene.wfc_rooms_min = 8
+scene.wfc_rooms_max = 14
+scene.wfc_room_size_min = 3
+scene.wfc_room_size_max = 6
+scene.wfc_room_shape = 'MIXED'
+scene.wfc_stairs_per_level = 3
+scene.wfc_stair_room_width = 3
+scene.wfc_stair_room_length = 4
+scene.wfc_corridor_stairs = True
+scene.wfc_sub_levels_per_floor = 1
+scene.wfc_split_level_chance = 0.0
+scene.wfc_elevation_chance = 0.6
+scene.wfc_elevation_range = 1.0
+scene.wfc_max_ramp_slope = 30.0
+scene.wfc_tile_size = 2.0
+scene.wfc_level_height = 3.0
+scene.wfc_style = '0'
+scene.wfc_simple_materials = True
+scene.wfc_color_rooms = True
+scene.wfc_floor_thickness = 0.1
+scene.wfc_iso_mode = False
+scene.wfc_add_ceiling = False
+scene.wfc_ceiling_thickness = 0.1
+scene.wfc_organic_amount = 0.0
+scene.wfc_wall_height = 2.5
+scene.wfc_wall_thickness = 0.2
+scene.wfc_wall_cap_top = True
+scene.wfc_wall_grouping = 'SINGLE'
+scene.wfc_door_height = 2.2
+scene.wfc_door_frame_thickness = 0.15
+scene.wfc_door_grouping = 'SINGLE'
+scene.wfc_door_merge_distance = 2
+scene.wfc_stair_grouping = 'PER_FLOOR'
+scene.wfc_stair_mesh_style = 'STAIRS'
+scene.wfc_stair_steps = 6
+scene.wfc_torch_chance = 0.2
+scene.wfc_torch_height = 1.6
+scene.wfc_torch_light_chance = 0.5
+scene.wfc_max_lights = 100
+scene.wfc_torch_light_energy = 60.0
+scene.wfc_torch_light_color = (1.0, 0.55, 0.2)
+scene.wfc_torch_light_radius = 0.25
+scene.wfc_prop_chance = 0.12
+
+# ==============================================================================
+# Wall Height / Door Height / Level Height / Sub-Levels per Floor mutual
+# sync -- user feedback: raising Sub-Levels per Floor shrinks the real
+# headroom per slice (Level Height / Sub-Levels), but Wall Height (and,
+# raised separately, Door Height -- same bug) used to be completely
+# independent of that, so walls/doors routinely clipped through the floor
+# above. Each of the four now nudges the others (via update= callbacks) to
+# keep wall_height/door_height <= level_height / sub_levels_per_floor,
+# preferring to grow Level Height before ever shrinking either height.
+# ==============================================================================
+scene.wfc_sub_levels_per_floor = 2
+check(
+    "Height sync: raising Sub-Levels grows Level Height instead of leaving Wall/Door Height clipping",
+    scene.wfc_wall_height <= scene.wfc_level_height / scene.wfc_sub_levels_per_floor + 1e-6
+    and scene.wfc_door_height <= scene.wfc_level_height / scene.wfc_sub_levels_per_floor + 1e-6,
+    f"wall_height={scene.wfc_wall_height} door_height={scene.wfc_door_height} "
+    f"level_height={scene.wfc_level_height} sub_levels={scene.wfc_sub_levels_per_floor}",
+)
+scene.wfc_level_height = 3.0
+check(
+    "Height sync: directly shrinking Level Height below what Wall/Door Height needs shrinks them to fit",
+    scene.wfc_wall_height <= scene.wfc_level_height / scene.wfc_sub_levels_per_floor + 1e-6
+    and scene.wfc_door_height <= scene.wfc_level_height / scene.wfc_sub_levels_per_floor + 1e-6,
+    f"wall_height={scene.wfc_wall_height} door_height={scene.wfc_door_height} "
+    f"level_height={scene.wfc_level_height} sub_levels={scene.wfc_sub_levels_per_floor}",
+)
+# Restore the scenario's own baseline before Step 1 actually runs.
+scene.wfc_sub_levels_per_floor = 1
+scene.wfc_level_height = 3.0
+scene.wfc_door_height = 2.2
+scene.wfc_wall_height = 2.5
+
+# ==============================================================================
+# Step 1: Blueprint -- ceiling OFF first, to get a baseline poly count
+# ==============================================================================
+result = bpy.ops.object.generate_game_blueprint()
+check("Blueprint: operator FINISHED", result == {'FINISHED'}, str(result))
+
+blueprint_obj = bpy.data.objects.get(addon.BLUEPRINT_OBJECT_NAME)
+check("Blueprint: object exists", blueprint_obj is not None)
+check("Blueprint: has a Nodes modifier", any(m.type == 'NODES' for m in blueprint_obj.modifiers))
+
+verts_no_ceiling, faces_no_ceiling = evaluated_counts(blueprint_obj)
+check(
+    "Blueprint: GN graph evaluates to non-empty geometry (ceiling off)",
+    verts_no_ceiling > 0 and faces_no_ceiling > 0,
+    f"verts={verts_no_ceiling} faces={faces_no_ceiling}",
+)
+
+# Regression check for a real bug: create_geometry_nodes_modifier() used to
+# assign `mod.node_group = node_group` BEFORE any Bool/Float interface
+# socket (and its intended default) existed, which silently locked that
+# modifier's own per-input override to the socket type's built-in zero
+# value (False/0.0) forever after -- a LATER `.default_value` write on the
+# interface only affects a future/different modifier instance. Concretely:
+# Color Rooms/Corridors defaults to True in the addon UI, but every
+# freshly-generated level rendered with it OFF regardless, invisibly,
+# because the checkbox never actually reached the modifier. floor_level_count
+# in this scenario is small enough that room-slot indices start right after
+# it, so if Color Rooms genuinely took effect, at least one face's
+# material_index must land at or above that boundary.
+gn_mod_for_materials = next(m for m in blueprint_obj.modifiers if m.type == 'NODES')
+color_rooms_modifier_value = None
+for item in gn_mod_for_materials.node_group.interface.items_tree:
+    if getattr(item, "in_out", None) == 'INPUT' and item.name == "Color Rooms/Corridors":
+        # See set_input()/find_input_socket_name() further down for why this
+        # branches on Blender version -- .properties.inputs is 5.2+ only.
+        if hasattr(gn_mod_for_materials, "properties"):
+            color_rooms_modifier_value = getattr(gn_mod_for_materials.properties.inputs, item.identifier).value
+        else:
+            color_rooms_modifier_value = gn_mod_for_materials[item.identifier]
+        break
+check(
+    "Blueprint: Color Rooms/Corridors modifier input matches its intended default",
+    color_rooms_modifier_value is True,
+    f"modifier-level value={color_rooms_modifier_value} (expected True, matching wfc_color_rooms default)",
+)
+room_material_indices = {
+    p.material_index for p in blueprint_obj.evaluated_get(bpy.context.evaluated_depsgraph_get()).to_mesh().polygons
+}
+check(
+    "Blueprint: at least one face actually got a room-pool material index (not just floor-level slots)",
+    any(idx >= 8 for idx in room_material_indices),
+    f"material indices present: {sorted(room_material_indices)}",
+)
+
+# Regression check: Solid Shading's "Texture" color mode -- a separate,
+# simpler display path from "Material" that needs a real UV map, unlike
+# EEVEE's node-tree evaluation which falls back to Generated coordinates
+# without one -- had nothing to sample from, since the addon never
+# generated a UV map at all. Every Simple Viewport Colors swatch is a
+# flat single color, so a constant UV everywhere is sufficient; this only
+# checks presence/coverage, not any particular value.
+uv_check_mesh = blueprint_obj.evaluated_get(bpy.context.evaluated_depsgraph_get()).to_mesh()
+check(
+    "Blueprint: has a UV map, and every loop is covered",
+    len(uv_check_mesh.uv_layers) > 0 and len(uv_check_mesh.uv_layers[0].data) == len(uv_check_mesh.loops),
+    f"uv_layers={list(uv_check_mesh.uv_layers.keys())}",
+)
+
+# ==============================================================================
+# Regression check for a real bug found from user feedback (backface
+# culling on, floors read as fully transparent from a top-down view): at
+# Floor Thickness 0.0, the floor cube's top and bottom faces become fully
+# coincident, Merge By Distance welds them into one, and Blender's own
+# duplicate-face cleanup kept only the DOWNWARD-facing one -- every single
+# floor face pointed -Z, none pointed +Z. Fixed by clamping the floor (and
+# ceiling) cube's actual thickness to stay comfortably above Merge
+# Distance's own welding tolerance, so top/bottom can never truly coincide.
+# Confirmed the fix with exactly the reported scenario (RECT rooms, 0.0
+# Floor Thickness, sub-levels, RAMP stairs) before writing this permanent
+# check with a smaller scenario for speed.
+scene.wfc_floor_thickness = 0.0
+result = bpy.ops.object.generate_game_blueprint()
+check("Zero-thickness floor: Blueprint regenerate FINISHED", result == {'FINISHED'}, str(result))
+blueprint_obj = bpy.data.objects.get(addon.BLUEPRINT_OBJECT_NAME)
+zt_mesh = blueprint_obj.evaluated_get(bpy.context.evaluated_depsgraph_get()).to_mesh()
+up_count = 0
+down_count = 0
+for poly in zt_mesh.polygons:
+    verts = [zt_mesh.vertices[vi].co for vi in poly.vertices]
+    if max(v.z for v in verts) - min(v.z for v in verts) > 0.01:
+        continue  # a side face, not a top/bottom cap -- skip
+    normal = (verts[1] - verts[0]).cross(verts[2] - verts[0]).normalized()
+    if normal.z > 0.5:
+        up_count += 1
+    elif normal.z < -0.5:
+        down_count += 1
+check(
+    "Zero-thickness floor: both top (+Z) and bottom (-Z) faces survive per tile, not just one",
+    up_count > 0 and up_count == down_count,
+    f"up={up_count} down={down_count}",
+)
+scene.wfc_floor_thickness = 0.1
+result = bpy.ops.object.generate_game_blueprint()
+check("Zero-thickness floor: scenario Blueprint restored FINISHED", result == {'FINISHED'}, str(result))
+blueprint_obj = bpy.data.objects.get(addon.BLUEPRINT_OBJECT_NAME)
+
+# ==============================================================================
+# Style mode (Simple Viewport Colors off) never had any coverage in this
+# suite before -- it used to be a flat 2-slot system (one corridor look,
+# one room look, uniform across the whole level) until per-room/per-floor
+# coloring was added to match Simple mode. Confirms real per-room and
+# per-floor-level material variety, not everything clamped to one shared
+# slot the way the old 2-slot system was.
+# ==============================================================================
+scene.wfc_simple_materials = False
+result = bpy.ops.object.generate_game_blueprint()
+check("Style mode: Blueprint regenerate FINISHED", result == {'FINISHED'}, str(result))
+blueprint_obj = bpy.data.objects.get(addon.BLUEPRINT_OBJECT_NAME)
+style_mesh = blueprint_obj.evaluated_get(bpy.context.evaluated_depsgraph_get()).to_mesh()
+style_material_indices = {p.material_index for p in style_mesh.polygons}
+style_floor_level_count = len(addon.FLOOR_RAMP_HEX)
+check(
+    "Style mode: more than one floor-level material index is actually used",
+    len({idx for idx in style_material_indices if idx < style_floor_level_count}) > 1,
+    f"indices used: {sorted(style_material_indices)}",
+)
+check(
+    "Style mode: multiple distinct room-pool material indices are actually used",
+    len({idx for idx in style_material_indices if idx >= style_floor_level_count}) > 1,
+    f"indices used: {sorted(style_material_indices)}",
+)
+sample_style_mat = blueprint_obj.data.materials[next(iter(
+    idx for idx in style_material_indices if idx >= style_floor_level_count
+))]
+check(
+    "Style mode: a room face resolves to a real per-room style material, not a shared default",
+    sample_style_mat.name.startswith(f"{addon.STYLE_MATERIAL_NAME['0']}_Room_")
+    or sample_style_mat.name.endswith("_Entrance") or sample_style_mat.name.endswith("_Exit"),
+    f"resolved to {sample_style_mat.name}",
+)
+
+# Regression check for the "viewport_color" Color Attribute feature: style
+# materials never set diffuse_color at all before (their look came purely
+# from the node tree), which left them invisible to Solid Shading's
+# "Material" color mode AND to a diffuse_color-driven Color Attribute
+# palette. _finish_material now also sets mat.diffuse_color = tint whenever
+# a tint is given.
+room_pool_indices = sorted(idx for idx in style_material_indices if idx >= style_floor_level_count)[:2]
+if len(room_pool_indices) >= 2:
+    style_room_colors = {
+        idx: tuple(blueprint_obj.data.materials[idx].diffuse_color) for idx in room_pool_indices
+    }
+    check(
+        "Style mode: room-pool materials have a real, distinct diffuse_color (not left at the default)",
+        len(set(style_room_colors.values())) > 1,
+        f"diffuse_color per material index: {style_room_colors}",
+    )
+
+scene.wfc_simple_materials = True
+result = bpy.ops.object.generate_game_blueprint()
+check("Style mode: scenario Blueprint restored to Simple materials FINISHED", result == {'FINISHED'}, str(result))
+blueprint_obj = bpy.data.objects.get(addon.BLUEPRINT_OBJECT_NAME)
+
+# ==============================================================================
+# Per-Floor Overrides (WFC_FloorProfile) -- new feature, no coverage before
+# this. Two layers: direct solver-level checks of the resolver math itself
+# (fast, precise, no full generation needed), then a real end-to-end
+# generation exercising the Add operator + CollectionProperty + material
+# building together.
+# ==============================================================================
+profile_solver = addon.WFC_Level_Solver(
+    width=10, length=10, height=5, room_count=5,
+    floor_profiles=[
+        {'floor_index': 0, 'room_size_min': 2, 'room_size_max': 3, 'room_shape': 'RECT', 'style': '0'},
+        {'floor_index': 4, 'room_size_min': 8, 'room_size_max': 10, 'room_shape': 'ROUND', 'style': '1'},
+    ],
+)
+check(
+    "Per-Floor Overrides: floor at/before the first breakpoint resolves to it exactly",
+    profile_solver._room_size_for_floor(0) == (2, 3) and profile_solver._room_shape_for_floor(0) == 'RECT',
+    f"size={profile_solver._room_size_for_floor(0)} shape={profile_solver._room_shape_for_floor(0)}",
+)
+check(
+    "Per-Floor Overrides: floor at/after the last breakpoint resolves to it exactly",
+    profile_solver._room_size_for_floor(4) == (8, 10) and profile_solver._room_shape_for_floor(4) == 'ROUND',
+    f"size={profile_solver._room_size_for_floor(4)} shape={profile_solver._room_shape_for_floor(4)}",
+)
+mid_size = profile_solver._room_size_for_floor(2)
+check(
+    "Per-Floor Overrides: a floor between two breakpoints interpolates room size, "
+    "strictly between the two breakpoints' own values",
+    2 < mid_size[0] < 8 and 3 < mid_size[1] < 10,
+    f"floor 2 (halfway between floor 0 and floor 4) resolved to {mid_size}",
+)
+check(
+    "Per-Floor Overrides: room_shape is a step function, not interpolated -- a floor between "
+    "breakpoints keeps the LAST one at or before it, not some blend",
+    profile_solver._room_shape_for_floor(2) == 'RECT',
+    f"floor 2 shape={profile_solver._room_shape_for_floor(2)}",
+)
+empty_solver = addon.WFC_Level_Solver(
+    width=10, length=10, height=3, room_count=5,
+    room_size_min=2, room_size_max=4, room_shape='MIXED',
+)
+check(
+    "Per-Floor Overrides: an empty floor_profiles list falls back to the flat scene values "
+    "everywhere (backward compatible with every generation before this feature existed)",
+    empty_solver._room_size_for_floor(1) == (2, 4) and empty_solver._room_shape_for_floor(1) == 'MIXED',
+)
+
+# End-to-end: two breakpoints far apart in both room size and style, real
+# generation through the actual operators (Add Floor Override + Generate
+# Blueprint), Style mode on so the material-style side gets exercised too.
+scene.wfc_floor_profiles.clear()
+bpy.ops.object.wfc_floor_profile_add()
+fp0 = scene.wfc_floor_profiles[-1]
+fp0.floor_index, fp0.room_size_min, fp0.room_size_max, fp0.room_shape, fp0.style = 0, 2, 2, 'RECT', '0'
+bpy.ops.object.wfc_floor_profile_add()
+fp1 = scene.wfc_floor_profiles[-1]
+fp1.floor_index, fp1.room_size_min, fp1.room_size_max, fp1.room_shape, fp1.style = 3, 7, 7, 'RECT', '1'
+check(
+    "Per-Floor Overrides: Add operator populated the CollectionProperty as expected",
+    len(scene.wfc_floor_profiles) == 2,
+    f"count={len(scene.wfc_floor_profiles)}",
+)
+
+prev_width, prev_length, prev_height = scene.wfc_width, scene.wfc_length, scene.wfc_height
+prev_style, prev_simple = scene.wfc_style, scene.wfc_simple_materials
+scene.wfc_width = 26
+scene.wfc_length = 26
+scene.wfc_height = 4
+scene.wfc_simple_materials = False
+scene.wfc_style = '0'
+result = bpy.ops.object.generate_game_blueprint()
+check("Per-Floor Overrides: end-to-end Blueprint regenerate FINISHED", result == {'FINISHED'}, str(result))
+blueprint_obj = bpy.data.objects.get(addon.BLUEPRINT_OBJECT_NAME)
+
+pf_mesh = blueprint_obj.evaluated_get(bpy.context.evaluated_depsgraph_get()).to_mesh()
+pf_room_ids = addon._read_polygon_values(pf_mesh, "room_id")
+pf_logical_floors = addon._read_polygon_values(pf_mesh, "logical_floor")
+rooms_by_floor = {}
+for room_id, floor in zip(pf_room_ids, pf_logical_floors):
+    if room_id >= 0:
+        rooms_by_floor.setdefault(floor, set()).add(room_id)
+floor0_tiles = sum(1 for rid, fl in zip(pf_room_ids, pf_logical_floors) if fl == 0 and rid >= 0)
+floor3_tiles = sum(1 for rid, fl in zip(pf_room_ids, pf_logical_floors) if fl == 3 and rid >= 0)
+floor0_rooms = len(rooms_by_floor.get(0, ()))
+floor3_rooms = len(rooms_by_floor.get(3, ()))
+check(
+    "Per-Floor Overrides: floor 3 (7x7 rooms) actually carved more floor tiles per room than "
+    "floor 0 (2x2 rooms), confirming the size breakpoints reached real carving, not just the "
+    "solver's own room list",
+    floor0_rooms > 0 and floor3_rooms > 0 and (floor3_tiles / floor3_rooms) > (floor0_tiles / floor0_rooms) * 2,
+    f"floor0: {floor0_tiles} tiles / {floor0_rooms} rooms, floor3: {floor3_tiles} tiles / {floor3_rooms} rooms",
+)
+
+floor0_slot_mat = blueprint_obj.data.materials[0]
+floor3_slot_mat = blueprint_obj.data.materials[3]
+check(
+    "Per-Floor Overrides: floor-level material slots 0 and 3 resolved to DIFFERENT styles "
+    "(Dungeon vs Cave Rock), matching the two breakpoints",
+    floor0_slot_mat.name.startswith(addon.STYLE_MATERIAL_NAME['0'])
+    and floor3_slot_mat.name.startswith(addon.STYLE_MATERIAL_NAME['1']),
+    f"slot 0={floor0_slot_mat.name} slot 3={floor3_slot_mat.name}",
+)
+
+room_style_names = set()
+for room_id in rooms_by_floor.get(3, ()):
+    mat = blueprint_obj.data.materials[room_id + 8]  # floor_level_count is always 8 (len(FLOOR_RAMP_HEX))
+    room_style_names.add(mat.name)
+check(
+    "Per-Floor Overrides: rooms on floor 3 resolved to Cave Rock room materials specifically",
+    len(room_style_names) > 0 and all(n.startswith(addon.STYLE_MATERIAL_NAME['1']) for n in room_style_names),
+    f"floor 3 room material names: {room_style_names}",
+)
+
+scene.wfc_floor_profiles.clear()
+scene.wfc_width, scene.wfc_length, scene.wfc_height = prev_width, prev_length, prev_height
+scene.wfc_style, scene.wfc_simple_materials = prev_style, prev_simple
+result = bpy.ops.object.generate_game_blueprint()
+check("Per-Floor Overrides: scenario Blueprint restored FINISHED", result == {'FINISHED'}, str(result))
+blueprint_obj = bpy.data.objects.get(addon.BLUEPRINT_OBJECT_NAME)
+
+# ==============================================================================
+# Ceiling: live GN toggle -- flip Add Ceiling on and confirm the evaluated
+# mesh actually grows, without regenerating the blueprint at all.
+#
+# Blender 5.2 exposes GN modifier inputs through modifier.properties.inputs
+# .Socket_N.value -- NOT the older modifier["Socket_N"] IDProperty pattern
+# (that raises "id properties not supported for this type" there). Older
+# versions (confirmed on 4.5.2) don't have `.properties` at all and need the
+# IDProperty form instead -- this is purely a TEST-SCRIPT concern (poking a
+# live modifier from an external script); the addon's own code never touches
+# either API, it only sets defaults via node_group.interface at creation
+# time, which is why the addon itself runs unmodified across both versions.
+# Matching a socket's interface name to its Socket_N identifier via
+# node_group.interface.items_tree is stable across both.
+# ==============================================================================
+gn_mod = next(m for m in blueprint_obj.modifiers if m.type == 'NODES')
+
+
+def find_input_socket_name(mod, display_name):
+    for item in mod.node_group.interface.items_tree:
+        if getattr(item, "in_out", None) == 'INPUT' and item.name == display_name:
+            return item.identifier
+    return None
+
+
+def set_input(mod, display_name, value):
+    socket_id = find_input_socket_name(mod, display_name)
+    if socket_id is None:
+        return False
+    if hasattr(mod, "properties"):
+        getattr(mod.properties.inputs, socket_id).value = value
+    else:
+        mod[socket_id] = value
+        mod.node_group.interface_update(bpy.context)
+    return True
+
+
+ceiling_found = find_input_socket_name(gn_mod, "Add Ceiling") is not None
+check("Ceiling: found 'Add Ceiling' GN input socket", ceiling_found)
+
+if ceiling_found:
+    set_input(gn_mod, "Add Ceiling", True)
+    blueprint_obj.data.update()
+    verts_with_ceiling, faces_with_ceiling = evaluated_counts(blueprint_obj)
+    check(
+        "Ceiling: turning it on (live, no regen) adds geometry",
+        faces_with_ceiling > faces_no_ceiling,
+        f"faces before={faces_no_ceiling} after={faces_with_ceiling}",
+    )
+
+    iso_found = find_input_socket_name(gn_mod, "Isometric Mode") is not None
+    check("Ceiling: found 'Isometric Mode' GN input socket", iso_found)
+    if iso_found:
+        set_input(gn_mod, "Isometric Mode", True)
+        blueprint_obj.data.update()
+        verts_iso, faces_iso = evaluated_counts(blueprint_obj)
+        check(
+            "Ceiling: Isometric Mode culls it back down",
+            faces_iso < faces_with_ceiling,
+            f"faces with ceiling={faces_with_ceiling} with iso mode too={faces_iso}",
+        )
+        set_input(gn_mod, "Isometric Mode", False)
+
+    # Leave ceiling ON for the rest of the run, so Walls/Doors/Props are
+    # also exercised against a ceiling-on level at least once.
+    scene.wfc_add_ceiling = True
+
+# Regenerate with Add Ceiling baked into the scene property default too
+# (separate from the live-toggle check above), then proceed with the rest
+# of the pipeline against this same generation.
+result = bpy.ops.object.generate_game_blueprint()
+check("Blueprint: regenerate with Add Ceiling defaulted on FINISHED", result == {'FINISHED'})
+blueprint_obj = bpy.data.objects.get(addon.BLUEPRINT_OBJECT_NAME)
+
+# ==============================================================================
+# Steps 2-5: Walls, Stairs, Doors, Props
+# ==============================================================================
+result = bpy.ops.object.generate_level_walls()
+check("Walls: operator FINISHED", result == {'FINISHED'}, str(result))
+walls_obj = bpy.data.objects.get(addon.WALLS_OBJECT_NAME)
+check("Walls: object exists with geometry", walls_obj is not None and len(walls_obj.data.vertices) > 0)
+
+if walls_obj is not None:
+    # Every add_box() in the codebase (walls/doors/stairs/ramps/torches/
+    # decoration) shares the identical 8-vert winding convention, which
+    # DEVELOPMENT.md has flagged since early in the project as "never
+    # independently verified against a live Blender render" -- this is
+    # that verification, on the real thing. Wall boxes no longer carry a
+    # bottom face at all (see _build_wall_mesh's add_box -- always
+    # coincident with/hidden behind the floor tile a wall stands on, pure
+    # polycount reduction, DEVELOPMENT.md "Delete interior/hidden faces
+    # for faster rendering"), so with cap_top on, face index 0 per box is
+    # now the TOP face; with cap_top off, index 0 is the first side face.
+    # Getting the winding backwards would flip every normal in the whole
+    # file at once (they all share this exact same add_box pattern), so
+    # one correct result here is real evidence for all of them.
+    verts = walls_obj.data.vertices
+    polys = walls_obj.data.polygons
+    n_boxes = len(verts) // 8
+    faces_per_box = 5 if scene.wfc_wall_cap_top else 4
+    check(
+        "Walls: no bottom face per box (removed as hidden/redundant geometry)",
+        len(polys) == n_boxes * faces_per_box,
+        f"boxes={n_boxes} faces_per_box={faces_per_box} expected_faces={n_boxes * faces_per_box} actual_faces={len(polys)}",
+    )
+    if scene.wfc_wall_cap_top:
+        top_ok = all(polys[b * faces_per_box].normal.z > 0.5 for b in range(n_boxes))
+        check("Walls: top (cap) face winding points +Z", top_ok, f"boxes checked={n_boxes}")
+
+    if scene.wfc_corridor_stairs:
+        # Regression check for a real, accepted-as-residual bug
+        # (DEVELOPMENT.md "Corridor Stairs, rare residual wall gap", ~7-10%
+        # of stair cells): a Corridor Stairs run's perpendicular sides are
+        # only checked for a clear neighbor AT THAT STAIRWELL'S OWN
+        # placement time, so a corridor pathfound afterward can still end
+        # up running alongside one with no wall between them. Fixed at
+        # wall-generation time instead (forced_wall_edges in
+        # _build_wall_mesh, wired up in Generate Level Walls) -- verifies
+        # the ACTUAL geometry here: every TILE_STAIR cell's two
+        # perpendicular sides (derived the same way the operator derives
+        # them, from the baked tile_rotation) must have a real wall box
+        # AABB covering that boundary line, regardless of whether the
+        # neighbor cell happens to be walkable. The Cave-only check further
+        # below is a placement-time/grid-walkability proxy and can't
+        # observe this wall-generation-time fix at all -- this is the
+        # check that actually verifies the fix.
+        stair_wall_tile_size = scene.wfc_tile_size
+        stair_wall_level_height = addon._fine_level_height(scene)
+        wall_aabbs = per_box_aabbs(walls_obj, 8)
+        _, stair_extra = addon._read_blueprint_points(
+            blueprint_obj, stair_wall_tile_size, stair_wall_level_height,
+            ("tile_id", "tile_rotation", "z_offset"),
+        )
+        eps = 0.05
+        checked = 0
+        missing = []
+        for cell, tid in stair_extra["tile_id"].items():
+            if tid != addon.TILE_STAIR:
+                continue
+            cx, cy, cz = cell
+            dx, dy = addon._direction_for_rotation(stair_extra["tile_rotation"].get(cell, 0.0))
+            for ddx, ddy in ((-dy, dx), (dy, -dx)):
+                checked += 1
+                if ddx != 0:
+                    wall_x = (cx + 0.5 * ddx) * stair_wall_tile_size
+                    point = (wall_x, cy * stair_wall_tile_size)
+                else:
+                    wall_y = (cy + 0.5 * ddy) * stair_wall_tile_size
+                    point = (cx * stair_wall_tile_size, wall_y)
+                z0_cell = cz * stair_wall_level_height + stair_extra["z_offset"].get(cell, 0.0)
+                z_mid = z0_cell + scene.wfc_wall_height * 0.5
+                found = any(
+                    x0 - eps <= point[0] <= x1 + eps and y0 - eps <= point[1] <= y1 + eps
+                    and z0 - eps <= z_mid <= z1 + eps
+                    for (x0, x1, y0, y1, z0, z1) in wall_aabbs
+                )
+                if not found:
+                    missing.append((cell, (ddx, ddy)))
+        check(
+            "Walls: every Corridor Stairs cell has a real wall on both perpendicular sides, "
+            "even when the neighbor cell is walkable",
+            checked > 0 and len(missing) == 0,
+            f"checked={checked} missing={missing[:10]}{'...' if len(missing) > 10 else ''}",
+        )
+
+result = bpy.ops.object.generate_level_stairs()
+check("Stairs: operator FINISHED or CANCELLED", result in ({'FINISHED'}, {'CANCELLED'}), str(result))
+
+stair_objs = [o for o in bpy.data.objects if o.name.startswith(addon.STAIRS_OBJECT_NAME)]
+if stair_objs and walls_obj is not None:
+    # Regression check for a real bug found by hand: _read_stair_runs used
+    # to pick a stair run's "start" tile via an EXACT dict lookup keyed by
+    # the tile_rotation float -- but that value round-trips through a
+    # baked 32-bit float mesh attribute, so it can come back as e.g.
+    # 3.1414999961853027 instead of the exact 3.1415 constant. The lookup
+    # silently missed and fell back to the wrong default direction,
+    # picking the wrong end of the run as "start" -- which doesn't just
+    # look subtly off, it can plant the stair mesh overlapping a wall
+    # entirely. Checking for actual geometric overlap (not just "did it
+    # run without erroring") is what catches this class of bug; a
+    # vertex/face count alone would have passed every time.
+    #
+    # Corridor Stairs is 1 tile wide by design (no side walkway), so a
+    # tread's own perpendicular edges are SUPPOSED to sit flush against a
+    # wall there -- same as any ordinary floor tile touching its own
+    # adjacent wall, which always overlaps by exactly wall_thickness / 2
+    # (both are centered on/extend to the same shared tile-boundary line).
+    # That's not a bug, so the tolerance has to absorb it; only a room-
+    # based stairwell (a real walkway buffer on every side) should have
+    # zero wall contact at all, hence the tighter epsilon when
+    # Corridor Stairs is off.
+    eps = (scene.wfc_wall_thickness / 2.0 + 0.03) if scene.wfc_corridor_stairs else 0.02
+    wall_aabbs = per_box_aabbs(walls_obj, 8)
+    total_stair_boxes = 0
+    overlap_count = 0
+    for stair_obj in stair_objs:
+        for stair_box in per_box_aabbs(stair_obj, 8):
+            total_stair_boxes += 1
+            if any(aabb_overlap(stair_box, wall_box, eps=eps) for wall_box in wall_aabbs):
+                overlap_count += 1
+    check(
+        "Stairs: no stair tread box overlaps a wall box beyond expected flush contact",
+        overlap_count == 0,
+        f"{overlap_count}/{total_stair_boxes} tread boxes overlap a wall (eps={eps:.3f})",
+    )
+
+    if scene.wfc_stair_mesh_style == 'STAIRS':
+        # Regression check for the hidden-face cleanup extended to Stairs
+        # (DEVELOPMENT.md "Delete interior/hidden faces for faster
+        # rendering") -- every tread box's bottom is always coincident
+        # with the real floor under the run, same reasoning as Walls, so
+        # it's dropped: 5 faces per box (top + 4 sides) instead of 6.
+        stair_total_verts = sum(len(o.data.vertices) for o in stair_objs)
+        stair_total_polys = sum(len(o.data.polygons) for o in stair_objs)
+        stair_expected_boxes = stair_total_verts // 8
+        check(
+            "Stairs: no bottom face per tread box (removed as hidden/redundant geometry)",
+            stair_total_polys == stair_expected_boxes * 5,
+            f"boxes={stair_expected_boxes} expected_faces={stair_expected_boxes * 5} actual_faces={stair_total_polys}",
+        )
+
+    # Same cleanup, verified directly on _build_ramp_mesh (RAMP style isn't
+    # the active scenario setting here, so build one standalone rather than
+    # re-running the whole pipeline under a different setting just for
+    # this).
+    ramp_mesh = addon._build_ramp_mesh(
+        [(0, 0, 0, 0.0, 3)], tile_size=2.0, level_height=3.0, name="TestRampCleanup",
+    )
+    ramp_boxes = len(ramp_mesh.vertices) // 8
+    check(
+        "Ramps: no bottom face per segment box (removed as hidden/redundant geometry)",
+        ramp_boxes > 0 and len(ramp_mesh.polygons) == ramp_boxes * 5,
+        f"boxes={ramp_boxes} expected_faces={ramp_boxes * 5} actual_faces={len(ramp_mesh.polygons)}",
+    )
+    bpy.data.meshes.remove(ramp_mesh)
+
+result = bpy.ops.object.generate_level_doors()
+check("Doors: operator FINISHED or CANCELLED", result in ({'FINISHED'}, {'CANCELLED'}), str(result))
+
+doors_obj = bpy.data.objects.get(addon.DOORS_OBJECT_NAME)
+if doors_obj is not None and stair_objs:
+    # A door frame should never land on/beside the stairs themselves (see
+    # the fix in _build_door_mesh's stair_cells exclusion) -- checked the
+    # same way, by real geometric overlap against the actual stair mesh.
+    stair_aabbs = [box for o in stair_objs for box in per_box_aabbs(o, 8)]
+    door_boxes = per_box_aabbs(doors_obj, 8)
+    door_overlap_count = sum(
+        1 for door_box in door_boxes if any(aabb_overlap(door_box, sb) for sb in stair_aabbs)
+    )
+    check(
+        "Doors: no door frame box overlaps a stair tread box",
+        door_overlap_count == 0,
+        f"{door_overlap_count}/{len(door_boxes)} door boxes overlap a stair",
+    )
+
+result = bpy.ops.object.generate_level_props()
+check("Props: operator FINISHED or CANCELLED", result in ({'FINISHED'}, {'CANCELLED'}), str(result))
+
+def collection_reachable_from_scene(target):
+    """True if target is reachable by following .children from the
+    scene's real root (scene.collection) -- not just a DIRECT child of
+    it. Every object-generating operator in this addon links into
+    context.collection (the active collection, "Collection" by default
+    in a factory-startup file, itself a child of the true scene root),
+    not scene.collection directly -- so props' own tree living one level
+    deeper, under that same active collection, is consistent with how
+    every other step already works, not a bug."""
+    seen = set()
+    stack = [bpy.context.scene.collection]
+    while stack:
+        col = stack.pop()
+        if col == target:
+            return True
+        if col.name in seen:
+            continue
+        seen.add(col.name)
+        stack.extend(col.children)
+    return False
+
+
+props_collection = bpy.data.collections.get(addon.PROPS_COLLECTION_NAME)
+check("Props: top-level collection created", props_collection is not None)
+if props_collection is not None:
+    check(
+        "Props: collection reachable from the scene",
+        collection_reachable_from_scene(props_collection),
+    )
+
+lights = [o for o in bpy.data.objects if o.name.startswith(addon.PROPS_LIGHT_NAME_PREFIX)]
+check("Props: at least one light object created", len(lights) > 0, f"count={len(lights)}")
+if lights:
+    check("Props: light objects are real LIGHT-type objects", all(o.type == 'LIGHT' for o in lights))
+    check(
+        "Props: light data has expected color/energy",
+        all(o.data.energy == scene.wfc_torch_light_energy for o in lights),
+    )
+
+torch_obj = bpy.data.objects.get(addon.PROPS_TORCH_OBJECT_NAME)
+if torch_obj is not None:
+    check("Props: torch mesh has geometry", len(torch_obj.data.vertices) > 0)
+    check("Props: torch mesh has 2 material slots", len(torch_obj.data.materials) == 2)
+
+decoration_obj = bpy.data.objects.get(addon.PROPS_DECORATION_OBJECT_NAME)
+if decoration_obj is not None:
+    check("Props: decoration mesh has geometry", len(decoration_obj.data.vertices) > 0)
+    # Regression check for the hidden-face cleanup extended to Decoration
+    # (DEVELOPMENT.md "Delete interior/hidden faces for faster
+    # rendering") -- crates/barrels/cones all rest directly on the floor,
+    # so every one of their base/bottom caps is always hidden and was
+    # dropped. Checked by normal direction rather than an exact face
+    # count (three different primitive shapes mixed in one mesh, in
+    # random proportions per generation, makes an exact expected count
+    # impractical) -- every remaining face in this mesh is either a
+    # side wall or an upward-facing top/cap, so NO downward-facing face
+    # should remain at all.
+    downward_faces = [p for p in decoration_obj.data.polygons if p.normal.z < -0.5]
+    check(
+        "Props: decoration mesh has no downward-facing base faces left (removed as hidden/redundant geometry)",
+        len(downward_faces) == 0,
+        f"{len(downward_faces)} downward-facing faces remain",
+    )
+
+# Regression check: every baked-mesh builder (walls/doors/stairs/torches/
+# decoration) builds geometry directly via from_pydata(), which never
+# carries UV data -- same gap the Blueprint's GN graph had, fixed the same
+# way (_add_flat_uv_map). Solid Shading's "Texture" color mode needs a
+# real UV map to show anything on these at all.
+stairs_objs = [
+    o for o in bpy.data.objects
+    if o.name == addon.STAIRS_OBJECT_NAME or o.name.startswith(addon.STAIRS_OBJECT_NAME + "_")
+]
+uv_targets = [o for o in [walls_obj, doors_obj, torch_obj, decoration_obj] if o is not None] + stairs_objs
+uncovered = [
+    o.name for o in uv_targets
+    if len(o.data.uv_layers) == 0 or len(o.data.uv_layers[0].data) != len(o.data.loops)
+]
+check(
+    "Baked meshes (walls/doors/stairs/torches/decoration) have a UV map, every loop covered",
+    len(uv_targets) > 0 and len(uncovered) == 0,
+    f"checked={[o.name for o in uv_targets]} uncovered={uncovered}",
+)
+
+# Regression check: "viewport_color" Color Attribute (_add_viewport_color_
+# attribute), the attribute-based alternative to Solid Shading's "Material"
+# color mode -- reads a material's diffuse_color directly per-face and
+# needs no UV map or intact material_index chain, so it's immune to both
+# the UV gaps and the mesh.materials.clear() bug this addon hit before.
+color_uncovered = [
+    o.name for o in uv_targets
+    if "viewport_color" not in o.data.color_attributes
+    or len(o.data.color_attributes["viewport_color"].data) != len(o.data.loops)
+]
+check(
+    "Baked meshes (walls/doors/stairs/torches/decoration) have a viewport_color attribute, every loop covered",
+    len(uv_targets) > 0 and len(color_uncovered) == 0,
+    f"checked={[o.name for o in uv_targets]} uncovered={color_uncovered}",
+)
+check(
+    "Baked meshes: viewport_color is the active color attribute",
+    all(o.data.color_attributes.active_color_name == "viewport_color" for o in uv_targets),
+)
+
+# ==============================================================================
+# Cave floor-shape mode -- solver-only connectivity regression
+# ==============================================================================
+# Full-reachability BFS across a handful of seeds/sizes, run directly
+# against WFC_Level_Solver (no operator/GN pipeline involved -- this is a
+# pure grid-logic check, same as the stub_bpy version used during
+# development). Guards two real bugs found only by this kind of check
+# (neither showed up in any geometry/overlap check, since both produced
+# perfectly valid, non-crashing meshes -- just with an unreachable pocket
+# of floor): a random walk that got permanently trapped outside a
+# chamber's own margin near a map edge, and the entrance/exit corners
+# being unreachable from the cave network entirely (silently "fixed" by
+# _ensure_connectivity with one dead-straight corridor spanning most of
+# the empty map -- connectivity was never actually broken, but the result
+# didn't look remotely like a cave).
+import random as _random
+from collections import deque as _deque
+
+_cave_bad = 0
+_stair_cells_total = 0
+_stair_cells_exposed = 0
+for _trial in range(20):
+    _random.seed(90000 + _trial)
+    _w = _random.choice([20, 30, 40])
+    _l = _random.choice([20, 30, 40])
+    _h = _random.choice([1, 2, 3])
+    _solver = addon.WFC_Level_Solver(
+        width=_w, length=_l, height=_h, room_count=_random.randint(6, 16),
+        room_size_min=3, room_size_max=_random.choice([5, 8]),
+        room_shape='CAVE',
+        stairs_per_level=2, stair_room_width=3, stair_room_length=4,
+        corridor_stairs=_random.choice([True, False]),
+        sub_levels_per_floor=1, split_level_chance=0.0,
+        elevation_chance=0.0, elevation_range=0.0, max_ramp_slope_deg=30.0,
+    )
+    _solver.solve()
+    for _z in range(_solver.h):
+        _cells = {
+            (x, y) for x in range(_solver.w) for y in range(_solver.l)
+            if _solver.grid[x][y][_z] in addon.WALKABLE
+        }
+        if not _cells:
+            continue
+        _start = next(iter(_cells))
+        _seen = {_start}
+        _q = _deque([_start])
+        while _q:
+            _cx, _cy = _q.popleft()
+            for _dx, _dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                _n = (_cx + _dx, _cy + _dy)
+                if _n in _cells and _n not in _seen:
+                    _seen.add(_n)
+                    _q.append(_n)
+        if len(_seen) != len(_cells):
+            _cave_bad += 1
+    # A Corridor Stairs run (1-wide, no walkway by design) must never have
+    # open walkable floor on its PERPENDICULAR side -- that's the wall that's
+    # supposed to enclose it; only its travel-axis front/back are meant to
+    # be open (that's where a corridor legitimately attaches). Found via
+    # exactly this check during development: 48% of stair cells across a
+    # 40-trial stress run had an open side before _corridor_stair_fits +
+    # _would_expose_stair_side (see their docstrings) -- down to ~10%
+    # after, which is why this asserts "well below the old baseline," not
+    # zero: a rare residual (two independently-placed stairwells landing
+    # adjacent to each other, or the short unguarded _carve_corridor
+    # bridge that must win over leaving a real gap) is a known tradeoff,
+    # not a regression.
+    for x in range(_solver.w):
+        for y in range(_solver.l):
+            for z in range(_solver.h):
+                if _solver.grid[x][y][z] != addon.TILE_STAIR or not _solver.corridor_stairs:
+                    continue
+                _stair_cells_total += 1
+                _tdx, _tdy = addon.DIRECTION_FOR_ROTATION.get(_solver.rotations[x][y][z], (0, 1))
+                for _dx, _dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    _nx, _ny = x + _dx, y + _dy
+                    if (_nx, _ny) in ((x + _tdx, y + _tdy), (x - _tdx, y - _tdy)):
+                        continue  # travel-axis neighbor -- legitimate
+                    if _solver.in_bounds(_nx, _ny, z) and _solver.grid[_nx][_ny][z] in addon.WALKABLE:
+                        _stair_cells_exposed += 1
+                        break
+check("Cave: every floor fully connected across 20 seeded trials", _cave_bad == 0, f"{_cave_bad} disconnected floor-instances")
+_exposed_rate = _stair_cells_exposed / _stair_cells_total if _stair_cells_total else 0.0
+check(
+    "Cave: Corridor Stairs perpendicular-side exposure stays well below the pre-fix 48% baseline",
+    _exposed_rate < 0.25,
+    f"{_stair_cells_exposed}/{_stair_cells_total} stair cells ({_exposed_rate:.0%}) exposed",
+)
+
+# One real end-to-end pass through the actual pipeline, to catch anything
+# a pure solver-level check can't (GN evaluation, wall/door mesh building
+# on Cave's chamber/tunnel room_id pattern).
+scene.wfc_room_shape = 'CAVE'
+scene.wfc_width = 30
+scene.wfc_length = 30
+scene.wfc_height = 2
+result = bpy.ops.object.generate_game_blueprint()
+check("Cave: Blueprint regenerate FINISHED", result == {'FINISHED'}, str(result))
+blueprint_obj = bpy.data.objects.get(addon.BLUEPRINT_OBJECT_NAME)
+counts = evaluated_counts(blueprint_obj) if blueprint_obj else (0, 0)
+check("Cave: GN graph evaluates to non-empty geometry", counts[0] > 0, str(counts))
+result = bpy.ops.object.generate_level_walls()
+check("Cave: Walls FINISHED", result == {'FINISHED'}, str(result))
+result = bpy.ops.object.generate_level_stairs()
+check("Cave: Stairs FINISHED or CANCELLED", result in ({'FINISHED'}, {'CANCELLED'}), str(result))
+result = bpy.ops.object.generate_level_doors()
+check("Cave: Doors FINISHED or CANCELLED", result in ({'FINISHED'}, {'CANCELLED'}), str(result))
+
+# Restore the file's original scenario settings and regenerate -- the
+# Separate-by-Floor section below expects THAT blueprint (3 floors), not
+# the 2-floor Cave one just built above.
+scene.wfc_room_shape = 'MIXED'
+scene.wfc_width = 22
+scene.wfc_length = 22
+scene.wfc_height = 3
+result = bpy.ops.object.generate_game_blueprint()
+check("Post-Cave: scenario Blueprint regenerate FINISHED", result == {'FINISHED'}, str(result))
+blueprint_obj = bpy.data.objects.get(addon.BLUEPRINT_OBJECT_NAME)
+
+# ==============================================================================
+# Separate by Floor/Room -- runs directly on the Blueprint with its GN
+# modifier still live; no manual "Apply Modifier" step needed (that step
+# used to be required, and used to silently break per-room materials --
+# see the operator's own docstring and the check below).
+# ==============================================================================
+bpy.ops.object.select_all(action='DESELECT')
+bpy.context.view_layer.objects.active = blueprint_obj
+blueprint_obj.select_set(True)
+check("Separate by Floor/Room: source object still has its live GN modifier", any(m.type == 'NODES' for m in blueprint_obj.modifiers))
+
+# Regression check for a real bug found from user feedback: manually
+# applying the GN modifier first (the OLD, pre-0.13.1 documented
+# precondition -- see the operator's own docstring) collapses the material
+# slot list down to 1 (a real Blender Apply Modifier behavior), which used
+# to silently give split Room objects an empty (None) material slot for
+# any room whose real material_index wasn't in that collapsed list. Rather
+# than silently degrading, the operator now refuses to run at all when its
+# GN modifier isn't present live. Tested on a throwaway duplicate so it
+# doesn't disturb the real blueprint_obj used below.
+dup_obj = blueprint_obj.copy()
+dup_obj.data = blueprint_obj.data.copy()
+bpy.context.collection.objects.link(dup_obj)
+bpy.ops.object.select_all(action='DESELECT')
+bpy.context.view_layer.objects.active = dup_obj
+dup_obj.select_set(True)
+bpy.ops.object.convert(target='MESH')
+check(
+    "Separate by Floor/Room: manual pre-apply test object no longer has a live GN modifier",
+    not any(m.type == 'NODES' for m in dup_obj.modifiers),
+)
+try:
+    result = bpy.ops.object.separate_level_by_floor()
+except RuntimeError as exc:
+    # bpy.ops.* raises RuntimeError from Python when the operator reports
+    # an 'ERROR'-level message and cancels, rather than just returning
+    # {'CANCELLED'} the way a plain WARNING/INFO cancellation would.
+    result = {'CANCELLED'}
+    check(
+        "Separate by Floor/Room: the refusal's error message explains why (modifier missing / already applied)",
+        "Geometry Nodes modifier" in str(exc),
+        str(exc),
+    )
+check(
+    "Separate by Floor/Room: refuses to run on an object whose GN modifier was already applied, instead of silently producing empty material slots",
+    result == {'CANCELLED'},
+    str(result),
+)
+bpy.data.objects.remove(dup_obj, do_unlink=True)
+bpy.ops.object.select_all(action='DESELECT')
+bpy.context.view_layer.objects.active = blueprint_obj
+blueprint_obj.select_set(True)
+
+result = bpy.ops.object.separate_level_by_floor()
+check("Separate by Floor/Room: operator FINISHED", result == {'FINISHED'}, str(result))
+
+split_objs = [o for o in bpy.data.objects if o.name.startswith(addon.BLUEPRINT_OBJECT_NAME + "_Floor")]
+room_objs = [o for o in split_objs if "_Room" in o.name]
+corridor_objs = [o for o in split_objs if o.name.endswith("_Corridors")]
+ceiling_objs = [o for o in split_objs if o.name.endswith("_Ceilings")]
+check(
+    "Separate by Floor/Room: produced per-room and per-floor-corridor objects",
+    len(room_objs) > 0 and len(corridor_objs) > 0,
+    f"rooms={len(room_objs)} corridors={len(corridor_objs)}",
+)
+# Regression check for the ceiling-fragmentation bug found right after the
+# reroute-to-Corridors fix above: this scenario has Add Ceiling on, so every
+# room should have contributed a ceiling face into a dedicated per-floor
+# Ceilings object instead of making the room itself look "fragmented".
+check(
+    "Separate by Floor/Room: Add Ceiling is on in this scenario, so Ceilings objects were produced",
+    len(ceiling_objs) > 0,
+    f"ceiling_objs={len(ceiling_objs)}",
+)
+check(
+    "Separate by Floor/Room: rooms weren't swept into Corridors just because Add Ceiling made them look fragmented",
+    len(room_objs) >= scene.wfc_height,
+    f"room_objs={len(room_objs)} across {scene.wfc_height} floors",
+)
+
+floor_indices_seen = {int(o.name.split("_Floor")[1].split("_")[0]) for o in split_objs}
+check(
+    "Separate by Floor/Room: every logical floor represented",
+    floor_indices_seen == set(range(scene.wfc_height)),
+    f"floors seen={sorted(floor_indices_seen)} expected 0..{scene.wfc_height - 1}",
+)
+
+# Regression check: _mesh_from_faces() only copies the material(s) a split
+# object's own faces actually use, in a freshly compacted slot list (not
+# the WHOLE source material list, which every earlier version copied in
+# full -- a Room object only ever needs one room material, but used to
+# inherit every OTHER room's color too, plus every floor-level/entrance/
+# exit slot, commonly 30-50+ entries for a real level). Confirms every
+# split object's slot count matches the number of distinct materials its
+# own faces actually reference -- no leftover unused slots.
+slot_count_mismatches = [
+    o.name for o in room_objs + corridor_objs + ceiling_objs
+    if len(o.data.materials) != len({p.material_index for p in o.data.polygons})
+]
+check(
+    "Separate by Floor/Room: split objects' material slot list is compacted to only what their faces use",
+    len(slot_count_mismatches) == 0,
+    f"mismatched objects: {slot_count_mismatches}",
+)
+sample_room = room_objs[0]
+sample_poly = sample_room.data.polygons[0]
+sample_mat = sample_room.data.materials[sample_poly.material_index]
+check(
+    "Separate by Floor/Room: a room object's face resolves to a real room-pool material specifically, not a floor-level default",
+    sample_mat is not None and sample_mat.name.startswith("LA_Room_"),
+    f"material_index={sample_poly.material_index} resolves to {sample_mat.name if sample_mat else None}",
+)
+
+# Regression check for a real bug found from user feedback: "we get
+# Procedural_Level_Blueprint_Floor2_Room04 but material field is empty on
+# this object, material should be LA_Room_0004" -- because the FULL source
+# material list used to be copied onto every split object, Blender's
+# Properties > Material tab's "Material" field (always the OBJECT's active
+# slot, index 0 by default, never touched by this operator) showed
+# whatever slot 0 of that full list happened to be (a floor-level color)
+# instead of the room's own material, even though the room's faces
+# rendered with the correct color. With the slot list compacted to just
+# what a room's own faces use, its default active slot is that room's own
+# material.
+check(
+    "Separate by Floor/Room: a room object's default active material slot is its own real room material, not a leftover default",
+    all(o.active_material is not None and o.active_material.name.startswith("LA_Room_") for o in room_objs),
+    f"active materials: {[(o.name, o.active_material.name if o.active_material else None) for o in room_objs]}",
+)
+
+# Regression check for a real bug found from user feedback ("floors are
+# still only distinct when in random"): mesh.materials.clear() -- used just
+# above to rebuild the evaluated mesh's material slot list -- silently
+# resets EVERY polygon's material_index to 0 as a side effect, before any
+# per-room splitting even runs. Re-appending the same materials afterward
+# does not restore it; that per-face data is already gone. The check above
+# alone couldn't catch this: room_objs[0] happening to read material_index
+# 0 (a floor-level material) is indistinguishable from a genuinely
+# floor-colored room UNLESS a second, different room is also checked and
+# found to resolve to the exact same material -- which is what actually
+# happened (every room pointed at slot 0 uniformly) until this was fixed
+# by saving material_index before clearing the slot list and restoring it
+# after.
+room_face_materials = {o.name: o.data.materials[o.data.polygons[0].material_index].name for o in room_objs}
+check(
+    "Separate by Floor/Room: different rooms actually resolve to different materials, not all the same one",
+    len(set(room_face_materials.values())) > 1,
+    f"per-room materials: {room_face_materials}",
+)
+
+# Regression check: _mesh_from_faces() didn't carry the UV map over at all
+# (from_pydata never does), so a split object had no UV map -- Solid
+# Shading's "Texture" color mode showed nothing useful on it even though
+# the underlying material/color data was completely correct.
+check(
+    "Separate by Floor/Room: split objects kept their UV map, every loop covered",
+    all(
+        len(o.data.uv_layers) > 0 and len(o.data.uv_layers[0].data) == len(o.data.loops)
+        for o in room_objs + corridor_objs
+    ),
+    f"uv_layers per object: {[(o.name, list(o.data.uv_layers.keys())) for o in room_objs + corridor_objs if not o.data.uv_layers]}",
+)
+
+# Attribute-based alternative to the material-slot coloring above: a
+# "viewport_color" Color Attribute (_add_viewport_color_attribute), read
+# directly by Solid Shading's "Attribute" color mode with no dependency on
+# UV data or material_index at all. Same two-room-comparison shape as the
+# material check above -- checking only one room's color can't distinguish
+# "genuinely working" from "every room happens to read the same color".
+color_uncovered_split = [
+    o.name for o in room_objs + corridor_objs
+    if "viewport_color" not in o.data.color_attributes
+    or len(o.data.color_attributes["viewport_color"].data) != len(o.data.loops)
+]
+check(
+    "Separate by Floor/Room: split objects have a viewport_color attribute, every loop covered",
+    len(color_uncovered_split) == 0,
+    f"uncovered={color_uncovered_split}",
+)
+check(
+    "Separate by Floor/Room: split objects' viewport_color is the active color attribute",
+    all(o.data.color_attributes.active_color_name == "viewport_color" for o in room_objs + corridor_objs),
+)
+room_face_colors = {
+    o.name: tuple(round(c, 3) for c in o.data.color_attributes["viewport_color"].data[0].color)
+    for o in room_objs
+}
+check(
+    "Separate by Floor/Room: different rooms' viewport_color attribute actually differs, not all the same one",
+    len(set(room_face_colors.values())) > 1,
+    f"per-room viewport_color: {room_face_colors}",
+)
+
+# Regression check for a second real bug found right after the first fix
+# above: a room-based stairwell's entry/exit landing tiles share one
+# room_id but sit on opposite ends of the stair itself (a separate tile_id,
+# not floor), so they share no vertex with each other -- without the
+# reroute-to-Corridors logic, that room_id would become one Room object
+# made of two disconnected single-tile islands. Confirms no Room object
+# here is ever fragmented, whatever caused it.
+fragmented_rooms = [
+    o for o in room_objs
+    if len(addon._face_connected_components(o.data, list(range(len(o.data.polygons))))) > 1
+]
+check(
+    "Separate by Floor/Room: no Room object is fragmented into disconnected pieces",
+    len(fragmented_rooms) == 0,
+    f"fragmented: {[o.name for o in fragmented_rooms]}",
+)
+
+split_top_collection = bpy.data.collections.get(addon.BLUEPRINT_SPLIT_COLLECTION_NAME)
+check("Separate by Floor/Room: split collection tree created", split_top_collection is not None)
+if split_top_collection:
+    check(
+        "Separate by Floor/Room: one sub-collection per floor",
+        len(split_top_collection.children) == scene.wfc_height,
+        f"count={len(split_top_collection.children)}",
+    )
+    for floor_collection in split_top_collection.children:
+        has_rooms = any(c.name.endswith("- Rooms") for c in floor_collection.children)
+        has_corridors = any(c.name.endswith("- Corridors") for c in floor_collection.children)
+        has_ceilings = any(c.name.endswith("- Ceilings") for c in floor_collection.children)
+        check(
+            f"Separate by Floor/Room: {floor_collection.name} has Rooms + Corridors + Ceilings sub-collections",
+            has_rooms and has_corridors and has_ceilings,
+        )
+
+# Regression check for a real crash found from user feedback, running the
+# now-recommended direct workflow (regenerate, then Separate by Floor/Room
+# with no manual Apply Modifier): Blender moves the outliner's ACTIVE
+# collection to the last one an operator run created/linked into -- so
+# after one Separate by Floor/Room run, re-running it with the active
+# collection still sitting inside last time's own nested "Floor 0 - Rooms"
+# tried to re-link the (found-by-name, from the first run) top-level
+# "Procedural Level Blueprint (Split)" collection as a child of its own
+# descendant. Blender raises RuntimeError for that. Reproduces it exactly:
+# point the active collection at a real leftover sub-collection from the
+# split above, regenerate the blueprint fresh, and run the operator again.
+def _find_layer_collection(layer_collection, name):
+    if layer_collection.collection.name == name:
+        return layer_collection
+    for child in layer_collection.children:
+        found = _find_layer_collection(child, name)
+        if found is not None:
+            return found
+    return None
+
+if split_top_collection is not None:
+    nested_name = next(
+        (c.name for fc in split_top_collection.children for c in fc.children if c.name.endswith("- Rooms")),
+        None,
+    )
+    if nested_name is not None:
+        target_layer_collection = _find_layer_collection(
+            bpy.context.view_layer.layer_collection, nested_name
+        )
+        if target_layer_collection is not None:
+            bpy.context.view_layer.active_layer_collection = target_layer_collection
+            result = bpy.ops.object.generate_game_blueprint()
+            check("Cyclic-collection repro: Blueprint regenerate FINISHED", result == {'FINISHED'}, str(result))
+            blueprint_obj = bpy.data.objects.get(addon.BLUEPRINT_OBJECT_NAME)
+            bpy.ops.object.select_all(action='DESELECT')
+            bpy.context.view_layer.objects.active = blueprint_obj
+            blueprint_obj.select_set(True)
+            try:
+                result = bpy.ops.object.separate_level_by_floor()
+                crash = None
+            except RuntimeError as exc:
+                result = {'CANCELLED'}
+                crash = exc
+            check(
+                "Separate by Floor/Room: running it again with the active collection left inside "
+                "a previous run's nested tree doesn't crash",
+                crash is None and result == {'FINISHED'},
+                f"result={result} crash={crash}",
+            )
+            # Restore a normal active collection for anything after this.
+            bpy.context.view_layer.active_layer_collection = bpy.context.view_layer.layer_collection
+
+# ==============================================================================
+print()
+if failures:
+    print(f"{len(failures)} CHECK(S) FAILED:")
+    for name in failures:
+        print(f"  - {name}")
+    sys.exit(1)
+else:
+    print("ALL CHECKS PASSED")
+    sys.exit(0)
