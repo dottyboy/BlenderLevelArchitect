@@ -58,9 +58,17 @@ cp "$SRC_README" "$DIST_DIR/README.md"
 # own local copy directly in dist/ (below), so its bare relative reference
 # is already correct as-is for this file's new location.
 # Only the link TARGETS need rewriting -- "(docs/..." for a markdown link
-# href, `src="docs/...` for the <video> embed -- not the "[docs/..." visible
-# link text, which should keep reading as the real repo-root-relative path.
-sed -i -e 's#(docs/#(../docs/#g' -e 's#src="docs/#src="../docs/#g' "$DIST_DIR/README.md"
+# href, `src="docs/...` for the <video> embed, "](LICENSE)" for the license
+# badge -- not the "[docs/..." visible link text (should keep reading as the
+# real repo-root-relative path) or the backtick-quoted
+# `game_level_architect/LICENSE` prose further down (describes where LICENSE
+# lives INSIDE the installed package, true regardless of where this README
+# itself is being viewed from -- not a link, and not this file's own root).
+sed -i \
+    -e 's#(docs/#(../docs/#g' \
+    -e 's#src="docs/#src="../docs/#g' \
+    -e 's#\](LICENSE)#](../LICENSE)#g' \
+    "$DIST_DIR/README.md"
 cp "$SRC_CHANGELOG" "$DIST_DIR/CHANGELOG.md"
 cp "$SRC_SCREENSHOT" "$DIST_DIR/screenshot.png"
 

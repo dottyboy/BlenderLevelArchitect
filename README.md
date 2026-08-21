@@ -1,5 +1,9 @@
 # Game Level Architect
 
+[![License: GPL v3](https://img.shields.io/github/license/dottyboy/BlenderLevelArchitect)](LICENSE)
+[![Blender 4.2+](https://img.shields.io/badge/blender-4.2%2B-orange)](https://www.blender.org/)
+[![Latest release](https://img.shields.io/github/v/release/dottyboy/BlenderLevelArchitect)](https://github.com/dottyboy/BlenderLevelArchitect/releases/latest)
+
 Procedural game-level generator for Blender: a Wave-Function-Collapse-style room/corridor/stair
 layout solver paired with automatic mesh generation (Geometry Nodes for floors, baked Python mesh
 for walls and stairs).
