@@ -4,7 +4,7 @@ Internal dev-facing doc: what's built, what's known-broken, what's next. Not for
 (see `dist/README.md` for that). Source of truth for the addon's actual behavior is always
 `levelArchitect_v2.py` — this file can drift out of date; the code can't.
 
-Current version: **0.18.0** (see `bl_info` in the source file).
+Current version: **0.19.0** (see `bl_info` in the source file).
 
 ---
 
