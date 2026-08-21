@@ -17,7 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BLENDER="${1:-${BLENDER_BIN:-blender}}"
 
 # Keep in sync with len(SCENARIOS) in tests/generate_test_blends.py.
-NUM_SCENARIOS=24
+NUM_SCENARIOS=30
 
 if ! command -v "$BLENDER" >/dev/null 2>&1 && [ ! -x "$BLENDER" ]; then
     echo "ERROR: Blender binary not found: $BLENDER" >&2

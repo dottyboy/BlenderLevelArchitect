@@ -16,6 +16,7 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+import json
 import math
 import os
 import random
@@ -31,7 +32,7 @@ from bpy_extras.io_utils import ExportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 22, 0),
+    "version": (0, 23, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -56,7 +57,9 @@ WALKABLE = {TILE_FLOOR, TILE_STAIR, TILE_ENTRANCE, TILE_EXIT}
 # Object names, shared between the blueprint operator and the wall operator
 # (the latter reads the former's mesh data directly).
 BLUEPRINT_OBJECT_NAME = "Procedural_Level_Blueprint"
+ROUND_FLOOR_OBJECT_NAME = "Procedural_Level_RoundFloors"
 WALLS_OBJECT_NAME = "Procedural_Level_Walls"
+WALLS_ROUND_OBJECT_NAME = "Procedural_Level_RoundWalls"
 STAIRS_OBJECT_NAME = "Procedural_Level_Stairs"
 DOORS_OBJECT_NAME = "Procedural_Level_Doors"
 PROPS_TORCH_OBJECT_NAME = "Procedural_Level_Torches"
@@ -360,6 +363,9 @@ class WFC_Level_Solver:
         # solid slab.
         self.floor_openings = set()
         self.rooms = []  # each: {'x','y','z','w','l','cx','cy'}
+        self.room_shapes = {}  # room_index -> 'RECT'/'ROUND', what _carve_room actually carved
+        self.room_cells = {}  # room_index -> [(x, y), ...] actually-carved cells (RECT: the
+                               # whole box; ROUND: only cells inside the inscribed ellipse)
         # Rooms grouped by z, built once at the end of _scatter_rooms() --
         # every later pass needs "rooms on level z" repeatedly, so this
         # trades one grouping pass for the O(h) re-filter-of-self.rooms every
@@ -509,9 +515,12 @@ class WFC_Level_Solver:
                 if ((xi - cx) / rx) ** 2 + ((yi - cy) / ry) ** 2 <= 0.8
             ]
             cells = self._largest_connected_group(cells)
+            self.room_shapes[room_index] = 'ROUND'
         else:
             cells = [(xi, yi) for xi in range(x, x + rw) for yi in range(y, y + rl)]
+            self.room_shapes[room_index] = 'RECT'
 
+        self.room_cells[room_index] = cells
         for xi, yi in cells:
             self.grid[xi][yi][z] = TILE_FLOOR
             self.room_id[xi][yi][z] = room_index
@@ -3052,6 +3061,51 @@ class OBJECT_OT_GenerateGameBlueprint(bpy.types.Operator):
             entrance_material_index=entrance_material_index, exit_material_index=exit_material_index,
         )
 
+        # Round rooms get a real merged n-gon floor disc, drawn as a
+        # separate cosmetic overlay that fully covers the Blueprint's own
+        # (unmodified) per-tile floor cubes rather than touching that point
+        # cloud/GN graph at all -- see _build_round_room_floor_mesh's own
+        # docstring for why. room_materials is the SAME per-room material
+        # list the Blueprint's own GN material slots above just used --
+        # reused directly rather than calling create_simple_room_materials/
+        # get_or_create_style_room_materials a second time, which would
+        # consume a fresh random.shuffle and desync Simple mode's room
+        # colors from what the Blueprint itself already committed to.
+        if ROUND_FLOOR_OBJECT_NAME in bpy.data.objects:
+            old_round_obj = bpy.data.objects[ROUND_FLOOR_OBJECT_NAME]
+            old_round_mesh = old_round_obj.data
+            bpy.data.objects.remove(old_round_obj, do_unlink=True)
+            if old_round_mesh and old_round_mesh.users == 0:
+                bpy.data.meshes.remove(old_round_mesh)
+
+        round_verts, round_faces, round_mat_indices, round_room_ids = _build_round_room_floor_mesh(
+            solver, scene.wfc_tile_size, fine_level_height, scene.wfc_room_shape_sides,
+        )
+        if round_faces:
+            round_mesh = bpy.data.meshes.new(ROUND_FLOOR_OBJECT_NAME + "_Mesh")
+            round_mesh.from_pydata(round_verts, [], round_faces)
+            round_mesh.update()
+            for rid in round_room_ids:
+                round_mesh.materials.append(room_materials[rid])
+            for poly, mat_idx in zip(round_mesh.polygons, round_mat_indices):
+                poly.material_index = mat_idx
+            round_obj = bpy.data.objects.new(ROUND_FLOOR_OBJECT_NAME, round_mesh)
+            context.collection.objects.link(round_obj)
+
+        # Room bounding-box + shape metadata for later steps (Walls) that
+        # deliberately don't re-run the solver -- see
+        # OBJECT_OT_GenerateLevelWalls, which reads this back to build a
+        # real perimeter ring for Round rooms instead of blocky per-cell
+        # boxes. Same "stash generation metadata as a string ID property"
+        # precedent wfc_debug_params already uses.
+        level_obj["gla_room_meta"] = json.dumps([
+            {
+                'x': room['x'], 'y': room['y'], 'w': room['w'], 'l': room['l'], 'z': room['z'],
+                'shape': solver.room_shapes.get(i, 'RECT'),
+            }
+            for i, room in enumerate(solver.rooms)
+        ])
+
         self.report(
             {'INFO'},
             f"Blueprint generated: {len(vertices)} tiles across {room_count} rooms. Seed {scene.wfc_seed}."
@@ -3513,8 +3567,9 @@ class OBJECT_OT_FreezeForTextureWork(bpy.types.Operator):
         scene = context.scene
 
         base_names = (
-            BLUEPRINT_OBJECT_NAME, WALLS_OBJECT_NAME, STAIRS_OBJECT_NAME, DOORS_OBJECT_NAME,
-            PROPS_TORCH_OBJECT_NAME, PROPS_DECORATION_OBJECT_NAME, PROPS_LIGHT_NAME_PREFIX,
+            BLUEPRINT_OBJECT_NAME, ROUND_FLOOR_OBJECT_NAME, WALLS_OBJECT_NAME, WALLS_ROUND_OBJECT_NAME,
+            STAIRS_OBJECT_NAME, DOORS_OBJECT_NAME, PROPS_TORCH_OBJECT_NAME, PROPS_DECORATION_OBJECT_NAME,
+            PROPS_LIGHT_NAME_PREFIX,
         )
         targets = []
         for base_name in base_names:
@@ -3635,8 +3690,8 @@ class OBJECT_OT_ExportLevelGLTF(bpy.types.Operator, ExportHelper):
     def execute(self, context):
         scene = context.scene
         base_names = (
-            BLUEPRINT_OBJECT_NAME, WALLS_OBJECT_NAME, STAIRS_OBJECT_NAME, DOORS_OBJECT_NAME,
-            PROPS_TORCH_OBJECT_NAME, PROPS_DECORATION_OBJECT_NAME,
+            BLUEPRINT_OBJECT_NAME, ROUND_FLOOR_OBJECT_NAME, WALLS_OBJECT_NAME, WALLS_ROUND_OBJECT_NAME,
+            STAIRS_OBJECT_NAME, DOORS_OBJECT_NAME, PROPS_TORCH_OBJECT_NAME, PROPS_DECORATION_OBJECT_NAME,
         )
         targets = _gltf_export_targets(base_names, scene.wfc_export_include_lights)
 
@@ -3714,7 +3769,9 @@ class OBJECT_OT_ExportLevelCollisionGLTF(bpy.types.Operator, ExportHelper):
         return {'RUNNING_MODAL'}
 
     def execute(self, context):
-        base_names = (BLUEPRINT_OBJECT_NAME, WALLS_OBJECT_NAME, STAIRS_OBJECT_NAME)
+        base_names = (
+            BLUEPRINT_OBJECT_NAME, WALLS_OBJECT_NAME, WALLS_ROUND_OBJECT_NAME, STAIRS_OBJECT_NAME,
+        )
         targets = _gltf_export_targets(base_names, include_lights=False)
 
         if not targets:
@@ -3869,9 +3926,168 @@ def _add_corner_rounding_modifier(obj, radius):
     return mod
 
 
+def _build_round_room_floor_mesh(solver, tile_size, fine_level_height, room_shape_sides, epsilon=0.003):
+    """A single flat n-gon face per Round room, sitting a hair above the
+    existing per-tile floor cubes the Blueprint's own Geometry Nodes
+    pipeline still instances underneath -- deliberately left untouched
+    (see DEVELOPMENT.md's note on why touching the Blueprint's own point
+    cloud/GN graph is the riskier path; every OTHER step -- Doors,
+    Torches, Decoration, floor-by-story separation -- still reads that
+    point cloud as its ground truth, unmodified). Purely a visual
+    topper, not new collision geometry: one face, no sides/bottom.
+
+    The n-gon's radius (rx=rw/2, ry=rl/2, the room's FULL bounding-box
+    ellipse) is always larger than the <=0.8-threshold ellipse
+    _carve_room actually carves cells with, so it fully covers every
+    carved tile underneath with no visible gap at the edge -- the same
+    relationship BrickSpitter's own disc already relies on.
+
+    Returns (verts, faces, material_indices, room_ids_in_order) --
+    room_ids_in_order[k] is which solver.rooms index produced the k-th
+    face/material slot, so the caller can build a matching per-face
+    material list (room_materials[room_ids_in_order[k]])."""
+    verts, faces, material_indices = [], [], []
+    room_ids_in_order = []
+    for room_id, room in enumerate(solver.rooms):
+        if solver.room_shapes.get(room_id) != 'ROUND':
+            continue
+        cells = solver.room_cells.get(room_id)
+        if not cells:
+            continue
+        # The room's own carved cell nearest its true centroid -- not the
+        # naive box center, which isn't guaranteed to have survived
+        # _largest_connected_group's cleanup -- so the z_offset lookup
+        # below always reads a cell that's actually part of this room.
+        cx_cell = sum(c[0] for c in cells) / len(cells)
+        cy_cell = sum(c[1] for c in cells) / len(cells)
+        nearest = min(cells, key=lambda c: (c[0] - cx_cell) ** 2 + (c[1] - cy_cell) ** 2)
+        z_offset = solver.cell_z_offset[nearest[0]][nearest[1]][room['z']]
+        world_z = room['z'] * fine_level_height + z_offset + epsilon
+
+        x, y, rw, rl = room['x'], room['y'], room['w'], room['l']
+        cx = (x + rw / 2.0) * tile_size
+        cy = (y + rl / 2.0) * tile_size
+        rx = (rw / 2.0) * tile_size
+        ry = (rl / 2.0) * tile_size
+
+        i = len(verts)
+        for s in range(room_shape_sides):
+            angle = 2.0 * math.pi * s / room_shape_sides
+            verts.append((cx + rx * math.cos(angle), cy + ry * math.sin(angle), world_z))
+        faces.append(tuple(i + s for s in range(room_shape_sides)))
+        material_indices.append(len(room_ids_in_order))
+        room_ids_in_order.append(room_id)
+    return verts, faces, material_indices, room_ids_in_order
+
+
+def _room_shape_sides_wall_positions(cx, cy, rx, ry, sides):
+    return [
+        (cx + rx * math.cos(2.0 * math.pi * s / sides), cy + ry * math.sin(2.0 * math.pi * s / sides))
+        for s in range(sides)
+    ]
+
+
+def _build_round_room_walls_mesh(
+    room_meta, room_id_grid, walkable_cells, tile_size, fine_level_height, wall_height,
+    wall_thickness, room_shape_sides, z_offsets, name,
+):
+    """A real perimeter ring for every Round room, hugging its actual
+    n-gon rim -- one thin oriented wall segment per polygon edge, ported
+    from BrickSpitter's own add_wall_segment/_build_round_room_walls_mesh
+    (brickspitter.py). Rect rooms don't need this: their existing
+    per-cell wall from _build_wall_mesh already traces their (already
+    straight) boundary exactly.
+
+    Skips whichever ring edge(s) sit where a corridor/doorway actually
+    connects -- every one of this room's own cells that borders a
+    walkable cell belonging to a DIFFERENT room (or no room at all) is a
+    real doorway; its angle around the room's own ellipse (same
+    parametrization the ring's vertices use) picks which edge to open,
+    so the gap lines up with where the corridor actually meets the
+    floor instead of sealing every room shut.
+
+    room_meta: [{'x','y','w','l','z','shape'}, ...] as baked onto the
+    Blueprint object (see OBJECT_OT_GenerateGameBlueprint). room_id_grid:
+    {(x,y,z): room_id} read back from the Blueprint's own room_id point
+    attribute. walkable_cells/z_offsets: same shape _build_wall_mesh
+    itself already takes."""
+    walkable = set(walkable_cells)
+    half_t = wall_thickness / 2.0
+    verts, faces, material_indices = [], [], []
+
+    def add_wall_segment(x0, y0, x1, y1, z0, z1):
+        dx, dy = x1 - x0, y1 - y0
+        length = math.hypot(dx, dy)
+        if length < 1e-9:
+            return
+        nx, ny = -dy / length * half_t, dx / length * half_t
+        corners = ((x0 - nx, y0 - ny), (x1 - nx, y1 - ny), (x1 + nx, y1 + ny), (x0 + nx, y0 + ny))
+        i = len(verts)
+        verts.extend((cx, cy, z0) for cx, cy in corners)
+        verts.extend((cx, cy, z1) for cx, cy in corners)
+        faces.append((i + 4, i + 5, i + 6, i + 7))  # top
+        faces.append((i + 5, i + 4, i + 0, i + 1))
+        faces.append((i + 6, i + 5, i + 1, i + 2))
+        faces.append((i + 7, i + 6, i + 2, i + 3))
+        faces.append((i + 4, i + 7, i + 3, i + 0))
+        material_indices.extend([0] * 5)
+
+    for room_id, room in enumerate(room_meta):
+        if room['shape'] != 'ROUND':
+            continue
+        x, y, rw, rl, z = room['x'], room['y'], room['w'], room['l'], room['z']
+        cx, cy = (x + rw / 2.0) * tile_size, (y + rl / 2.0) * tile_size
+        rx, ry = (rw / 2.0) * tile_size, (rl / 2.0) * tile_size
+
+        room_cells_here = [c for c, rid in room_id_grid.items() if rid == room_id and c[2] == z]
+        if not room_cells_here:
+            continue
+        # The room's own carved cell nearest its true (grid-space) centroid
+        # -- not the naive box center, which isn't guaranteed to have
+        # survived _largest_connected_group's cleanup -- so the z_offset
+        # lookup below always reads a cell that's actually part of this room.
+        centroid_x = sum(c[0] for c in room_cells_here) / len(room_cells_here)
+        centroid_y = sum(c[1] for c in room_cells_here) / len(room_cells_here)
+        nearest_cell = min(
+            room_cells_here, key=lambda c: (c[0] - centroid_x) ** 2 + (c[1] - centroid_y) ** 2
+        )
+
+        open_edges = set()
+        for (cellx, celly, cellz) in room_cells_here:
+            exposed = False
+            for dx, dy in HORIZONTAL_NEIGHBORS:
+                neighbor = (cellx + dx, celly + dy, cellz)
+                if neighbor in walkable and room_id_grid.get(neighbor) != room_id:
+                    exposed = True
+                    break
+            if not exposed:
+                continue
+            px = (cellx + 0.5) * tile_size
+            py = (celly + 0.5) * tile_size
+            angle = math.atan2((py - cy) / ry, (px - cx) / rx) % (2.0 * math.pi)
+            open_edges.add(int(angle / (2.0 * math.pi / room_shape_sides)) % room_shape_sides)
+
+        z0 = z * fine_level_height + z_offsets.get(nearest_cell, 0.0)
+        z1 = z0 + wall_height
+        positions = _room_shape_sides_wall_positions(cx, cy, rx, ry, room_shape_sides)
+        for s in range(room_shape_sides):
+            if s in open_edges:
+                continue
+            x0, y0 = positions[s]
+            x1, y1 = positions[(s + 1) % room_shape_sides]
+            add_wall_segment(x0, y0, x1, y1, z0, z1)
+
+    mesh_data = bpy.data.meshes.new(name + "_Mesh")
+    mesh_data.from_pydata(verts, [], faces)
+    mesh_data.update()
+    for poly, mat_idx in zip(mesh_data.polygons, material_indices):
+        poly.material_index = mat_idx
+    return mesh_data
+
+
 def _build_wall_mesh(
     walkable_cells, tile_size, level_height, wall_height, wall_thickness, cap_top, name,
-    organic_amount=0.0, z_offsets=None, forced_wall_edges=None, uv_tile_size=1.0,
+    organic_amount=0.0, z_offsets=None, forced_wall_edges=None, uv_tile_size=1.0, skip_cells=None,
 ):
     """Fully-baked wall geometry, computed in plain Python rather than a
     Geometry Nodes region-extrude (whose exact Selection/mode defaults proved
@@ -3914,6 +4130,13 @@ def _build_wall_mesh(
     populating this for actual Corridor Stairs cells (Generate Level Walls
     only does when wfc_corridor_stairs is on), never room-based ones.
 
+    skip_cells (optional set of (x,y,z)) -- cells that still count as
+    walkable for is_exposed's neighbor test (so a Rect room right next to
+    a Round one still gets a correct boundary wall against it), but never
+    get their own box emitted. Used for Round rooms, which get a real
+    perimeter ring instead (see _build_round_room_walls_mesh) -- their
+    per-cell blocky wall would otherwise still render underneath it.
+
     Polycount: with Organic Irregularity off, every box along a straight
     run has identical thickness/height, so adjacent per-tile boxes are
     already perfectly flush/coplanar at their shared seam -- merging them
@@ -3929,6 +4152,7 @@ def _build_wall_mesh(
     half_thick = wall_thickness / 2.0
     z_offsets = z_offsets or {}
     forced_wall_edges = forced_wall_edges or set()
+    skip_cells = skip_cells or set()
 
     def is_exposed(x, y, z, ddx, ddy):
         return (x + ddx, y + ddy, z) not in walkable or ((x, y, z), (ddx, ddy)) in forced_wall_edges
@@ -3969,6 +4193,8 @@ def _build_wall_mesh(
 
     if organic_amount > 0:
         for x, y, z in walkable_cells:
+            if (x, y, z) in skip_cells:
+                continue
             z0 = z * level_height + z_offsets.get((x, y, z), 0.0)
             left = (x - 0.5) * tile_size
             right = (x + 0.5) * tile_size
@@ -3997,6 +4223,8 @@ def _build_wall_mesh(
         for dx in (-1, 1):
             lines = {}  # (x, z) -> sorted [(y, z_offset), ...]
             for (x, y, z) in walkable_cells:
+                if (x, y, z) in skip_cells:
+                    continue
                 if is_exposed(x, y, z, dx, 0):
                     lines.setdefault((x, z), []).append((y, z_offsets.get((x, y, z), 0.0)))
             for (x, z), items in lines.items():
@@ -4019,6 +4247,8 @@ def _build_wall_mesh(
         for dy in (-1, 1):
             lines = {}  # (y, z) -> sorted [(x, z_offset), ...]
             for (x, y, z) in walkable_cells:
+                if (x, y, z) in skip_cells:
+                    continue
                 if is_exposed(x, y, z, 0, dy):
                     lines.setdefault((y, z), []).append((x, z_offsets.get((x, y, z), 0.0)))
             for (y, z), items in lines.items():
@@ -5054,13 +5284,24 @@ class OBJECT_OT_GenerateLevelWalls(bpy.types.Operator):
         level_height = _fine_level_height(scene)
 
         walkable_cells, extra = _read_blueprint_points(
-            blueprint_obj, tile_size, level_height, ("z_offset", "tile_id", "tile_rotation")
+            blueprint_obj, tile_size, level_height, ("z_offset", "tile_id", "tile_rotation", "room_id")
         )
         z_offsets = extra["z_offset"]
+        room_id_grid = extra["room_id"]
 
         if not walkable_cells:
             self.report({'WARNING'}, "No walkable tiles found in the blueprint.")
             return {'CANCELLED'}
+
+        # Round rooms get a real perimeter ring (see
+        # _build_round_room_walls_mesh) instead of the blocky per-cell
+        # wall _build_wall_mesh would otherwise still build for them --
+        # room shape/bounding-box metadata was baked onto the Blueprint at
+        # Step 1 time (see OBJECT_OT_GenerateGameBlueprint), since this
+        # step deliberately never re-runs the solver.
+        room_meta = json.loads(blueprint_obj.get("gla_room_meta", "[]"))
+        round_room_ids = {i for i, r in enumerate(room_meta) if r['shape'] == 'ROUND'}
+        skip_cells = {cell for cell, rid in room_id_grid.items() if rid in round_room_ids}
 
         # Corridor Stairs (see WFC_Level_Solver._corridor_stair_fits) has no
         # side walkway by design -- a walkable neighbor directly beside a
@@ -5086,6 +5327,7 @@ class OBJECT_OT_GenerateLevelWalls(bpy.types.Operator):
                     forced_wall_edges.add((cell, (dy, -dx)))
 
         _remove_objects_by_prefix(WALLS_OBJECT_NAME)
+        _remove_objects_by_prefix(WALLS_ROUND_OBJECT_NAME)
 
         if scene.wfc_simple_materials:
             wall_material = get_or_create_simple_wall_material()
@@ -5107,6 +5349,21 @@ class OBJECT_OT_GenerateLevelWalls(bpy.types.Operator):
         sub_levels = max(1, scene.wfc_sub_levels_per_floor)
         per_floor = scene.wfc_wall_grouping == 'PER_FLOOR'
 
+        def _add_round_ring(name, meta_for_floor):
+            ring_mesh_data = _build_round_room_walls_mesh(
+                meta_for_floor, room_id_grid, walkable_cells, tile_size, level_height,
+                scene.wfc_wall_height, scene.wfc_wall_thickness, scene.wfc_room_shape_sides,
+                z_offsets, name,
+            )
+            if not ring_mesh_data.vertices:
+                bpy.data.meshes.remove(ring_mesh_data)
+                return None
+            ring_obj = bpy.data.objects.new(name, ring_mesh_data)
+            context.collection.objects.link(ring_obj)
+            ring_mesh_data.materials.append(wall_material)
+            _add_viewport_color_attribute(ring_mesh_data)
+            return ring_obj
+
         created = []
         if per_floor:
             cells_by_floor = {}
@@ -5119,27 +5376,38 @@ class OBJECT_OT_GenerateLevelWalls(bpy.types.Operator):
                     scene.wfc_wall_height, scene.wfc_wall_thickness, scene.wfc_wall_cap_top,
                     name, organic_amount=organic_amount, z_offsets=z_offsets,
                     forced_wall_edges=forced_wall_edges, uv_tile_size=scene.wfc_uv_tile_size,
+                    skip_cells=skip_cells,
                 )
                 if not wall_mesh_data.vertices:
                     bpy.data.meshes.remove(wall_mesh_data)
-                    continue
-                obj = bpy.data.objects.new(name, wall_mesh_data)
-                context.collection.objects.link(obj)
-                wall_mesh_data.materials.append(wall_material)
-                _add_viewport_color_attribute(wall_mesh_data)
-                created.append(obj)
+                else:
+                    obj = bpy.data.objects.new(name, wall_mesh_data)
+                    context.collection.objects.link(obj)
+                    wall_mesh_data.materials.append(wall_material)
+                    _add_viewport_color_attribute(wall_mesh_data)
+                    created.append(obj)
+
+                meta_for_floor = [r for r in room_meta if r['z'] // sub_levels == floor_idx]
+                ring_obj = _add_round_ring(f"{WALLS_ROUND_OBJECT_NAME}_Floor{floor_idx}", meta_for_floor)
+                if ring_obj is not None:
+                    created.append(ring_obj)
         else:
             wall_mesh_data = _build_wall_mesh(
                 walkable_cells, tile_size, level_height,
                 scene.wfc_wall_height, scene.wfc_wall_thickness, scene.wfc_wall_cap_top,
                 WALLS_OBJECT_NAME, organic_amount=organic_amount, z_offsets=z_offsets,
                 forced_wall_edges=forced_wall_edges, uv_tile_size=scene.wfc_uv_tile_size,
+                skip_cells=skip_cells,
             )
             obj = bpy.data.objects.new(WALLS_OBJECT_NAME, wall_mesh_data)
             context.collection.objects.link(obj)
             wall_mesh_data.materials.append(wall_material)
             _add_viewport_color_attribute(wall_mesh_data)
             created.append(obj)
+
+            ring_obj = _add_round_ring(WALLS_ROUND_OBJECT_NAME, room_meta)
+            if ring_obj is not None:
+                created.append(ring_obj)
 
         if scene.wfc_wall_corner_rounding:
             for obj in created:
@@ -5739,6 +6007,103 @@ def _style_for_logical_floor(floor_profiles, logical_floor, default_style):
     return chosen
 
 
+PRESETS = {
+    'ISOMETRIC': dict(
+        # Isometric / top-down: looking down INTO rooms, so no ceiling;
+        # moderate size/room count, Mixed shapes for readable variety, a
+        # couple of logical floors with light elevation for gentle
+        # verticality without needing to look up/down much.
+        wfc_width=30, wfc_length=30, wfc_height=2, wfc_rooms_min=15, wfc_rooms_max=25,
+        wfc_room_size_min=3, wfc_room_size_max=6, wfc_room_shape='MIXED', wfc_room_shape_sides=12,
+        wfc_sub_levels_per_floor=1, wfc_split_level_chance=0.2, wfc_elevation_chance=0.1,
+        wfc_elevation_range=0.5, wfc_stairs_per_level=3, wfc_tile_size=2.0, wfc_level_height=3.5,
+        wfc_add_ceiling=False, wfc_iso_mode=True, wfc_wall_height=3.0, wfc_wall_thickness=0.25,
+        wfc_door_height=2.2, wfc_torch_chance=0.15, wfc_prop_chance=0.12, wfc_organic_amount=0.05,
+    ),
+    'FPS': dict(
+        # FPS / Immersive-Sim: seen from INSIDE, so Add Ceiling is on and
+        # Isometric Mode is off; Round rooms read as genuinely interesting
+        # geometry walking through them in first-person (unlike a top-down
+        # view, where corner-cutting barely registers); more sub-levels/
+        # elevation range and more logical floors for real dramatic
+        # verticality, taller walls, arched doors.
+        wfc_width=26, wfc_length=26, wfc_height=4, wfc_rooms_min=10, wfc_rooms_max=18,
+        wfc_room_size_min=4, wfc_room_size_max=8, wfc_room_shape='ROUND', wfc_room_shape_sides=10,
+        wfc_sub_levels_per_floor=2, wfc_split_level_chance=0.4, wfc_elevation_chance=0.3,
+        wfc_elevation_range=1.5, wfc_stairs_per_level=4, wfc_stair_bend_chance=0.3,
+        # Level Height must be >= Sub-Levels per Floor * Wall Height (see
+        # the module-level _adjusting_level_geometry cross-consistency
+        # system near register()) -- 2 sub-levels * a 4.0m wall needs at
+        # least 8.0m of headroom, so this is picked to already satisfy
+        # that constraint rather than relying on the auto-grow callback.
+        wfc_tile_size=2.2, wfc_level_height=8.0, wfc_add_ceiling=True, wfc_iso_mode=False,
+        wfc_wall_height=4.0, wfc_wall_thickness=0.3, wfc_wall_cap_top=True, wfc_door_height=2.4,
+        wfc_door_style='ROUND', wfc_torch_chance=0.25, wfc_torch_light_chance=0.6,
+        wfc_prop_chance=0.2, wfc_organic_amount=0.1,
+    ),
+    'ROGUELIKE': dict(
+        # Compact Roguelike: small tight Rect rooms, high room count
+        # relative to a small map, single floor -- classic dense top-down
+        # crawler. Door Merge Distance=0 keeps doorways as many distinct
+        # openings rather than merging nearby ones into fewer big gaps;
+        # Organic Irregularity off for a clean, deliberate grid look.
+        wfc_width=20, wfc_length=20, wfc_height=1, wfc_rooms_min=20, wfc_rooms_max=35,
+        wfc_room_size_min=2, wfc_room_size_max=4, wfc_room_shape='RECT', wfc_room_shape_sides=16,
+        wfc_sub_levels_per_floor=1, wfc_split_level_chance=0.0, wfc_elevation_chance=0.0,
+        wfc_elevation_range=0.0, wfc_stairs_per_level=1, wfc_tile_size=2.0, wfc_level_height=3.0,
+        wfc_add_ceiling=False, wfc_iso_mode=True, wfc_wall_height=2.5, wfc_wall_thickness=0.2,
+        wfc_door_merge_distance=0, wfc_door_height=2.0, wfc_torch_chance=0.1, wfc_prop_chance=0.15,
+        wfc_organic_amount=0.0,
+    ),
+    'MEGADUNGEON': dict(
+        # Megadungeon: large map, big room count, several logical floors
+        # grouped Per-Floor (so each story's stairs/walls are easy to
+        # isolate on a map this size), Mixed shapes and moderate elevation
+        # variety for sprawl rather than any one particular camera style.
+        wfc_width=45, wfc_length=45, wfc_height=6, wfc_rooms_min=40, wfc_rooms_max=70,
+        wfc_room_size_min=3, wfc_room_size_max=7, wfc_room_shape='MIXED', wfc_room_shape_sides=12,
+        wfc_sub_levels_per_floor=2, wfc_split_level_chance=0.3, wfc_elevation_chance=0.15,
+        wfc_elevation_range=1.0, wfc_stairs_per_level=6, wfc_stair_grouping='PER_FLOOR',
+        # Same headroom constraint as FPS's own preset entry above: 2
+        # sub-levels * a 3.5m wall needs at least 7.0m of Level Height.
+        wfc_wall_grouping='PER_FLOOR', wfc_tile_size=2.0, wfc_level_height=7.0,
+        wfc_add_ceiling=True, wfc_iso_mode=False, wfc_wall_height=3.5, wfc_wall_thickness=0.25,
+        wfc_torch_chance=0.15, wfc_prop_chance=0.1, wfc_organic_amount=0.05,
+    ),
+}
+
+PRESET_LABELS = {
+    'ISOMETRIC': "Isometric", 'FPS': "FPS / Immersive-Sim",
+    'ROGUELIKE': "Compact Roguelike", 'MEGADUNGEON': "Megadungeon",
+}
+
+
+class OBJECT_OT_ApplyGLAPreset(bpy.types.Operator):
+    """Sets every scene property PRESETS[self.preset] names -- does NOT
+    generate anything itself, same "one button, one job" precedent every
+    other operator here follows (the user still presses Step 1
+    afterward). Only ever touches the flat wfc_* scene properties --
+    wfc_floor_profiles (Per-Floor Overrides) is left untouched, since an
+    empty profile list already falls straight back to those flat values."""
+    bl_idname = "object.apply_level_architect_preset"
+    bl_label = "Apply Preset"
+    bl_description = "Set Width/Rooms/Levels/Walls/etc. to values tuned for a target camera/genre"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    preset: StringProperty()
+
+    def execute(self, context):
+        settings = PRESETS.get(self.preset)
+        if settings is None:
+            self.report({'ERROR'}, f"Unknown preset '{self.preset}'.")
+            return {'CANCELLED'}
+        scene = context.scene
+        for key, value in settings.items():
+            setattr(scene, key, value)
+        self.report({'INFO'}, f"Applied {PRESET_LABELS.get(self.preset, self.preset)} preset.")
+        return {'FINISHED'}
+
+
 class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
@@ -5748,6 +6113,16 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
     def draw(self, context):
         scene = context.scene
         layout = self.layout
+
+        col = layout.column(align=True)
+        col.label(text="Presets")
+        preset_items = list(PRESET_LABELS.items())
+        for k in range(0, len(preset_items), 2):
+            row = col.row(align=True)
+            for preset_key, label in preset_items[k:k + 2]:
+                op = row.operator("object.apply_level_architect_preset", text=label)
+                op.preset = preset_key
+        layout.separator()
 
         tabs = layout.row(align=True)
         tabs.prop(scene, "wfc_active_tab", expand=True, icon_only=True)
@@ -5806,6 +6181,7 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
             row.prop(scene, "wfc_room_size_min", text="Min Size")
             row.prop(scene, "wfc_room_size_max", text="Max Size")
             col.prop(scene, "wfc_room_shape", text="Shape")
+            col.prop(scene, "wfc_room_shape_sides", text="Shape Sides")
             col.separator()
 
             overrides_box = section.box()
@@ -5991,6 +6367,7 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
 # 5. REGISTRATION
 # ==============================================================================
 classes = (
+    OBJECT_OT_ApplyGLAPreset,
     OBJECT_OT_GenerateGameBlueprint,
     OBJECT_OT_SeparateLevelByFloor,
     OBJECT_OT_FreezeForTextureWork,
@@ -6108,7 +6485,8 @@ def register():
         name="Room Shape",
         items=[
             ('RECT', "Rectangular", "Classic rectangular rooms"),
-            ('ROUND', "Round", "Circular/oval rooms, approximated on the tile grid"),
+            ('ROUND', "Round", "Circular/oval rooms -- a real merged n-gon floor disc and a "
+                                "matching wall ring hug the actual shape"),
             ('MIXED', "Mixed", "Randomly rectangular or round, chosen per room"),
             ('CAVE', "Cave", "Every floor becomes one organic connected network of winding "
                               "tunnels and round chambers instead of discrete rooms joined by "
@@ -6116,6 +6494,12 @@ def register():
                               "Min/Max Room Size as chamber size. Pairs well with Corridor Stairs"),
         ],
         default='RECT',
+    )
+    bpy.types.Scene.wfc_room_shape_sides = IntProperty(
+        name="Room Shape Sides", default=16, min=3, max=32,
+        description="Sides of a Round room's floor disc and wall ring -- 3=triangle, 4=square, "
+                    "higher=smoother circle. Only affects rooms resolved to Round (including via "
+                    "Mixed and Cave)",
     )
     bpy.types.Scene.wfc_floor_profiles = CollectionProperty(type=WFC_FloorProfile)
     bpy.types.Scene.wfc_floor_profiles_active_index = IntProperty(default=0)
@@ -6450,6 +6834,7 @@ def unregister():
     del bpy.types.Scene.wfc_room_size_min
     del bpy.types.Scene.wfc_room_size_max
     del bpy.types.Scene.wfc_room_shape
+    del bpy.types.Scene.wfc_room_shape_sides
     del bpy.types.Scene.wfc_floor_profiles
     del bpy.types.Scene.wfc_floor_profiles_active_index
     del bpy.types.Scene.wfc_sub_levels_per_floor

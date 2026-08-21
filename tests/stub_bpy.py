@@ -87,11 +87,39 @@ class _AttrCollection:
         return self._store[name]
 
 
+def _compute_normal(coords):
+    """Cross product of a face's first 3 vertices, normalized -- enough for
+    _add_planar_uv_map's axis-selection (it only ever compares |x|/|y|/|z|
+    magnitudes), not a faithful Blender normal (no averaging across a
+    non-planar face)."""
+    if len(coords) < 3:
+        return _Vec3(0.0, 0.0, 1.0)
+    ax, ay, az = coords[0]
+    bx, by, bz = coords[1]
+    cx, cy, cz = coords[2]
+    ux, uy, uz = bx - ax, by - ay, bz - az
+    vx, vy, vz = cx - ax, cy - ay, cz - az
+    nx, ny, nz = uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx
+    length = (nx * nx + ny * ny + nz * nz) ** 0.5
+    if length < 1e-12:
+        return _Vec3(0.0, 0.0, 1.0)
+    return _Vec3(nx / length, ny / length, nz / length)
+
+
+class _Loop:
+    def __init__(self, vertex_index):
+        self.vertex_index = vertex_index
+
+
 class _Polygon:
-    def __init__(self, index, vertices):
+    def __init__(self, index, vertices, coords, loop_start):
         self.index = index
         self.vertices = list(vertices)
         self.material_index = 0
+        self.loop_start = loop_start
+        self.loop_total = len(vertices)
+        self.loop_indices = range(loop_start, loop_start + len(vertices))
+        self.normal = _compute_normal(coords)
 
 
 class _VertexList(list):
@@ -104,18 +132,52 @@ class _VertexList(list):
                 out[i] = getattr(v, prop_name)
 
 
+class _UVItem:
+    def __init__(self):
+        self.uv = (0.0, 0.0)
+
+
+class _UVLayer:
+    def __init__(self, n):
+        self.data = [_UVItem() for _ in range(n)]
+
+
+class _UVLayers:
+    def __init__(self, mesh):
+        self._mesh = mesh
+        self._store = {}
+
+    def new(self, name="UVMap"):
+        layer = _UVLayer(len(self._mesh.loops))
+        self._store[name] = layer
+        return layer
+
+    def get(self, name):
+        return self._store.get(name)
+
+
 class _FakeMesh:
     def __init__(self, name):
         self.name = name
         self.vertices = []
         self.polygons = []
+        self.loops = []
         self.materials = []
         self.attributes = _AttrCollection(self)
+        self.uv_layers = _UVLayers(self)
         self.users = 0
 
     def from_pydata(self, verts, edges, faces):
         self.vertices = _VertexList(_Vert(_Vec3(*v)) for v in verts)
-        self.polygons = [_Polygon(i, f) for i, f in enumerate(faces)]
+        self.loops = []
+        self.polygons = []
+        loop_start = 0
+        for i, f in enumerate(faces):
+            coords = [verts[vi] for vi in f]
+            self.polygons.append(_Polygon(i, f, coords, loop_start))
+            self.loops.extend(_Loop(vi) for vi in f)
+            loop_start += len(f)
+        self.uv_layers = _UVLayers(self)
 
     def update(self):
         pass
@@ -351,6 +413,26 @@ sys.modules["bpy"] = bpy
 sys.modules["bpy.props"] = bpy.props
 sys.modules["bpy.types"] = bpy.types
 sys.modules["bpy.utils"] = bpy.utils
+
+# bpy_extras.io_utils.ExportHelper -- the export operators
+# (OBJECT_OT_ExportLevelGLTF/OBJECT_OT_ExportLevelCollisionGLTF) subclass
+# this, so the module needs to exist for the addon to import at all, even
+# offline. A plain no-op mixin is enough: solver/mesh-building trials never
+# actually invoke an export operator's invoke()/execute() through Blender's
+# real file-browser flow, they only need the class to exist so
+# `class Foo(Operator, ExportHelper)` doesn't fail at import time.
+bpy_extras = types.ModuleType("bpy_extras")
+bpy_extras_io_utils = types.ModuleType("bpy_extras.io_utils")
+
+
+class ExportHelper:
+    filepath = ""
+
+
+bpy_extras_io_utils.ExportHelper = ExportHelper
+bpy_extras.io_utils = bpy_extras_io_utils
+sys.modules["bpy_extras"] = bpy_extras
+sys.modules["bpy_extras.io_utils"] = bpy_extras_io_utils
 
 
 class FakeContext:

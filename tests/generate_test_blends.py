@@ -43,7 +43,7 @@ BASELINE = dict(
     wfc_seed=FIXED_SEED, wfc_random_seed=False,
     wfc_rooms_min=8, wfc_rooms_max=14,
     wfc_room_size_min=3, wfc_room_size_max=6,
-    wfc_room_shape='RECT',
+    wfc_room_shape='RECT', wfc_room_shape_sides=16,
     wfc_stairs_per_level=3, wfc_stair_room_width=3, wfc_stair_room_length=4,
     wfc_corridor_stairs=False,
     wfc_sub_levels_per_floor=1, wfc_split_level_chance=0.0,
@@ -238,17 +238,59 @@ SCENARIOS = [
             wfc_stairs_per_level=4, wfc_rooms_min=14, wfc_rooms_max=20,
         ),
     ),
+    (
+        "test_25.blend",
+        "Room Shape = ROUND, Room Shape Sides = 4 -- rooms are now a single REAL n-gon disc "
+        "floor + a matching wall ring (not a per-tile grid approximation), and at 4 sides that "
+        "disc/ring should visibly read as a diamond/square, not a circle.",
+        dict(wfc_room_shape='ROUND', wfc_room_shape_sides=4, wfc_room_size_min=4, wfc_room_size_max=7),
+    ),
+    (
+        "test_26.blend",
+        "Room Shape = ROUND, Room Shape Sides = 24 -- the same real n-gon disc floor + wall "
+        "ring, high segment count, should read as a smooth circle.",
+        dict(wfc_room_shape='ROUND', wfc_room_shape_sides=24, wfc_room_size_min=4, wfc_room_size_max=7),
+    ),
+    (
+        "test_27.blend",
+        "Preset = Isometric -- applied via the real Apply Preset operator (PRESETS['ISOMETRIC'] "
+        "is the single source of truth, not duplicated here).",
+        dict(_preset='ISOMETRIC'),
+    ),
+    (
+        "test_28.blend",
+        "Preset = FPS / Immersive-Sim -- arena-sized Round rooms, Add Ceiling on, more "
+        "sub-levels/logical floors for real verticality.",
+        dict(_preset='FPS'),
+    ),
+    (
+        "test_29.blend",
+        "Preset = Compact Roguelike -- small tight Rect rooms, high room density, single floor.",
+        dict(_preset='ROGUELIKE'),
+    ),
+    (
+        "test_30.blend",
+        "Preset = Megadungeon -- large sprawling map, big room count, several logical floors.",
+        dict(_preset='MEGADUNGEON'),
+    ),
 ]
 
 
 def apply_settings(scene, overrides):
     # Keys starting with "_" are scenario-runner directives (e.g.
-    # _run_separate), not real wfc_* scene properties -- applied by main()
-    # itself, never passed to setattr.
+    # _run_separate, _preset), not real wfc_* scene properties -- applied
+    # by main() itself, never passed to setattr.
     settings = dict(BASELINE)
     settings.update({k: v for k, v in overrides.items() if not k.startswith("_")})
     for key, value in settings.items():
         setattr(scene, key, value)
+    # Applied AFTER the baseline/explicit overrides above, same order the
+    # real UI panel implies (Presets sit above the sliders they set) -- a
+    # preset scenario's own PRESETS[...] values are the single source of
+    # truth, not duplicated into this file's overrides dict.
+    preset = overrides.get("_preset")
+    if preset:
+        bpy.ops.object.apply_level_architect_preset(preset=preset)
 
 
 def render_top_down_preview(scene, addon, png_path):
@@ -267,10 +309,11 @@ def render_top_down_preview(scene, addon, png_path):
     the caller saves the .blend -- these are rendering scaffolding for
     this script, not part of what the addon itself generates, so they
     shouldn't end up saved inside the showcase file."""
+    frame_names = (addon.WALLS_OBJECT_NAME, addon.WALLS_ROUND_OBJECT_NAME, addon.ROUND_FLOOR_OBJECT_NAME)
     wall_objects = [
         obj for obj in bpy.data.objects
-        if obj.type == 'MESH' and (
-            obj.name == addon.WALLS_OBJECT_NAME or obj.name.startswith(addon.WALLS_OBJECT_NAME + "_")
+        if obj.type == 'MESH' and any(
+            obj.name == name or obj.name.startswith(name + "_") for name in frame_names
         )
     ]
     if not wall_objects:

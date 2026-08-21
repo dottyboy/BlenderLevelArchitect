@@ -4,7 +4,7 @@ Internal dev-facing doc: what's built, what's known-broken, what's next. Not for
 (see `dist/README.md` for that). Source of truth for the addon's actual behavior is always
 `levelArchitect_v2.py` — this file can drift out of date; the code can't.
 
-Current version: **0.22.0** (see `bl_info` in the source file).
+Current version: **0.23.0** (see `bl_info` in the source file).
 
 §2 (Development tree) was condensed 2026-08-21 — dropped the blow-by-blow investigation
 narrative and per-run stress-test numbers from older, fully-resolved entries, kept every
@@ -642,6 +642,81 @@ GN complexity there specifically.
       names match the Doors/Torches/Decoration prefixes. All checks passed on the first
       real-Blender run.
 
+- [x] **Real Round-room shape (n-gon floor + wall ring) + Presets.** Ported back from a sibling
+      addon, BrickSpitter, which itself originally ported `_carve_room`'s ellipse-carving
+      technique FROM this file — BrickSpitter later upgraded its own Round rooms to a real merged
+      n-gon shape and asked "level architect could use this feature too."
+
+      The floor is Geometry-Nodes-driven here (one small cube instanced per point in the
+      Blueprint's own shared point cloud, which every later step — Walls, Doors, Stairs, Torches,
+      Decoration, Separate by Floor/Room, both exports — reads back from as its ground truth), a
+      meaningfully different architecture from BrickSpitter's plain-mesh-everything approach.
+      Removing/hiding a Round room's floor points from that cloud would silently break every one
+      of those downstream readers. Chosen design instead **never touches the Blueprint or its GN
+      graph at all**: a new `_build_round_room_floor_mesh` draws a real n-gon disc as a separate,
+      purely cosmetic overlay (`ROUND_FLOOR_OBJECT_NAME`, `Procedural_Level_RoundFloors`) that
+      fully covers the existing blocky floor cubes from a hair above (the disc's radius always
+      uses the room's FULL bounding-box ellipse, larger than `_carve_room`'s own tightened `<=0.8`
+      carving threshold, so it's guaranteed to cover every carved tile with no visible gap at the
+      edge). `WFC_Level_Solver` gained `self.room_shapes`/`self.room_cells` (small, additive) to
+      track this.
+
+      Walls were ALREADY a separate baked-Python object here (same architecture BrickSpitter
+      itself uses), so the wall-ring half is a much more direct port: new `_build_round_room_walls_mesh`
+      builds one oriented `add_wall_segment` per polygon edge of a Round room's rim, skipping
+      whichever edge(s) sit where a corridor/doorway actually connects (a room cell bordering a
+      walkable cell belonging to a different room is a real doorway; its angle around the room's
+      own ellipse picks which edge to open) — same technique BrickSpitter's own fix used.
+      `_build_wall_mesh` gained one new optional `skip_cells` param so a Round room's cells still
+      count as walkable for a NEIGHBORING room's own exposed-edge check, they just don't get their
+      own blocky box built (that's what `_build_round_room_walls_mesh` builds instead). Room
+      bounding-box + shape metadata is baked onto the Blueprint object as a `gla_room_meta` JSON
+      custom property at Step 1 time, since `OBJECT_OT_GenerateLevelWalls` deliberately never
+      re-runs the solver.
+
+      **A real naming-collision bug found and fixed during verification**: the new wall-ring
+      object was first named `Procedural_Level_Walls_Round`, which — since `_objects_matching_prefix`
+      matches on `startswith(base_name + "_")` — accidentally ALSO matched `WALLS_OBJECT_NAME`'s
+      own prefix, causing it to be picked up (and renamed/frozen) TWICE by anything iterating both
+      names, including `OBJECT_OT_FreezeForTextureWork`. Caught by the existing Freeze test's own
+      exact-name-set assertion, not a new check written for this feature. Renamed to
+      `Procedural_Level_RoundWalls`, which shares no prefix with any existing base name.
+
+      Also new: **Presets** (`PRESETS` dict + `OBJECT_OT_ApplyGLAPreset`, mirroring BrickSpitter's
+      own `OBJECT_OT_ApplyPreset` pattern exactly) — four one-click buttons (Isometric, FPS /
+      Immersive-Sim, Compact Roguelike, Megadungeon) bundling Width/Rooms/Room Shape/Sub-Levels/
+      Elevation/Stairs/Wall/Door/Torch settings tuned per target camera/genre. Only ever sets flat
+      `wfc_*` properties; Per-Floor Overrides (`wfc_floor_profiles`) are left untouched. **A real
+      preset-design bug found via the same test suite**: the FPS and Megadungeon presets'
+      originally-chosen `wfc_level_height` values were too small for their own
+      `wfc_sub_levels_per_floor` × `wfc_wall_height` combination, so the existing Wall/Door/Level
+      Height cross-consistency system (see §2's own entry on that feature) correctly auto-grew
+      Level Height to compensate — caught because the test asserted the EXACT value each preset
+      requested, not what it turned out to need. Fixed by picking preset values already consistent
+      with that constraint (`level_height >= sub_levels_per_floor * wall_height`) instead of
+      relying on the auto-grow.
+
+      Verified: offline (`stub_bpy`, extended with a `bpy_extras.io_utils.ExportHelper` mock and a
+      fuller mesh-loop/UV-layer mock — both latent gaps this was the first attempt to offline-test
+      `_build_wall_mesh`/the new functions directly, not pre-existing bugs) — 800 seeded solver
+      trials confirming `room_shapes`/`room_cells` populated for every real room, 400 trials
+      confirming `skip_cells` never affects a non-skipped cell's own exposed-edge wall, 400 trials
+      confirming the floor/wall-ring builders produce sane geometry with real openings. Real
+      Blender 5.2.0 LTS: the FULL pre-existing 1700+-line suite still passes completely unmodified
+      (this suite's own baseline has used `wfc_room_shape='MIXED'` throughout from the start, so
+      Round rooms were already exercised end-to-end against every other system before this feature
+      even added its own dedicated checks) plus new checks — exact RoundFloors face count/vertices-
+      per-face, RoundWalls has fewer faces than a fully-sealed ring (real openings), all 4 Presets
+      apply then run the complete pipeline to real geometry. Visual: 6 new `generate_test_blends.py`
+      scenarios — Round at 4 and 24 `wfc_room_shape_sides` (visibly diamond vs. smooth circle,
+      floor and wall ring matching exactly) and one per Preset.
+
+      Known, deliberately-not-fixed limitation: door frames stay straight/axis-aligned even
+      against a now-curved wall (door placement logic detects boundary crossings via `room_id`
+      changes on grid-aligned neighbors, independent of wall shape, so doors still place at the
+      right locations — just with a straight frame at a curved opening). A curved door frame is a
+      distinct, separately-scoped feature.
+
 ---
 
 ## 3. Known issues / things that need fixing
@@ -686,6 +761,12 @@ GN complexity there specifically.
       than 4.2 LTS (pre-4.0's `node_group.inputs.new()` node-tree API is meaningfully different, so
       3.x is a real, not just unverified, incompatibility — not worth chasing for an early testing
       release).
+- [ ] **A Round room's door frame stays straight/axis-aligned against its now-curved wall.**
+      `_build_door_mesh` detects doorway boundary crossings via `room_id` changes on grid-aligned
+      neighbors, independent of wall shape, so doors still place at the correct locations — just
+      with a straight frame at a curved opening, a real visible mismatch. Would need a dedicated
+      arc-aware frame builder for Round rooms specifically, deferred rather than folded into the
+      Round-shape pass (see §2's entry) that added it.
 
 ---
 

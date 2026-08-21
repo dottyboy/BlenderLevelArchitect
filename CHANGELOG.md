@@ -3,6 +3,19 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.23.0
+
+- **Round rooms now have a real shape.** Every Round room's floor is a real merged n-gon disc
+  (`Room Shape Sides`, 3=triangle, 4=square/diamond, higher=smoother circle) instead of a blocky
+  per-tile grid approximation, and the guard-rail wall now hugs that same shape exactly -- with a
+  real opening left wherever a corridor connects, not a fully sealed ring. Rect rooms are
+  unchanged.
+- **New: Presets** (Isometric / FPS-Immersive-Sim / Compact Roguelike / Megadungeon). One click
+  sets Width/Rooms/Room Shape/Sub-Levels/Elevation/Stairs/Walls/Doors/Torches to values tuned for
+  a target camera/genre -- Step 1 still has to be pressed afterward, same as any other setting.
+- Known limitation: a Round room's door frame is still a straight box, even against its now-curved
+  wall -- doors still open in the correct place, the frame shape itself just doesn't match yet.
+
 ## 0.22.0
 
 - **New: Export Collision Mesh** (Export tab, second button). Exports Floor + Walls + Stairs

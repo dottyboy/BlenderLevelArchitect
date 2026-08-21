@@ -1066,9 +1066,9 @@ for obj in imported_objects:
 # ==============================================================================
 pre_freeze_names = set()
 for base_name in (
-    addon.BLUEPRINT_OBJECT_NAME, addon.WALLS_OBJECT_NAME, addon.STAIRS_OBJECT_NAME,
-    addon.DOORS_OBJECT_NAME, addon.PROPS_TORCH_OBJECT_NAME, addon.PROPS_DECORATION_OBJECT_NAME,
-    addon.PROPS_LIGHT_NAME_PREFIX,
+    addon.BLUEPRINT_OBJECT_NAME, addon.ROUND_FLOOR_OBJECT_NAME, addon.WALLS_OBJECT_NAME,
+    addon.WALLS_ROUND_OBJECT_NAME, addon.STAIRS_OBJECT_NAME, addon.DOORS_OBJECT_NAME,
+    addon.PROPS_TORCH_OBJECT_NAME, addon.PROPS_DECORATION_OBJECT_NAME, addon.PROPS_LIGHT_NAME_PREFIX,
 ):
     pre_freeze_names.update(o.name for o in addon._objects_matching_prefix(base_name))
 check(
@@ -1693,6 +1693,125 @@ if split_top_collection is not None:
             )
             # Restore a normal active collection for anything after this.
             bpy.context.view_layer.active_layer_collection = bpy.context.view_layer.layer_collection
+
+# ==============================================================================
+# Round rooms: real merged n-gon floor disc + a matching wall ring with
+# real doorway openings -- confirm the actual geometry, not just "some
+# object exists." wfc_room_shape='MIXED' has been this whole suite's own
+# baseline throughout (so Round rooms have already been exercised
+# end-to-end against every other system -- Doors/Stairs/Torches/
+# Decoration/Separate by Floor/Export -- via every check above), this
+# section pins wfc_room_shape='ROUND' specifically for exact-geometry
+# assertions a MIXED level's random room count can't give.
+# ==============================================================================
+scene.wfc_width = 20
+scene.wfc_length = 20
+scene.wfc_height = 1
+scene.wfc_rooms_min = 6
+scene.wfc_rooms_max = 6
+scene.wfc_room_size_min = 4
+scene.wfc_room_size_max = 6
+scene.wfc_room_shape = 'ROUND'
+scene.wfc_room_shape_sides = 6
+scene.wfc_sub_levels_per_floor = 1
+scene.wfc_elevation_chance = 0.0
+scene.wfc_wall_grouping = 'SINGLE'
+
+result = bpy.ops.object.generate_game_blueprint()
+check("Round rooms: Blueprint FINISHED", result == {'FINISHED'}, str(result))
+
+round_floor_obj = bpy.data.objects.get(addon.ROUND_FLOOR_OBJECT_NAME)
+check("Round rooms: RoundFloors object exists", round_floor_obj is not None)
+if round_floor_obj is not None:
+    check("Round rooms: RoundFloors has geometry", len(round_floor_obj.data.polygons) > 0)
+    check(
+        "Round rooms: RoundFloors has one face per Round room (6 rooms requested)",
+        len(round_floor_obj.data.polygons) == 6, str(len(round_floor_obj.data.polygons)),
+    )
+    check(
+        "Round rooms: every RoundFloors face has exactly wfc_room_shape_sides vertices",
+        all(len(p.vertices) == 6 for p in round_floor_obj.data.polygons),
+        str([len(p.vertices) for p in round_floor_obj.data.polygons]),
+    )
+
+blueprint_obj = bpy.data.objects.get(addon.BLUEPRINT_OBJECT_NAME)
+blueprint_evaluated_verts, blueprint_evaluated_faces = evaluated_counts(blueprint_obj)
+check(
+    "Round rooms: Blueprint's own (unmodified) GN floor still evaluates to real geometry "
+    "underneath the RoundFloors overlay",
+    blueprint_evaluated_verts > 0 and blueprint_evaluated_faces > 0,
+)
+
+result = bpy.ops.object.generate_level_walls()
+check("Round rooms: Walls FINISHED", result == {'FINISHED'}, str(result))
+round_walls_obj = bpy.data.objects.get(addon.WALLS_ROUND_OBJECT_NAME)
+check("Round rooms: RoundWalls object exists", round_walls_obj is not None)
+if round_walls_obj is not None:
+    check("Round rooms: RoundWalls has geometry", len(round_walls_obj.data.polygons) > 0)
+    full_ring_faces_per_room = scene.wfc_room_shape_sides * 5
+    check(
+        "Round rooms: RoundWalls has real doorway openings (fewer faces than 6 fully-sealed rings)",
+        len(round_walls_obj.data.polygons) < 6 * full_ring_faces_per_room,
+        f"actual={len(round_walls_obj.data.polygons)} fully_sealed={6 * full_ring_faces_per_room}",
+    )
+
+result = bpy.ops.object.generate_level_doors()
+check("Round rooms: Doors FINISHED or CANCELLED", result in ({'FINISHED'}, {'CANCELLED'}), str(result))
+result = bpy.ops.object.generate_level_props()
+check("Round rooms: Props FINISHED or CANCELLED", result in ({'FINISHED'}, {'CANCELLED'}), str(result))
+
+export_targets = addon._gltf_export_targets(
+    (addon.BLUEPRINT_OBJECT_NAME, addon.ROUND_FLOOR_OBJECT_NAME, addon.WALLS_OBJECT_NAME,
+     addon.WALLS_ROUND_OBJECT_NAME),
+    include_lights=False,
+)
+check(
+    "Round rooms: export targets include both RoundFloors and RoundWalls",
+    any(o.name == addon.ROUND_FLOOR_OBJECT_NAME for o in export_targets)
+    and any(o.name.startswith(addon.WALLS_ROUND_OBJECT_NAME) for o in export_targets),
+    str([o.name for o in export_targets]),
+)
+
+# ==============================================================================
+# Presets -- Isometric / FPS-Immersive-Sim / Compact Roguelike / Megadungeon.
+# Each should apply cleanly and run the full pipeline without error.
+# ==============================================================================
+for preset_key, label in addon.PRESET_LABELS.items():
+    result = bpy.ops.object.apply_level_architect_preset(preset=preset_key)
+    check(f"Presets ({label}): apply operator FINISHED", result == {'FINISHED'}, str(result))
+    expected = addon.PRESETS[preset_key]
+
+    def _matches(actual, wanted):
+        if isinstance(wanted, float):
+            return abs(actual - wanted) < 1e-4
+        return actual == wanted
+
+    mismatches = {
+        k: (getattr(scene, k), v) for k, v in expected.items() if not _matches(getattr(scene, k), v)
+    }
+    check(f"Presets ({label}): scene properties actually changed", not mismatches, str(mismatches))
+
+    result = bpy.ops.object.generate_game_blueprint()
+    check(f"Presets ({label}): Blueprint FINISHED", result == {'FINISHED'}, str(result))
+    preset_blueprint_obj = bpy.data.objects.get(addon.BLUEPRINT_OBJECT_NAME)
+    preset_verts, preset_faces = evaluated_counts(preset_blueprint_obj)
+    check(f"Presets ({label}): Blueprint has real geometry", preset_verts > 0 and preset_faces > 0)
+
+    result = bpy.ops.object.generate_level_walls()
+    check(f"Presets ({label}): Walls FINISHED", result == {'FINISHED'}, str(result))
+    result = bpy.ops.object.generate_level_stairs()
+    check(f"Presets ({label}): Stairs FINISHED or CANCELLED", result in ({'FINISHED'}, {'CANCELLED'}), str(result))
+    result = bpy.ops.object.generate_level_doors()
+    check(f"Presets ({label}): Doors FINISHED or CANCELLED", result in ({'FINISHED'}, {'CANCELLED'}), str(result))
+    result = bpy.ops.object.generate_level_props()
+    check(f"Presets ({label}): Props FINISHED or CANCELLED", result in ({'FINISHED'}, {'CANCELLED'}), str(result))
+
+try:
+    result = bpy.ops.object.apply_level_architect_preset(preset='not_a_real_preset')
+except RuntimeError as exc:
+    result = {'CANCELLED'}
+    check("Presets: refusal error message names the bad preset", "not_a_real_preset" in str(exc), str(exc))
+check("Presets: refuses an unknown preset name", result == {'CANCELLED'}, str(result))
 
 # ==============================================================================
 print()
