@@ -16,6 +16,7 @@
 import importlib.util
 import os
 import sys
+import tempfile
 
 import bpy
 
@@ -934,6 +935,76 @@ check(
 )
 
 # ==============================================================================
+# Export Level (glTF/GLB) -- one-click export of every generated object.
+# The real correctness question isn't "did the operator return FINISHED"
+# but "does the exported file actually contain the level's geometry" --
+# checked by round-tripping the export back through Blender's own
+# import_scene.gltf (also core-bundled) and counting what comes back,
+# rather than just trusting a nonzero file size.
+# ==============================================================================
+export_dir = tempfile.mkdtemp(prefix="wfc_export_test_")
+export_path = os.path.join(export_dir, "level.glb")
+pre_export_object_names = {o.name for o in bpy.data.objects}
+
+result = bpy.ops.object.export_level_gltf(filepath=export_path)
+check("Export: operator FINISHED", result == {'FINISHED'}, str(result))
+check(
+    "Export: .glb file was actually written with real content",
+    os.path.isfile(export_path) and os.path.getsize(export_path) > 0,
+    f"exists={os.path.isfile(export_path)} size={os.path.getsize(export_path) if os.path.isfile(export_path) else 0}",
+)
+
+bpy.ops.object.select_all(action='DESELECT')
+result = bpy.ops.import_scene.gltf(filepath=export_path)
+check("Export: round-trip import FINISHED", result == {'FINISHED'}, str(result))
+imported_objects = [o for o in bpy.data.objects if o.name not in pre_export_object_names]
+imported_meshes = [o for o in imported_objects if o.type == 'MESH']
+imported_lights = [o for o in imported_objects if o.type == 'LIGHT']
+imported_vert_count = sum(len(o.data.vertices) for o in imported_meshes)
+check(
+    "Export: round-trip contains real mesh geometry (not an empty/near-empty file)",
+    len(imported_meshes) > 0 and imported_vert_count > 0,
+    f"mesh_objects={len(imported_meshes)} verts={imported_vert_count}",
+)
+check(
+    "Export: round-trip contains lights when Include Lights is on (default)",
+    len(imported_lights) > 0, f"lights={len(imported_lights)}",
+)
+for obj in imported_objects:
+    data = obj.data
+    obj_type = obj.type
+    bpy.data.objects.remove(obj, do_unlink=True)
+    if data and data.users == 0:
+        if obj_type == 'MESH':
+            bpy.data.meshes.remove(data)
+        elif obj_type == 'LIGHT':
+            bpy.data.lights.remove(data)
+
+# Include Lights off -- round-trip should carry meshes but no lights.
+scene.wfc_export_include_lights = False
+export_path_no_lights = os.path.join(export_dir, "level_no_lights.glb")
+pre_export_object_names = {o.name for o in bpy.data.objects}
+result = bpy.ops.object.export_level_gltf(filepath=export_path_no_lights)
+check("Export: Include Lights off, operator FINISHED", result == {'FINISHED'}, str(result))
+bpy.ops.import_scene.gltf(filepath=export_path_no_lights)
+imported_objects = [o for o in bpy.data.objects if o.name not in pre_export_object_names]
+imported_lights = [o for o in imported_objects if o.type == 'LIGHT']
+check(
+    "Export: Include Lights off, round-trip has no lights",
+    len(imported_lights) == 0, f"lights={len(imported_lights)}",
+)
+for obj in imported_objects:
+    data = obj.data
+    obj_type = obj.type
+    bpy.data.objects.remove(obj, do_unlink=True)
+    if data and data.users == 0:
+        if obj_type == 'MESH':
+            bpy.data.meshes.remove(data)
+        elif obj_type == 'LIGHT':
+            bpy.data.lights.remove(data)
+scene.wfc_export_include_lights = True
+
+# ==============================================================================
 # Freeze for Texture Work -- renames the current generation out of the
 # fixed-name pattern every Step operator's own _remove_objects_by_prefix
 # matches against, so a later regeneration can't touch it. Verifies both
@@ -961,6 +1032,24 @@ check("Freeze: operator FINISHED", result == {'FINISHED'}, str(result))
 check(
     "Freeze: Blueprint object no longer exists under its normal name",
     bpy.data.objects.get(addon.BLUEPRINT_OBJECT_NAME) is None,
+)
+
+# Nothing exists under any of the addon's normal names right after a
+# freeze (everything got renamed away) -- the one moment in this whole
+# script with a real "nothing generated" state to check Export's own
+# refusal path against, instead of a fresh scene at the very start where
+# no other section's assumptions have run yet.
+try:
+    result = bpy.ops.object.export_level_gltf(filepath=os.path.join(export_dir, "unused.glb"))
+except RuntimeError as exc:
+    result = {'CANCELLED'}
+    check(
+        "Export: refusal error message explains why (nothing to export)",
+        "Nothing to export" in str(exc), str(exc),
+    )
+check(
+    "Export: refuses to run with nothing generated under the normal names",
+    result == {'CANCELLED'}, str(result),
 )
 
 frozen_collection_name = f"{addon.FROZEN_COLLECTION_PREFIX} - Seed{expected_seed}"

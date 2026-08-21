@@ -563,6 +563,42 @@ GN complexity there specifically.
       close-up (floor geometry hidden to avoid z-fighting with the tread boxes at the same base Z)
       showing a real L-shaped run: two 4-tread flights meeting exactly at their shared corner, one
       climbing along X and the other along Y, continuous rise from the floor to the next level.
+- [x] **One-click glTF/GLB export.** New `OBJECT_OT_ExportLevelGLTF` (new Export tab, 6th
+      alongside Setup/Walls/Stairs/Doors/Props) selects every currently-generated object
+      (Blueprint/Walls/Stairs/Doors/Torches/Decoration, and optionally Lights) via the exact same
+      `_objects_matching_prefix` helper `OBJECT_OT_FreezeForTextureWork` already relies on — so
+      export always agrees with the rest of the addon about what "the level" is, regardless of
+      Per Floor/Per Stair grouping mode — and hands them straight to Blender's own
+      `bpy.ops.export_scene.gltf` with `use_selection=True, export_apply=True`. `export_apply`
+      bakes the Blueprint's live Geometry Nodes modifier (and Walls' optional Round Corners Bevel
+      modifier) into real exported mesh data; glTF's own exporter handles the Blender-Z-up →
+      glTF-Y-up axis conversion and Principled BSDF → PBR material mapping itself, so there's zero
+      addon-side geometry or material translation code at all — the whole feature is selection
+      logic plus one well-established Blender operator call.
+
+      Deliberately **glTF/GLB only, not FBX** — glTF's axis convention is standardized and
+      engine-agnostic (no per-engine "-Z Forward/Y Up" fiddling the way FBX needs), and it maps
+      Principled BSDF straight to its own PBR spec, which is exactly what this addon's materials
+      already are. FBX would be a reasonable follow-up but carries meaningfully more surface area
+      to get subtly wrong for a first pass. Two settings: **Binary (.glb)** (default on — one
+      self-contained file) vs. off (`.gltf` + `.bin` + a textures folder), and **Include Lights**
+      (default on — exports the real Point lights from Step 5 as glTF `KHR_lights_punctual`).
+
+      Every real operator property used (`use_selection`, `export_apply`, `export_lights`,
+      `export_format`'s `'GLB'`/`'GLTF_SEPARATE'` values) was confirmed by introspecting the
+      actual installed Blender 5.2.0's `bpy.ops.export_scene.gltf` operator RNA directly, not
+      assumed from memory — this project's standing rule about not guessing Blender API shape.
+      `io_scene_gltf2` is core-bundled and enabled by default, confirmed via `addon_utils.check`;
+      the operator still checks `hasattr(bpy.ops.export_scene, "gltf")` at runtime and refuses
+      with a clear message if it's ever been disabled by hand, rather than crashing.
+
+      Verified against real Blender 5.2.0 LTS: not just "operator returned FINISHED" but a real
+      round-trip — the exported `.glb` is immediately re-imported via Blender's own
+      `bpy.ops.import_scene.gltf` and checked for actual non-empty mesh geometry and (with
+      Include Lights on) real light objects, confirming the file contains a real level, not an
+      empty shell. Also verified: the refusal path with nothing generated reports a clear error
+      instead of a silent no-op, and Include Lights off round-trips with zero lights. All checks
+      passed on the first real-Blender run.
 
 ---
 
@@ -709,10 +745,9 @@ Roughly ordered by how directly they build on what already exists:
       run-merging, just without the cosmetic jitter path) or a baked nav-polygon mesh from the
       same walkable cells would mostly be "read data already computed, emit different geometry,"
       not a new subsystem.
-- [ ] **One-click game-engine export operator** (FBX/glTF), aware of the addon's own split object
-      structure (Walls/Doors/Stairs/Props per floor, see `_remove_objects_by_prefix`'s naming
-      convention) so a user doesn't have to know to reach for Blender's generic exporter and
-      manually select the right object set.
+- [x] **One-click glTF/GLB export — done, see §2.** Shipped as `OBJECT_OT_ExportLevelGLTF`
+      (new Export tab). glTF only for now, not FBX — deliberately scoped down (see §2) for a
+      standardized, engine-agnostic axis convention with zero addon-side conversion math.
 - [x] **Delete interior/hidden faces for faster rendering — done for Walls/Doors/Stairs/Ramps/
       Decoration, see §2 (0.17.4, extended in 0.17.4b/0.18.0).** Every wall box's, stair tread
       box's, and ramp segment box's bottom face (always hidden behind the floor beneath it) is

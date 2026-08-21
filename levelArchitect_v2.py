@@ -26,6 +26,7 @@ from bpy.props import (
     BoolProperty, CollectionProperty, EnumProperty, FloatProperty, FloatVectorProperty,
     IntProperty, StringProperty,
 )
+from bpy_extras.io_utils import ExportHelper
 
 bl_info = {
     "name": "Game Level Architect",
@@ -3570,6 +3571,85 @@ class OBJECT_OT_FreezeForTextureWork(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class OBJECT_OT_ExportLevelGLTF(bpy.types.Operator, ExportHelper):
+    """Selects every currently-generated object (Blueprint, Walls, Stairs,
+    Doors, Torches, Decoration, and optionally Lights -- same base_names
+    set OBJECT_OT_FreezeForTextureWork uses, via the same
+    _objects_matching_prefix helper, so this always agrees with what the
+    rest of the addon considers "the level" regardless of grouping mode)
+    and hands them to Blender's own bpy.ops.export_scene.gltf with
+    use_selection + export_apply set -- so the Blueprint's live Geometry
+    Nodes modifier (and Walls' optional Round Corners Bevel modifier) bake
+    into real mesh data in the export, not just their un-evaluated base
+    mesh. glTF's own exporter handles the Blender-Z-up -> glTF-Y-up axis
+    conversion and Principled BSDF -> PBR material mapping itself -- no
+    addon-side geometry or material translation needed here at all."""
+    bl_idname = "object.export_level_gltf"
+    bl_label = "Export Level (glTF/GLB)"
+    bl_description = "Export every generated Blueprint/Walls/Stairs/Doors/Props object to glTF/GLB"
+    bl_options = {'REGISTER'}
+
+    filename_ext = ".glb"
+    filter_glob: StringProperty(default="*.glb;*.gltf", options={'HIDDEN'})
+
+    def execute(self, context):
+        scene = context.scene
+
+        base_names = (
+            BLUEPRINT_OBJECT_NAME, WALLS_OBJECT_NAME, STAIRS_OBJECT_NAME, DOORS_OBJECT_NAME,
+            PROPS_TORCH_OBJECT_NAME, PROPS_DECORATION_OBJECT_NAME,
+        )
+        targets = []
+        for base_name in base_names:
+            targets.extend(_objects_matching_prefix(base_name))
+        light_targets = _objects_matching_prefix(PROPS_LIGHT_NAME_PREFIX)
+        if scene.wfc_export_include_lights:
+            targets.extend(light_targets)
+
+        if not targets:
+            self.report(
+                {'ERROR'},
+                "Nothing to export -- no Blueprint/Walls/Stairs/Doors/Props objects found under "
+                "their normal names. Generate a level first (Step 1)."
+            )
+            return {'CANCELLED'}
+
+        if not hasattr(bpy.ops.export_scene, "gltf"):
+            self.report(
+                {'ERROR'},
+                "glTF exporter isn't available -- enable Import-Export: glTF 2.0 in "
+                "Preferences > Add-ons."
+            )
+            return {'CANCELLED'}
+
+        export_format = 'GLB' if scene.wfc_export_binary else 'GLTF_SEPARATE'
+        desired_ext = '.glb' if export_format == 'GLB' else '.gltf'
+        filepath = self.filepath
+        stem, ext = os.path.splitext(filepath)
+        if ext.lower() != desired_ext:
+            filepath = stem + desired_ext
+
+        bpy.ops.object.select_all(action='DESELECT')
+        for obj in targets:
+            obj.select_set(True)
+        context.view_layer.objects.active = targets[0]
+
+        bpy.ops.export_scene.gltf(
+            filepath=filepath,
+            export_format=export_format,
+            use_selection=True,
+            export_apply=True,
+            export_lights=scene.wfc_export_include_lights,
+        )
+
+        light_count = len(light_targets) if scene.wfc_export_include_lights else 0
+        self.report(
+            {'INFO'},
+            f"Exported {len(targets)} object(s) ({light_count} light(s)) to '{filepath}'."
+        )
+        return {'FINISHED'}
+
+
 def _add_planar_uv_map(mesh, uv_tile_size=1.0):
     """Every baked-mesh builder below (walls/doors/stairs/ramps/torches/
     decoration) builds its own geometry directly via from_pydata(), which
@@ -5590,6 +5670,8 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
             self._draw_doors_tab(context, layout)
         elif scene.wfc_active_tab == 'PROPS':
             self._draw_props_tab(context, layout)
+        elif scene.wfc_active_tab == 'EXPORT':
+            self._draw_export_tab(context, layout)
 
         layout.separator()
         section = _section(layout, "LA_debug", "Debug: Last Generation Params", 'CONSOLE', default_closed=True)
@@ -5789,6 +5871,18 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
             'LIGHT', 'COLLECTION_COLOR_03',
         )
 
+    def _draw_export_tab(self, context, layout):
+        scene = context.scene
+        col = layout.column(align=True)
+        col.prop(scene, "wfc_export_binary", text="Binary (.glb)")
+        col.prop(scene, "wfc_export_include_lights", text="Include Lights")
+        layout.separator()
+        export_row = layout.row(align=True)
+        export_row.scale_y = 1.4
+        _color_swatch(export_row, 'COLLECTION_COLOR_01')
+        export_row.operator("object.export_level_gltf", text="Export Level (glTF/GLB)", icon='EXPORT')
+        export_row.enabled = bpy.data.objects.get(BLUEPRINT_OBJECT_NAME) is not None
+
 
 # ==============================================================================
 # 5. REGISTRATION
@@ -5801,6 +5895,7 @@ classes = (
     OBJECT_OT_GenerateLevelStairs,
     OBJECT_OT_GenerateLevelDoors,
     OBJECT_OT_GenerateLevelProps,
+    OBJECT_OT_ExportLevelGLTF,
     OBJECT_OT_CopyLevelArchitectParams,
     WFC_FloorProfile,
     WFC_UL_FloorProfiles,
@@ -6211,6 +6306,18 @@ def register():
                     "operator run, for the Debug panel's Copy Parameters button. Not meant to be "
                     "edited directly"
     )
+    bpy.types.Scene.wfc_export_binary = BoolProperty(
+        name="Binary (.glb)", default=True,
+        description="On: one self-contained .glb file with textures embedded. Off: a .gltf text "
+                    "file plus a separate .bin and a textures folder -- easier to inspect/version, "
+                    "but multiple files to keep together"
+    )
+    bpy.types.Scene.wfc_export_include_lights = BoolProperty(
+        name="Include Lights", default=True,
+        description="Export the real Point lights placed by Step 5 (Torch Light Chance) as glTF "
+                    "punctual lights. Turn off to export geometry only and light the level by "
+                    "hand in-engine instead"
+    )
     bpy.types.Scene.wfc_active_tab = EnumProperty(
         name="Active Tab",
         items=[
@@ -6221,6 +6328,7 @@ def register():
             ('DOORS', "Doors", "Door settings, plus Step 4: Generate Doors", 'MESH_PLANE', 3),
             ('PROPS', "Props", "Torch and decoration settings, plus Step 5: Generate Props",
                       'LIGHT', 4),
+            ('EXPORT', "Export", "One-click glTF/GLB export", 'EXPORT', 5),
         ],
         default='SETUP',
         description="Which step's settings the panel below shows",
@@ -6286,6 +6394,8 @@ def unregister():
     del bpy.types.Scene.wfc_max_lights
     del bpy.types.Scene.wfc_prop_chance
     del bpy.types.Scene.wfc_debug_params
+    del bpy.types.Scene.wfc_export_binary
+    del bpy.types.Scene.wfc_export_include_lights
     del bpy.types.Scene.wfc_active_tab
 
     for cls in reversed(classes):
