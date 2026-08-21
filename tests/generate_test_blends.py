@@ -227,6 +227,17 @@ SCENARIOS = [
         "Same Arch Height as test_22 for a direct side-by-side comparison of the two styles.",
         dict(wfc_door_style='POINTED', wfc_door_arch_height=0.6),
     ),
+    (
+        "test_24.blend",
+        "Bend Chance = 1.0, Style = RANDOM -- room-based stairwells (Corridor Stairs off) turn "
+        "through a flat landing instead of climbing in one straight line, mixing 90-degree L "
+        "turns and 180-degree U dog-legs across the level. Bigger room-count range than baseline "
+        "so enough stairwells roll for both shapes to actually show up in one file.",
+        dict(
+            wfc_corridor_stairs=False, wfc_stair_bend_chance=1.0, wfc_stair_bend_style='RANDOM',
+            wfc_stairs_per_level=4, wfc_rooms_min=14, wfc_rooms_max=20,
+        ),
+    ),
 ]
 
 

@@ -142,6 +142,25 @@ FALLBACK_STAIR_ROOM_LENGTH = 3
 # separate code path.
 CORRIDOR_STAIR_WIDTH = 1
 
+# Minimum room footprint a BENT stairwell (see WFC_Level_Solver.
+# stair_bend_chance / _carve_bent_stair_path) is attempted against --
+# needs more room along the climb axis than a straight run (two climb
+# segments plus a landing tile, not one), and more room across it for a
+# 'U' turn's second lane (see BENT_STAIR_LANE_OFFSET). Larger than the
+# plain MIN_STAIR_ROOM_WIDTH/LENGTH on purpose: _carve_bent_stair_path
+# already bounds-checks every cell it would carve and falls back to an
+# ordinary straight run if the bent path doesn't fit, so these are a
+# search-time head start toward footprints likely to actually succeed,
+# not a hard requirement enforced anywhere else.
+MIN_BENT_STAIR_ROOM_WIDTH = 5
+MIN_BENT_STAIR_ROOM_LENGTH = 5
+
+# How many tiles apart a 'U' turn's two parallel lanes sit -- reversing
+# straight back from the landing would walk directly through the first
+# segment's own already-carved tiles, so the second segment starts offset
+# sideways by this many tiles instead, the real "dog-leg" shape.
+BENT_STAIR_LANE_OFFSET = 2
+
 
 def _set_prop(node, prop_name, value):
     """Best-effort setattr for node properties whose enum identifiers can drift
@@ -211,7 +230,7 @@ class WFC_Level_Solver:
         stair_room_width=3, stair_room_length=4, corridor_stairs=False,
         sub_levels_per_floor=1, split_level_chance=0.3,
         elevation_chance=0.0, elevation_range=0.0, max_ramp_slope_deg=30.0,
-        floor_profiles=None,
+        floor_profiles=None, stair_bend_chance=0.0, stair_bend_style='RANDOM',
     ):
         self.w = width
         self.l = length
@@ -267,6 +286,27 @@ class WFC_Level_Solver:
         # there's no room to put one in.
         self.corridor_stairs = corridor_stairs
 
+        # Bent stairwells (opt-in, default off -- 0.0 is byte-identical to
+        # every stairwell staying a single straight run, as before this
+        # feature existed): each normal (non-repair, non-Corridor-Stairs)
+        # stairwell independently rolls stair_bend_chance to bend through
+        # one landing into two straight segments instead of one straight
+        # run -- see _carve_bent_stair_path. 'L' turns the second segment
+        # 90 degrees (chosen left/right at random each time), 'U' reverses
+        # it 180 degrees (a "dog-leg", offset into a second parallel lane
+        # so it doesn't walk back through its own first segment), 'RANDOM'
+        # picks L or U per stairwell. Only ever attempted on room-based
+        # stairwells (Corridor Stairs' 1-wide footprint has no room for a
+        # second lane or a landing) and only from normal placement, never
+        # from _ensure_connectivity's own repair pass, which stays on the
+        # simplest, most reliable path since its whole job is guaranteeing
+        # connectivity exists at all. Falls back to an ordinary straight
+        # run automatically if the bent path doesn't fit the footprint
+        # (_carve_bent_stair_path returning None) -- carving SOME valid
+        # stair here is mandatory, bending is only ever a bonus.
+        self.stair_bend_chance = max(0.0, min(1.0, stair_bend_chance))
+        self.stair_bend_style = stair_bend_style
+
         # Continuous room elevation (see DEVELOPMENT.md "Middle-ground
         # sketch"): purely a rendering-layer feature on top of the
         # unchanged discrete grid -- elevation_chance/elevation_range
@@ -276,6 +316,15 @@ class WFC_Level_Solver:
         self.elevation_range = max(0.0, elevation_range)
         self.max_ramp_slope_deg = max(1.0, min(89.0, max_ramp_slope_deg))
         self.tile_size = tile_size
+        # Previously accepted but never stored -- every OTHER world-Z
+        # computation happens later, at mesh-build time, outside the
+        # solver, so nothing needed it before. A bent stairwell's landing
+        # needs to bake its own proportional mid-climb height directly
+        # into cell_z_offset (below) at SOLVE time instead, the same way
+        # every other z_offset value already is, so Walls/Doors pick it up
+        # automatically with no changes of their own -- that needs the
+        # real meters value here.
+        self.level_height = level_height
 
         self.grid = [[[TILE_AIR for _ in range(self.h)] for _ in range(self.l)] for _ in range(self.w)]
         self.rotations = [[[0.0 for _ in range(self.h)] for _ in range(self.l)] for _ in range(self.w)]
@@ -297,6 +346,14 @@ class WFC_Level_Solver:
         # single-tile staircases.
         self.stair_run_id = [[[-1 for _ in range(self.h)] for _ in range(self.l)] for _ in range(self.w)]
         self._next_stair_run_id = 0
+        # Which straight segment of its (possibly bent) run a stair cell
+        # belongs to -- 0 for every cell of an ordinary straight run (the
+        # only value that ever existed before bent stairwells), 0/1 for a
+        # bent run's first/second segment respectively. _read_stair_runs
+        # uses this to split a stair_run_id group back into ORDERED
+        # segments directly, rather than trying to infer segment order
+        # from geometry after the fact.
+        self.stair_segment_index = [[[0 for _ in range(self.h)] for _ in range(self.l)] for _ in range(self.w)]
         # (x, y, z) cells that are a stairwell's ceiling opening -- the floor
         # renderer skips these so climbing a stair doesn't dead-end into a
         # solid slab.
@@ -865,7 +922,7 @@ class WFC_Level_Solver:
                     return x, y, fw, fl, rotation
         return None
 
-    def _carve_stair_room(self, x, y, fw, fl, rotation, z):
+    def _carve_stair_room(self, x, y, fw, fl, rotation, z, bend=None):
         """Reserves the fw x fl rectangle as a proper enclosed room on BOTH
         z and z+1 -- this is what makes the wall pass clean: every cell in
         the footprint is walkable on both floors, so walls only ever form at
@@ -881,6 +938,13 @@ class WFC_Level_Solver:
         rest of that upper footprint is ordinary floor, i.e. the upper level
         is a real room that already accommodates the stairwell below it,
         not a corridor punching an isolated hole into whatever was there.
+
+        bend, if given (90 / -90 / 180, see _carve_bent_stair_path), tries
+        a bent climb -- two straight segments through one landing -- INSIDE
+        this same reserved rectangle instead of one straight run. Falls
+        back to the ordinary straight run automatically (this method
+        always successfully carves SOME valid stair) if the bent path
+        doesn't fit -- see _carve_bent_stair_path's own docstring.
 
         Returns (lower_room, upper_room) dicts, in the same shape as
         self.rooms entries, so the caller can corridor-connect each into its
@@ -931,6 +995,9 @@ class WFC_Level_Solver:
         self.rooms.append(upper_room)
         self._rooms_by_level.setdefault(z + 1, []).append(upper_room)
 
+        if bend and self._carve_bent_stair_path(x, y, fw, fl, rotation, bend, z):
+            return lower_room, upper_room
+
         # Leave a 1-tile walkable buffer before the first step and after the
         # last one, so the stair itself never occupies the room's full
         # length. Without this, the physical stair mesh (which spans
@@ -961,7 +1028,151 @@ class WFC_Level_Solver:
 
         return lower_room, upper_room
 
-    def _stair_footprint_chain(self, z, center_x, center_y):
+    def _carve_bent_stair_path(self, x, y, fw, fl, rotation, turn, z):
+        """Carves a bent stairwell's climb -- two straight segments joined
+        by one flat landing tile -- INSIDE the already-fully-floored fw x
+        fl rectangle _carve_stair_room just reserved, rather than needing
+        any non-rectangular room reservation of its own. Every tile outside
+        the two climb segments and the landing is already ordinary walkable
+        floor from that same reservation, so no separate walkway logic is
+        needed here either -- exactly the same principle a straight run's
+        own "the other lanes are already floor" already relies on.
+
+        turn is the second segment's direction change relative to the
+        first, in degrees: 90 (turns left), -90 (turns right), or 180
+        (reverses -- offset sideways into a second parallel lane, since
+        reversing straight back from the landing would walk directly
+        through the first segment's own already-carved tiles; see
+        BENT_STAIR_LANE_OFFSET).
+
+        Every touched cell is bounds-checked against the reserved
+        rectangle before anything is carved -- if the bent path would step
+        outside it (a real possibility for a modestly-sized footprint,
+        especially a 180-degree turn's offset second lane), this carves
+        NOTHING and returns False, so the caller falls back to an ordinary
+        straight run instead. All-or-nothing by design: a half-carved bent
+        path would leave a real gap in what's supposed to be a continuous
+        climb.
+
+        The landing's own world-Z sits proportionally between this level's
+        floor and the next, matching how far along the TOTAL climb (both
+        segments combined) the first segment alone covers -- baked directly
+        into cell_z_offset, the same mechanism WFC_Level_Solver.
+        _apply_continuous_elevation already uses for elevated rooms, so
+        Walls/Doors pick up the landing's correct height with no changes of
+        their own. Safe to write here (rather than only from that pass):
+        stairwell rooms are appended to self.rooms AFTER
+        _apply_continuous_elevation's own snapshot of eligible room
+        indices, so that pass never touches or overwrites this."""
+        dx1, dy1 = DIRECTION_FOR_ROTATION.get(rotation, (0, 1))
+        px, py = -dy1, dx1  # 90 degrees CCW from segment 1's own direction
+
+        if turn == 180:
+            dx2, dy2 = -dx1, -dy1
+            shift_x, shift_y = px * BENT_STAIR_LANE_OFFSET, py * BENT_STAIR_LANE_OFFSET
+        elif turn == 90:
+            dx2, dy2 = px, py
+            shift_x, shift_y = 0, 0
+        else:  # -90
+            dx2, dy2 = -px, -py
+            shift_x, shift_y = 0, 0
+
+        travel_along_x = dx1 != 0
+        size_perp, size_along = (fl, fw) if travel_along_x else (fw, fl)
+        forward = dx1 > 0 or dy1 > 0
+        stair_perp_idx = size_perp // 2
+
+        def world_xy(perp_idx, along_idx):
+            a = along_idx if forward else (size_along - 1 - along_idx)
+            if travel_along_x:
+                return (x + a, y + perp_idx)
+            return (x + perp_idx, y + a)
+
+        entry_offset = 1 if size_along >= 3 else 0
+        usable = size_along - 2 * entry_offset
+        if usable < 3:
+            return False  # not enough room along the climb axis for 2 segments + a landing
+        climb1_len = usable // 2
+        climb2_len = usable - climb1_len - 1  # usable minus climb1 minus the landing tile itself
+        if climb1_len < 1 or climb2_len < 1:
+            return False
+
+        start_x, start_y = world_xy(stair_perp_idx, entry_offset)
+        seg1_cells = [(start_x + dx1 * i, start_y + dy1 * i) for i in range(climb1_len)]
+        landing_cell = (start_x + dx1 * climb1_len, start_y + dy1 * climb1_len)
+        if turn == 180:
+            seg2_start = (landing_cell[0] + shift_x, landing_cell[1] + shift_y)
+        else:
+            seg2_start = (landing_cell[0] + dx2, landing_cell[1] + dy2)
+        seg2_cells = [(seg2_start[0] + dx2 * i, seg2_start[1] + dy2 * i) for i in range(climb2_len)]
+
+        all_cells = seg1_cells + [landing_cell] + seg2_cells
+        if not all(x <= cx < x + fw and y <= cy < y + fl for cx, cy in all_cells):
+            return False  # bent path steps outside the reserved rectangle
+
+        # Segment 1 is centered on its own perpendicular axis by
+        # construction (stair_perp_idx = size_perp // 2), so it always has
+        # a walkway tile free on both sides within the rectangle -- the
+        # same guarantee a straight run gets for free. Segment 2's
+        # perpendicular axis is the ORIGINAL along-axis, and its position
+        # on that axis is just wherever the landing happened to land
+        # (entry_offset + climb1_len), which has no such guarantee. If a
+        # segment 2 tread ends up flush against the rectangle's own edge,
+        # the wall built along that edge lands right on top of the tread
+        # instead of past it. Bail out to a straight run instead of
+        # carving a bent path that overlaps a wall.
+        def _has_perp_buffer(cx, cy, ddx, ddy):
+            pdx, pdy = -ddy, ddx
+            return all(
+                x <= cx + s * pdx < x + fw and y <= cy + s * pdy < y + fl
+                for s in (1, -1)
+            )
+
+        if not all(_has_perp_buffer(cx, cy, dx1, dy1) for cx, cy in seg1_cells):
+            return False
+        if not all(_has_perp_buffer(cx, cy, dx2, dy2) for cx, cy in seg2_cells):
+            return False
+
+        rotation2 = STAIR_EXIT_ROTATION.get((dx2, dy2), rotation)
+        run_id = self._next_stair_run_id
+        self._next_stair_run_id += 1
+
+        for cx, cy in seg1_cells:
+            self.grid[cx][cy][z] = TILE_STAIR
+            self.rotations[cx][cy][z] = rotation
+            self.room_id[cx][cy][z] = -1
+            self.stair_run_id[cx][cy][z] = run_id
+            self.stair_segment_index[cx][cy][z] = 0
+
+        lx, ly = landing_cell
+        self.room_id[lx][ly][z] = -1
+        self.cell_z_offset[lx][ly][z] = self.level_height * climb1_len / (climb1_len + climb2_len)
+
+        for cx, cy in seg2_cells:
+            self.grid[cx][cy][z] = TILE_STAIR
+            self.rotations[cx][cy][z] = rotation2
+            self.room_id[cx][cy][z] = -1
+            self.stair_run_id[cx][cy][z] = run_id
+            self.stair_segment_index[cx][cy][z] = 1
+
+        # Ceiling opening spans segment 2's own final tile (directly above
+        # the last actual step -- without this the climb dead-ends into a
+        # solid ceiling) PLUS one adjacent tile for a bit of width, same
+        # "stair's own lane + one adjacent lane" shape _carve_stair_room's
+        # straight-run hole placement already uses, just relative to
+        # segment 2's own travel axis instead of the run's single shared
+        # one.
+        hole_x, hole_y = seg2_cells[-1]
+        self.floor_openings.add((hole_x, hole_y, z + 1))
+        hole_px, hole_py = -dy2, dx2
+        for ox, oy in ((hole_x + hole_px, hole_y + hole_py), (hole_x - hole_px, hole_y - hole_py)):
+            if x <= ox < x + fw and y <= oy < y + fl:
+                self.floor_openings.add((ox, oy, z + 1))
+                break
+
+        return True
+
+    def _stair_footprint_chain(self, z, center_x, center_y, prefer_bend_size=False):
         """Tries progressively smaller/more permissive stairwell footprints
         around (center_x, center_y) on level z, room-based or
         corridor-based depending on self.corridor_stairs. Returns whatever
@@ -972,7 +1183,22 @@ class WFC_Level_Solver:
         CORRIDOR_STAIR_WIDTH plus margin=0 is already close to the
         cheapest possible placement (no buffered ring, no separate
         walkway), so there's little room left to relax further before
-        the length itself has to shrink."""
+        the length itself has to shrink.
+
+        prefer_bend_size (ignored for Corridor Stairs -- bending is never
+        offered there, see _pick_stair_bend) searches for at least
+        MIN_BENT_STAIR_ROOM_WIDTH/LENGTH on the FIRST tier instead of the
+        plain self.stair_room_width/length, when the caller already knows
+        this stairwell is about to attempt a bend -- a bend carved into
+        the ordinary (often smaller) default footprint would almost
+        always fail its own bounds check and silently fall back to
+        straight, which works but wastes the caller's RNG roll finding
+        that out. The later fallback tiers still shrink to the ordinary
+        MIN_STAIR_ROOM_WIDTH/LENGTH sizes if nothing bigger fits anywhere
+        -- at that point a bend genuinely can't be spared, and
+        _carve_bent_stair_path's own bounds check falls back to straight
+        exactly as it would from any other footprint that turned out too
+        small, not a special case here."""
         if self.corridor_stairs:
             return (
                 self._find_stair_footprint(
@@ -983,9 +1209,14 @@ class WFC_Level_Solver:
                     center_x=center_x, center_y=center_y, corridor_mode=True,
                 )
             )
+        first_width = self.stair_room_width
+        first_length = self.stair_room_length
+        if prefer_bend_size:
+            first_width = max(first_width, MIN_BENT_STAIR_ROOM_WIDTH)
+            first_length = max(first_length, MIN_BENT_STAIR_ROOM_LENGTH)
         return (
             self._find_stair_footprint(
-                z, self.stair_room_width, self.stair_room_length,
+                z, first_width, first_length,
                 center_x=center_x, center_y=center_y,
             ) or self._find_stair_footprint(
                 z, MIN_STAIR_ROOM_WIDTH, MIN_STAIR_ROOM_LENGTH,
@@ -1031,6 +1262,23 @@ class WFC_Level_Solver:
         else:
             self._carve_corridor(from_x, from_y, to_x, to_y, z)
 
+    def _pick_stair_bend(self):
+        """Rolls whether the NEXT stairwell placed should bend, and if so,
+        by how much -- see stair_bend_chance's own __init__ comment. Never
+        offered for Corridor Stairs (self.corridor_stairs) -- a 1-wide
+        footprint has no room for a second lane or a landing, so
+        _carve_bent_stair_path's own bounds check would just reject it
+        anyway; skipped here instead so a Corridor Stairs level doesn't
+        waste an RNG roll on something guaranteed to fall back to
+        straight every time."""
+        if self.corridor_stairs or random.random() >= self.stair_bend_chance:
+            return None
+        if self.stair_bend_style == 'L':
+            return random.choice((90, -90))
+        if self.stair_bend_style == 'U':
+            return 180
+        return random.choice((90, -90, 180))
+
     def _connect_levels_with_stairs(self):
         # Cap how many rooms per level actually get their own stair down --
         # one per room floods a big map with stairs; the level's own corridor
@@ -1054,12 +1302,19 @@ class WFC_Level_Solver:
             for upper in chosen_rooms:
                 lower = min(lower_rooms, key=lambda lo: self._manhattan(lo, upper))
 
-                placement = self._stair_footprint_chain(z, upper['cx'], upper['cy'])
+                # Decided BEFORE the footprint search, not after, so a
+                # stairwell that's about to attempt a bend can search for
+                # a large-enough footprint in the first place -- see
+                # _stair_footprint_chain's own prefer_bend_size comment.
+                bend = self._pick_stair_bend()
+                placement = self._stair_footprint_chain(
+                    z, upper['cx'], upper['cy'], prefer_bend_size=bool(bend),
+                )
                 if placement is None:
                     continue  # no room anywhere for a stairwell -- skip this connection
 
                 x, y, fw, fl, rotation = placement
-                lower_room, upper_room = self._carve_stair_room(x, y, fw, fl, rotation, z)
+                lower_room, upper_room = self._carve_stair_room(x, y, fw, fl, rotation, z, bend=bend)
                 self._connect_room_to_point(lower['cx'], lower['cy'], lower_room['cx'], lower_room['cy'], z)
                 self._connect_room_to_point(upper['cx'], upper['cy'], upper_room['cx'], upper_room['cy'], z + 1)
 
@@ -2635,6 +2890,15 @@ class OBJECT_OT_GenerateGameBlueprint(bpy.types.Operator):
             for fp in scene.wfc_floor_profiles
         ]
 
+        # Computed before the solver, not after: a bent stairwell's landing
+        # needs the real meters-per-FINE-slice value (not scene.wfc_
+        # level_height, the height of one whole LOGICAL floor) to bake its
+        # own proportional mid-climb world-Z, since every solver fine-Z
+        # step (z to z+1, whether a split-level step within one floor or a
+        # jump to the next floor) always spans exactly one fine slice --
+        # see _fine_level_height's own docstring.
+        fine_level_height = _fine_level_height(scene)
+
         solver = WFC_Level_Solver(
             width=scene.wfc_width,
             length=scene.wfc_length,
@@ -2644,7 +2908,7 @@ class OBJECT_OT_GenerateGameBlueprint(bpy.types.Operator):
             room_size_max=size_max,
             stairs_per_level=scene.wfc_stairs_per_level,
             tile_size=scene.wfc_tile_size,
-            level_height=scene.wfc_level_height,
+            level_height=fine_level_height,
             room_shape=scene.wfc_room_shape,
             stair_room_width=scene.wfc_stair_room_width,
             stair_room_length=scene.wfc_stair_room_length,
@@ -2655,6 +2919,8 @@ class OBJECT_OT_GenerateGameBlueprint(bpy.types.Operator):
             elevation_range=scene.wfc_elevation_range,
             max_ramp_slope_deg=scene.wfc_max_ramp_slope,
             floor_profiles=floor_profiles,
+            stair_bend_chance=scene.wfc_stair_bend_chance,
+            stair_bend_style=scene.wfc_stair_bend_style,
         )
         solver.solve()
 
@@ -2672,13 +2938,13 @@ class OBJECT_OT_GenerateGameBlueprint(bpy.types.Operator):
         room_ids = []
         floor_openings = []
         stair_run_ids = []
+        stair_segment_indices = []
         level_zs = []
         logical_floors = []
         z_offsets = []
         ceiling_openings = []
 
         scale_factor = scene.wfc_tile_size
-        fine_level_height = _fine_level_height(scene)
         style_int = int(scene.wfc_style)
         for x in range(solver.w):
             for y in range(solver.l):
@@ -2693,6 +2959,7 @@ class OBJECT_OT_GenerateGameBlueprint(bpy.types.Operator):
                         room_ids.append(solver.room_id[x][y][z])
                         floor_openings.append((x, y, z) in solver.floor_openings)
                         stair_run_ids.append(solver.stair_run_id[x][y][z])
+                        stair_segment_indices.append(solver.stair_segment_index[x][y][z])
                         level_zs.append(z)
                         # Baked in now (using THIS generation's actual
                         # solver.sub_levels), rather than re-derived later
@@ -2735,6 +3002,8 @@ class OBJECT_OT_GenerateGameBlueprint(bpy.types.Operator):
         mesh_data.attributes["floor_opening"].data.foreach_set("value", floor_openings)
         mesh_data.attributes.new(name="stair_run_id", type="INT", domain="POINT")
         mesh_data.attributes["stair_run_id"].data.foreach_set("value", stair_run_ids)
+        mesh_data.attributes.new(name="stair_segment_index", type="INT", domain="POINT")
+        mesh_data.attributes["stair_segment_index"].data.foreach_set("value", stair_segment_indices)
         mesh_data.attributes.new(name="level_z", type="INT", domain="POINT")
         mesh_data.attributes["level_z"].data.foreach_set("value", level_zs)
         mesh_data.attributes.new(name="logical_floor", type="INT", domain="POINT")
@@ -3993,13 +4262,21 @@ def _build_stair_mesh(
 ):
     """Fully-baked ascending stair geometry, same reasoning as
     _build_wall_mesh: plain Python boxes rather than a Geometry Nodes
-    instancing pass. stair_runs is a list of (x, y, z, rotation, length)
-    tuples -- (x, y, z) is the run's lowest/starting tile, rotation is one
-    of the four cardinal values baked into tile_rotation, and length is how
-    many tiles long the run is (see WFC_Level_Solver.stair_length). The
-    climb is spread across the whole run -- steps_per_tile * length boxes
-    total, each one step taller than the last -- rather than always cramming
-    a full level's rise into a single tile, which is what made stairs steep.
+    instancing pass. stair_runs is a list of {'z': z, 'segments': [(x, y,
+    rotation, length), ...]} dicts (see _read_stair_runs) -- (x, y) is a
+    segment's own lowest/starting tile, rotation is one of the four
+    cardinal values baked into tile_rotation, and length is how many
+    tiles long that segment is. 'segments' has one entry for an ordinary
+    straight run, two for a bent one (see WFC_Level_Solver.
+    stair_bend_chance) with a flat landing between them. The climb is
+    spread across the WHOLE run (every segment combined) -- steps_per_tile
+    * total_tiles boxes total, each one step taller than the last -- rather
+    than always cramming a full level's rise into a single tile, which is
+    what made stairs steep. A bent run's second segment continues the
+    SAME cumulative step/height progression its first segment left off at
+    (exactly matching the landing tile's own baked z_offset -- both derive
+    the split point from the same climb1_len/total_tiles proportion), not
+    a fresh climb starting over from the floor.
 
     organic_amount (meters, 0 = off) jitters each tread's WIDTH only
     (worn-stone edges), never its depth or height -- the run's cumulative
@@ -4034,21 +4311,27 @@ def _build_stair_mesh(
         faces.append((i + 7, i + 6, i + 2, i + 3))
         faces.append((i + 4, i + 7, i + 3, i + 0))
 
-    for x, y, z, rot, length in stair_runs:
-        total_steps = max(1, steps_per_tile * length)
-        run_span = tile_size * length
-        step_depth = run_span / total_steps
+    for run in stair_runs:
+        z = run['z']
+        segments = run['segments']
+        total_tiles = sum(seg[3] for seg in segments)
+        total_steps = max(1, steps_per_tile * total_tiles)
+        step_depth = tile_size / steps_per_tile
         step_height = level_height / total_steps
-        cx = x * tile_size
-        cy = y * tile_size
         z0 = z * level_height
-        for i in range(total_steps):
-            rise = step_height * (i + 1)
-            y0 = -half + step_depth * i
-            y1 = y0 + step_depth
-            hw = half + (random.uniform(-organic_amount, organic_amount) if organic_amount > 0 else 0.0)
-            corners = [(-hw, y0), (hw, y0), (hw, y1), (-hw, y1)]
-            add_box(corners, z0, z0 + rise, cx, cy, rot)
+        step_offset = 0  # cumulative step count from any earlier segment in this same run
+        for x, y, rot, length in segments:
+            cx = x * tile_size
+            cy = y * tile_size
+            seg_steps = steps_per_tile * length
+            for i in range(seg_steps):
+                rise = step_height * (step_offset + i + 1)
+                y0 = -half + step_depth * i
+                y1 = y0 + step_depth
+                hw = half + (random.uniform(-organic_amount, organic_amount) if organic_amount > 0 else 0.0)
+                corners = [(-hw, y0), (hw, y0), (hw, y1), (-hw, y1)]
+                add_box(corners, z0, z0 + rise, cx, cy, rot)
+            step_offset += seg_steps
 
     mesh = bpy.data.meshes.new(name + "_Mesh")
     mesh.from_pydata(verts, [], faces)
@@ -4060,11 +4343,15 @@ def _build_stair_mesh(
 def _build_ramp_mesh(stair_runs, tile_size, level_height, name, organic_amount=0.0, uv_tile_size=1.0):
     """One continuous sloped ramp per run instead of discrete steps -- same
     stair_runs data as _build_stair_mesh (same rooms, same buffer, same
-    orientation fix; this only swaps the mesh representation), better
-    suited to caves/open terrain than a boxy staircase. The ramp tapers to
-    a flush zero-height edge at the entry (matching the lower floor
-    exactly, no lip to trip on) and reaches full level_height at the exit
-    edge (matching the upper floor).
+    orientation fix, same segment-list shape for a bent run; this only
+    swaps the mesh representation), better suited to caves/open terrain
+    than a boxy staircase. The ramp tapers to a flush zero-height edge at
+    the entry (matching the lower floor exactly, no lip to trip on) and
+    reaches full level_height at the exit edge (matching the upper floor)
+    -- for a bent run, a second segment's own ramp continues smoothly from
+    the height its first segment's ramp already reached (matching the
+    landing tile's own baked z_offset), rather than tapering back to zero
+    at the landing.
 
     With organic_amount == 0 (the default), the whole run is a single
     smooth-sided wedge. With organic_amount > 0 it's built from several
@@ -4114,22 +4401,29 @@ def _build_ramp_mesh(stair_runs, tile_size, level_height, name, organic_amount=0
         faces.append((i + 7, i + 6, i + 2, i + 3))  # far wall
         faces.append((i + 4, i + 7, i + 3, i + 0))  # left wall
 
-    for x, y, z, rot, length in stair_runs:
-        cx = x * tile_size
-        cy = y * tile_size
+    for run in stair_runs:
+        z = run['z']
+        run_segments = run['segments']
+        total_tiles = sum(seg[3] for seg in run_segments)
         z0 = z * level_height
-        run_span = tile_size * length
-        seg_span = run_span / segments
+        height_offset = 0.0  # cumulative rise from any earlier segment in this same run
+        for x, y, rot, length in run_segments:
+            cx = x * tile_size
+            cy = y * tile_size
+            run_span = tile_size * length
+            seg_span = run_span / segments
+            seg_total_height = level_height * length / total_tiles
 
-        heights = [level_height * (k / segments) for k in range(segments + 1)]
-        widths = [half for _ in range(segments + 1)]
-        for k in range(1, segments):  # leave the two ends at exactly tile width
-            widths[k] = half + random.uniform(-organic_amount, organic_amount)
+            heights = [height_offset + seg_total_height * (k / segments) for k in range(segments + 1)]
+            widths = [half for _ in range(segments + 1)]
+            for k in range(1, segments):  # leave the two ends at exactly tile width
+                widths[k] = half + random.uniform(-organic_amount, organic_amount)
 
-        for k in range(segments):
-            y0 = -half + seg_span * k
-            y1 = y0 + seg_span
-            add_segment(cx, cy, rot, y0, y1, heights[k], heights[k + 1], widths[k], widths[k + 1], z0)
+            for k in range(segments):
+                y0 = -half + seg_span * k
+                y1 = y0 + seg_span
+                add_segment(cx, cy, rot, y0, y1, heights[k], heights[k + 1], widths[k], widths[k + 1], z0)
+            height_offset += seg_total_height
 
     mesh = bpy.data.meshes.new(name + "_Mesh")
     mesh.from_pydata(verts, [], faces)
@@ -4139,17 +4433,25 @@ def _build_ramp_mesh(stair_runs, tile_size, level_height, name, organic_amount=0
 
 
 def _read_stair_runs(blueprint_obj, tile_size, level_height):
-    """Reads tile_id/tile_rotation/stair_run_id off the blueprint mesh and
-    groups stair cells back into continuous runs, for the stairs operator
-    (which needs one run per stairwell instead of one per tile, to build
-    a single continuous stair/ramp mesh rather than len(run) disconnected
-    single-tile ones). Returns a list of (start_x, start_y, z, rotation,
-    length) tuples, or None if the blueprint predates these attributes."""
+    """Reads tile_id/tile_rotation/stair_run_id/stair_segment_index off the
+    blueprint mesh and groups stair cells back into continuous runs, for
+    the stairs operator (which needs one run per stairwell instead of one
+    per tile, to build a single continuous stair/ramp mesh rather than
+    len(run) disconnected single-tile ones).
+
+    Returns a list of {'z': gz, 'segments': [(start_x, start_y, rotation,
+    length), ...]} dicts, or None if the blueprint predates these
+    attributes. 'segments' has exactly one entry for an ordinary straight
+    run (the only shape that existed before bent stairwells -- see
+    WFC_Level_Solver.stair_bend_chance) or two for a bent one, ordered
+    first-climbed-first via the baked stair_segment_index attribute
+    directly rather than inferred from geometry afterward."""
     mesh = blueprint_obj.data
     tile_id_layer = mesh.attributes.get("tile_id")
     tile_rot_layer = mesh.attributes.get("tile_rotation")
     run_id_layer = mesh.attributes.get("stair_run_id")
-    if tile_id_layer is None or tile_rot_layer is None or run_id_layer is None:
+    segment_layer = mesh.attributes.get("stair_segment_index")
+    if tile_id_layer is None or tile_rot_layer is None or run_id_layer is None or segment_layer is None:
         return None
 
     # Bulk-read via foreach_get instead of per-vertex attribute access --
@@ -4165,32 +4467,41 @@ def _read_stair_runs(blueprint_obj, tile_size, level_height):
     tile_rot_layer.data.foreach_get("value", rotations)
     run_ids = [0] * n
     run_id_layer.data.foreach_get("value", run_ids)
+    segment_indices = [0] * n
+    segment_layer.data.foreach_get("value", segment_indices)
 
     # Stairwell cells are never continuous-elevation candidates (see
-    # WFC_Level_Solver._apply_continuous_elevation), so their world-Z is
-    # always an exact z * level_height with no offset -- rounding it back
-    # to a grid index here stays exact regardless of what other cells in
-    # the blueprint might carry.
-    runs_by_id = {}
+    # WFC_Level_Solver._apply_continuous_elevation), and a bent run's own
+    # landing tile is never itself a TILE_STAIR cell (see
+    # _carve_bent_stair_path -- it's excluded from this collection
+    # entirely, same as it's excluded from any run's tile COUNT), so
+    # every cell collected here has an exact world-Z with no offset to
+    # account for -- rounding it back to a grid index stays exact.
+    cells_by_run_segment = {}  # (run_id, segment_index) -> [(gx,gy,gz,rot), ...]
     for i in range(n):
         if tile_ids[i] != TILE_STAIR:
             continue
         gx = round(coords[i * 3] / tile_size)
         gy = round(coords[i * 3 + 1] / tile_size)
         gz = round(coords[i * 3 + 2] / level_height)
-        rot = rotations[i]
-        run_id = run_ids[i]
-        runs_by_id.setdefault(run_id, []).append((gx, gy, gz, rot))
+        key = (run_ids[i], segment_indices[i])
+        cells_by_run_segment.setdefault(key, []).append((gx, gy, gz, rotations[i]))
 
-    stair_runs = []
-    for cells in runs_by_id.values():
+    runs_by_id = {}
+    for (run_id, seg_idx), cells in cells_by_run_segment.items():
         _, _, gz0, rot = cells[0]
         dx, dy = _direction_for_rotation(rot)
         if dx or dy:
             start = min(cells, key=lambda c: c[0] * dx + c[1] * dy)
         else:
             start = cells[0]
-        stair_runs.append((start[0], start[1], gz0, rot, len(cells)))
+        run = runs_by_id.setdefault(run_id, {'z': gz0, 'segments': {}})
+        run['segments'][seg_idx] = (start[0], start[1], rot, len(cells))
+
+    stair_runs = []
+    for run in runs_by_id.values():
+        ordered_segments = [run['segments'][i] for i in sorted(run['segments'])]
+        stair_runs.append({'z': run['z'], 'segments': ordered_segments})
     return stair_runs
 
 
@@ -4726,7 +5037,7 @@ class OBJECT_OT_GenerateLevelStairs(bpy.types.Operator):
         sub_levels = max(1, scene.wfc_sub_levels_per_floor)
         runs_by_floor = {}
         for run in stair_runs:
-            runs_by_floor.setdefault(run[2] // sub_levels, []).append(run)
+            runs_by_floor.setdefault(run['z'] // sub_levels, []).append(run)
 
         per_stair = scene.wfc_stair_grouping == 'PER_STAIR'
         created = []
@@ -4759,7 +5070,7 @@ class OBJECT_OT_GenerateLevelStairs(bpy.types.Operator):
         if created:
             context.view_layer.objects.active = created[-1]
 
-        total_tiles = sum(length for *_, length in stair_runs)
+        total_tiles = sum(seg[3] for run in stair_runs for seg in run['segments'])
         self.report(
             {'INFO'},
             f"Stairs generated: {len(stair_runs)} runs across {total_tiles} tiles, in {len(created)} object(s)."
@@ -5425,6 +5736,13 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
         steps_col.prop(scene, "wfc_stair_steps", text="Steps per Tile")
         col = layout.column(align=True)
         col.prop(scene, "wfc_stair_grouping", text="Grouping")
+        col.separator()
+        col.prop(scene, "wfc_stair_bend_chance", text="Bend Chance")
+        bend_style_row = col.row(align=True)
+        bend_style_row.enabled = scene.wfc_stair_bend_chance > 0.0 and not scene.wfc_corridor_stairs
+        bend_style_row.prop(scene, "wfc_stair_bend_style", text="Bend Style")
+        if scene.wfc_stair_bend_chance > 0.0 and scene.wfc_corridor_stairs:
+            col.label(text="Bending needs a room-based stairwell -- ignored with Corridor Stairs on", icon='INFO')
         layout.separator()
         _step_button(
             layout, "object.generate_level_stairs", "Step 3: Generate Stairs",
@@ -5787,6 +6105,23 @@ def register():
         ],
         default='PER_FLOOR',
     )
+    bpy.types.Scene.wfc_stair_bend_chance = FloatProperty(
+        name="Bend Chance", default=0.0, min=0.0, max=1.0, subtype='FACTOR',
+        description="Chance a given stairwell bends through one landing into two straight "
+                    "segments instead of climbing in one straight run. 0 = off (default, no "
+                    "change from every stairwell before this existed). Only offered for "
+                    "room-based stairwells, never Corridor Stairs (no room for a landing) or "
+                    "the emergency connectivity-repair fallback"
+    )
+    bpy.types.Scene.wfc_stair_bend_style = EnumProperty(
+        name="Bend Style",
+        items=[
+            ('RANDOM', "Random", "Each bent stairwell independently rolls L or U"),
+            ('L', "L (90°)", "The second segment turns 90 degrees, left or right at random"),
+            ('U', "U (180°)", "The second segment reverses into a second parallel lane -- a \"dog-leg\""),
+        ],
+        default='RANDOM',
+    )
     bpy.types.Scene.wfc_door_height = FloatProperty(
         name="Door Height", default=2.2, min=0.5, max=10.0, unit='LENGTH',
         description="Height of each door frame's opening, from floor to the underside of the "
@@ -5934,6 +6269,8 @@ def unregister():
     del bpy.types.Scene.wfc_stair_mesh_style
     del bpy.types.Scene.wfc_stair_steps
     del bpy.types.Scene.wfc_stair_grouping
+    del bpy.types.Scene.wfc_stair_bend_chance
+    del bpy.types.Scene.wfc_stair_bend_style
     del bpy.types.Scene.wfc_door_height
     del bpy.types.Scene.wfc_door_frame_thickness
     del bpy.types.Scene.wfc_door_grouping

@@ -720,7 +720,7 @@ if stair_objs and walls_obj is not None:
     # re-running the whole pipeline under a different setting just for
     # this).
     ramp_mesh = addon._build_ramp_mesh(
-        [(0, 0, 0, 0.0, 3)], tile_size=2.0, level_height=3.0, name="TestRampCleanup",
+        [{'z': 0, 'segments': [(0, 0, 0.0, 3)]}], tile_size=2.0, level_height=3.0, name="TestRampCleanup",
     )
     ramp_boxes = len(ramp_mesh.vertices) // 8
     check(
@@ -1120,6 +1120,115 @@ check(
     _exposed_rate < 0.25,
     f"{_stair_cells_exposed}/{_stair_cells_total} stair cells ({_exposed_rate:.0%}) exposed",
 )
+
+# ==============================================================================
+# Bent stairwells -- solver-only connectivity regression
+# ==============================================================================
+# stair_bend_chance forced to 1.0 (every eligible stairwell tries to bend)
+# across a spread of seeds/sizes/styles, checking the one guarantee that
+# actually matters: _ensure_connectivity's own acceptance test
+# (start->end BFS reachability) still holds. _carve_bent_stair_path is
+# designed to be all-or-nothing (falls back to an ordinary straight run
+# if the bent path doesn't fit its footprint, never leaves a half-carved
+# gap), so this is really checking that fallback discipline held under
+# stress, not just that bending "works" in isolation.
+_bent_bfs_bad = 0
+_bent_landing_bad = 0
+_bent_stairwells_seen = 0
+for _trial in range(20):
+    _random.seed(91000 + _trial)
+    _w = _random.choice([20, 30, 40])
+    _l = _random.choice([20, 30, 40])
+    _h = _random.choice([2, 3])
+    _style = _random.choice(['RANDOM', 'L', 'U'])
+    _solver = addon.WFC_Level_Solver(
+        width=_w, length=_l, height=_h, room_count=_random.randint(8, 16),
+        room_size_min=3, room_size_max=_random.choice([5, 8]),
+        room_shape=_random.choice(['RECT', 'ROUND', 'MIXED']),
+        stairs_per_level=_random.randint(2, 4), stair_room_width=3, stair_room_length=4,
+        corridor_stairs=False,  # bending is never offered for Corridor Stairs -- see _pick_stair_bend
+        sub_levels_per_floor=1, split_level_chance=0.0,
+        elevation_chance=0.0, elevation_range=0.0, max_ramp_slope_deg=30.0,
+        level_height=3.0, stair_bend_chance=1.0, stair_bend_style=_style,
+    )
+    _solver.solve()
+    if not _solver._bfs_reachable(_solver.start, _solver.end):
+        _bent_bfs_bad += 1
+
+    # Landing tiles are wherever a stair cell's segment index is 1 (a
+    # bent run's second segment) -- the cell immediately behind its own
+    # start, on segment 1's own travel axis, is the landing. Simpler and
+    # just as direct: any cell_z_offset strictly between 0 and the full
+    # level_height that ISN'T itself a TILE_STAIR cell is a landing (see
+    # _carve_bent_stair_path -- nothing else in the solver ever writes a
+    # z_offset before this feature existed, since _apply_continuous_
+    # elevation is disabled in this trial).
+    for x in range(_solver.w):
+        for y in range(_solver.l):
+            for z in range(_solver.h):
+                off = _solver.cell_z_offset[x][y][z]
+                if off <= 0.0 or _solver.grid[x][y][z] == addon.TILE_STAIR:
+                    continue
+                _bent_stairwells_seen += 1
+                if not (0.0 < off < _solver.level_height):
+                    _bent_landing_bad += 1
+check(
+    "Bent stairs: start->end still reachable across 20 seeded trials with bending forced on",
+    _bent_bfs_bad == 0, f"{_bent_bfs_bad}/20 trials disconnected",
+)
+check(
+    "Bent stairs: the stress trials actually exercised bending (not a trivially-passing no-op)",
+    _bent_stairwells_seen > 0, f"landing tiles seen={_bent_stairwells_seen}",
+)
+check(
+    "Bent stairs: every landing tile's world-Z offset stays strictly between the floor and the next",
+    _bent_landing_bad == 0, f"{_bent_landing_bad}/{_bent_stairwells_seen} landings out of range",
+)
+
+# One real end-to-end pass through the actual pipeline (Blueprint -> Walls
+# -> Stairs -> Doors), to catch anything a pure solver-level check can't:
+# GN evaluation, and specifically the mesh-building side of a bent run
+# (_read_stair_runs reconstructing segment order from the baked
+# stair_segment_index attribute, _build_stair_mesh/_build_ramp_mesh's
+# cumulative cross-segment height math).
+scene.wfc_stair_bend_chance = 1.0
+scene.wfc_stair_bend_style = 'RANDOM'
+# Bending is never offered for Corridor Stairs (_pick_stair_bend returns
+# None whenever self.corridor_stairs is set -- a 1-wide corridor stair has
+# no room for a landing/turn). Corridor Stairs has been on since line 109
+# and nothing before this point turned it off, so without this the section
+# below would silently test plain corridor stairs instead of an actual
+# bent run -- and corridor stairs are SUPPOSED to sit flush against a wall
+# by design (see the eps note on the "beyond expected flush contact" check
+# above), so the overlap check below would misfire on totally expected
+# geometry rather than the bent-specific bug it exists to catch.
+scene.wfc_corridor_stairs = False
+result = bpy.ops.object.generate_game_blueprint()
+check("Bent stairs: Blueprint regenerate FINISHED", result == {'FINISHED'}, str(result))
+result = bpy.ops.object.generate_level_walls()
+check("Bent stairs: Walls FINISHED", result == {'FINISHED'}, str(result))
+result = bpy.ops.object.generate_level_stairs()
+check("Bent stairs: Stairs FINISHED or CANCELLED", result in ({'FINISHED'}, {'CANCELLED'}), str(result))
+bent_walls_obj = bpy.data.objects.get(addon.WALLS_OBJECT_NAME)
+bent_stair_objs = [
+    o for o in bpy.data.objects
+    if o.name == addon.STAIRS_OBJECT_NAME or o.name.startswith(addon.STAIRS_OBJECT_NAME + "_")
+]
+if bent_walls_obj is not None and bent_stair_objs:
+    bent_stair_aabbs = [box for o in bent_stair_objs for box in per_box_aabbs(o, 8)]
+    bent_wall_aabbs = per_box_aabbs(bent_walls_obj, 8)
+    bent_overlap_count = sum(
+        1 for sb in bent_stair_aabbs if any(aabb_overlap(sb, wb) for wb in bent_wall_aabbs)
+    )
+    check(
+        "Bent stairs: real-Blender pipeline -- no stair tread box overlaps a wall box",
+        bent_overlap_count == 0, f"{bent_overlap_count}/{len(bent_stair_aabbs)} stair boxes overlap a wall",
+    )
+result = bpy.ops.object.generate_level_doors()
+check("Bent stairs: Doors FINISHED or CANCELLED", result in ({'FINISHED'}, {'CANCELLED'}), str(result))
+scene.wfc_stair_bend_chance = 0.0
+scene.wfc_stair_bend_style = 'RANDOM'
+scene.wfc_corridor_stairs = True
 
 # One real end-to-end pass through the actual pipeline, to catch anything
 # a pure solver-level check can't (GN evaluation, wall/door mesh building

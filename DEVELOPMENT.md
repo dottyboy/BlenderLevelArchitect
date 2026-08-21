@@ -516,6 +516,53 @@ GN complexity there specifically.
       both styles, and confirmed Round vs. Pointed are genuinely different curves (Pointed climbs
       measurably steeper and has a real tangent discontinuity at the apex, not just a cosmetic
       label) via direct numeric comparison of the two profile functions.
+- [x] **Bent stairwells (L/U switchback with one landing).** New `wfc_stair_bend_chance` (0 =
+      off, byte-identical to every generation before this feature existed) and
+      `wfc_stair_bend_style` (Random/L/U). Confirmed the scoping simplification held: room
+      RESERVATION is untouched — `_find_stair_footprint`/`_room_fits` still just search for and
+      reserve one rectangle exactly as before; only what gets carved inside it changed. New
+      `_carve_bent_stair_path` carves two straight segments joined by one flat landing tile (a
+      plain floor cell, not a stair cell) instead of one straight center line; a 90° turn (L)
+      just changes direction at the landing, a 180° turn (U) offsets sideways by
+      `BENT_STAIR_LANE_OFFSET` into a second parallel lane (reversing straight back would walk
+      through the first segment's own already-carved tiles). The landing's world-Z is baked into
+      `cell_z_offset` proportionally to how much of the total climb the first segment alone
+      covers — the same mechanism `_apply_continuous_elevation` already uses for elevated rooms,
+      so Walls/Doors pick up the landing's correct height for free. Run data changed shape from a
+      flat `(x,y,z,rot,length)` tuple to `{'z': z, 'segments': [...]}` — a straight run is just the
+      1-segment case, unchanged behavior; `_read_stair_runs`, `_build_stair_mesh`, and
+      `_build_ramp_mesh` all generalized to walk a list of segments, carrying height/step count
+      cumulatively across the join. **Three real bugs found and fixed during this build, in
+      increasing order of subtlety:**
+      1. `WFC_Level_Solver.__init__` accepted a `level_height` constructor argument but never
+         actually stored it (`self.level_height` didn't exist) — harmless until the landing's
+         proportional-height math needed to read it back, at which point it would have been an
+         `AttributeError`. Separately, the Blueprint operator was passing `scene.wfc_level_height`
+         (the full logical floor height) to that same constructor argument instead of
+         `_fine_level_height(scene)` (the real per-fine-slice height) — again harmless while
+         unused, but would have made every landing's height wrong by a factor of
+         `sub_levels_per_floor` once it became load-bearing. Both fixed together.
+      2. The very first version of `_carve_bent_stair_path`'s ceiling-hole placement only added
+         the tile adjacent to segment 2's final step to `floor_openings`, not the final step's own
+         tile — unlike the straight-run convention, which always includes both. The climb would
+         have dead-ended into a solid ceiling.
+      3. **The subtle one, caught by the automated wall-overlap regression test, not by eye:**
+         segment 1 is centered on its own perpendicular axis by construction
+         (`stair_perp_idx = size_perp // 2`), so it always has a free walkway tile on both sides
+         within the reserved rectangle — exactly the guarantee a straight run already gets for
+         free. Segment 2's perpendicular axis is the ORIGINAL along-axis, and its position on that
+         axis is just wherever the landing happened to land (`entry_offset + climb1_len`), with no
+         such guarantee — a segment 2 tread could end up flush against the rectangle's own edge,
+         and the wall built along that edge would land right on top of the tread instead of past
+         it. Fixed by requiring every cell in both segments to have a free tile on both
+         perpendicular sides within the rectangle (`_has_perp_buffer`), bailing out to an ordinary
+         straight run instead of carving a bent path that overlaps a wall.
+      Verified against real Blender 5.2.0 LTS: seeded solver-level stress trials (BFS
+      reachability with bending forced on, landing z-offset range), a real pipeline pass (AABB
+      overlap check between stair tread boxes and wall boxes), and visually — a rendered top-down
+      close-up (floor geometry hidden to avoid z-fighting with the tread boxes at the same base Z)
+      showing a real L-shaped run: two 4-tread flights meeting exactly at their shared corner, one
+      climbing along X and the other along Y, continuous rise from the floor to the next level.
 
 ---
 
@@ -568,15 +615,11 @@ GN complexity there specifically.
 
 Roughly ordered by how directly they build on what already exists:
 
-- [ ] **Bent stairwells/ramps (L or U switchback with one landing) — scoped, not yet built.**
-      Deliberately NOT a true continuous curve (spiral stairs) — that needs an arc-length-
-      parameterized path throughout the solver and stays the "biggest lift, don't start casually"
-      item. A real simplification found during scoping: the room RESERVATION doesn't need to
-      change at all — `_find_stair_footprint`/`_room_fits` still just search for and reserve one
-      rectangle exactly as today; only what's CARVED inside that rectangle changes (an L or U path
-      with a landing instead of one straight center line). Full design (new per-segment run data
-      model, `_carve_stair_room`/`_read_stair_runs`/mesh-builder changes) written up in
-      `DEVELOPMENT_OFFLINE.md` but not yet implemented.
+- [x] **Bent stairwells/ramps (L or U switchback with one landing) — done, see §2.** Shipped as
+      `wfc_stair_bend_chance`/`wfc_stair_bend_style`. Deliberately NOT a true continuous curve
+      (spiral stairs) — that stays the "biggest lift, don't start casually" item. The scoped-out
+      simplification held: room reservation is untouched, only what's carved inside the rectangle
+      changed.
 - [ ] **Actual door leaves/panels**, as an option alongside the current always-open frame — the
       frame deliberately has no panel today (walk-through by design). A closable-looking panel
       would need its own geometry and probably its own material, plus a decision on whether it
