@@ -66,6 +66,10 @@ PROPS_TORCH_COLLECTION_NAME = "Procedural Level Props - Torches"
 PROPS_LIGHT_COLLECTION_NAME = "Procedural Level Props - Lights"
 PROPS_DECORATION_COLLECTION_NAME = "Procedural Level Props - Decoration"
 BLUEPRINT_SPLIT_COLLECTION_NAME = "Procedural Level Blueprint (Split)"
+# Prefix for the collection OBJECT_OT_FreezeForTextureWork creates each time
+# it runs (one new collection per freeze, named f"{FROZEN_COLLECTION_PREFIX}
+# - Seed{n}", disambiguated with a trailing " (2)" etc. on a name collision).
+FROZEN_COLLECTION_PREFIX = "Frozen"
 
 # The four cardinal horizontal neighbor offsets, used for corridor/BFS moves.
 HORIZONTAL_NEIGHBORS = [
@@ -3189,6 +3193,114 @@ class OBJECT_OT_SeparateLevelByFloor(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class OBJECT_OT_FreezeForTextureWork(bpy.types.Operator):
+    """Renames every currently-generated object (Blueprint, Walls, Stairs,
+    Doors, Torches, Decoration, Lights) out of the fixed-name pattern
+    every Step operator's own _remove_objects_by_prefix matches against,
+    and moves them into a dedicated new collection -- so the next
+    Generate click (any step) builds a fresh set under the normal names
+    with zero risk of touching this frozen one, leaving it safe for
+    hand-applied materials/textures to survive across regenerations.
+
+    Deliberately a rename, not a duplicate: no new mesh/material
+    datablocks are created, so freezing a large level costs nothing
+    beyond a handful of string renames and one new collection. A future
+    generation's independence from the frozen set falls out of the rename
+    alone -- every Step operator only ever looks up/deletes objects by
+    matching a FIXED name (BLUEPRINT_OBJECT_NAME etc.) via
+    _objects_matching_prefix's startswith(base_name + "_") check, which
+    only ever looks at the FRONT of an object's name. The frozen tag below
+    is therefore PREPENDED, never appended: a Per Floor/Per Stair grouped
+    object already has a name like "Procedural_Level_Stairs_Floor2_02",
+    and appending anything at the end can never stop a name that already
+    started with a tracked base_name from matching again on the next
+    regeneration -- silently deleting the "frozen" object right along with
+    a fresh batch, exactly the failure this operator exists to prevent.
+    Only prepending changes what the name STARTS WITH, removing it from
+    every base_name's prefix match at once, for every grouping mode.
+    This also makes the operator itself trivially safe to run twice:
+    with nothing left to find under the fixed names after a freeze,
+    running it again immediately (with nothing regenerated in between)
+    just reports "nothing to freeze" rather than double-processing or
+    erroring.
+
+    The exact seed + every wfc_* setting behind this generation (already
+    tracked in scene.wfc_debug_params by every Step operator, see
+    _update_debug_snapshot) is copied onto the new collection as a custom
+    property -- scene.wfc_debug_params itself gets overwritten by the
+    NEXT generation, so without this copy a frozen set's own provenance
+    (exactly what settings produced it) would be lost the moment you
+    generate again."""
+    bl_idname = "object.freeze_level_for_texture_work"
+    bl_label = "Freeze for Texture Work"
+    bl_description = (
+        "Rename the current Blueprint/Walls/Stairs/Doors/Props out of the way so the next "
+        "Generate click can't touch them -- safe to hand-apply materials/textures afterward"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        scene = context.scene
+
+        base_names = (
+            BLUEPRINT_OBJECT_NAME, WALLS_OBJECT_NAME, STAIRS_OBJECT_NAME, DOORS_OBJECT_NAME,
+            PROPS_TORCH_OBJECT_NAME, PROPS_DECORATION_OBJECT_NAME, PROPS_LIGHT_NAME_PREFIX,
+        )
+        targets = []
+        for base_name in base_names:
+            targets.extend(_objects_matching_prefix(base_name))
+
+        if not targets:
+            self.report(
+                {'ERROR'},
+                "Nothing to freeze -- no Blueprint/Walls/Stairs/Doors/Props objects found under "
+                "their normal names (already frozen, or nothing generated yet)."
+            )
+            return {'CANCELLED'}
+
+        # One consistent label for this whole freeze -- disambiguated
+        # against a PREVIOUS freeze at the same seed (e.g. regenerating at
+        # an unchanged seed to try different downstream settings, then
+        # freezing again) by bumping a trailing counter until the
+        # collection name is free, rather than letting Blender's own
+        # automatic ".001" collision suffix land on individual objects
+        # inconsistently.
+        label = f"Seed{scene.wfc_seed}"
+        attempt = 1
+        collection_name = f"{FROZEN_COLLECTION_PREFIX} - {label}"
+        while bpy.data.collections.get(collection_name) is not None:
+            attempt += 1
+            collection_name = f"{FROZEN_COLLECTION_PREFIX} - {label} ({attempt})"
+        tag = f"Frozen_{label}_" if attempt == 1 else f"Frozen_{label}_{attempt}_"
+
+        frozen_collection = bpy.data.collections.new(collection_name)
+        context.collection.children.link(frozen_collection)
+        if scene.wfc_debug_params:
+            frozen_collection["debug_params"] = scene.wfc_debug_params
+
+        for obj in targets:
+            # PREPENDED, never appended: an object using Per Floor/Per
+            # Stair grouping already has a name like
+            # "Procedural_Level_Stairs_Floor2_02" -- _objects_matching_
+            # prefix matches on startswith(base_name + "_"), which only
+            # looks at the FRONT of the string, so appending anything at
+            # the end can never stop a name that already started with a
+            # tracked base_name from matching again. Only changing what
+            # the name STARTS WITH actually removes it from every future
+            # base_name's prefix match, for every grouping mode at once.
+            obj.name = tag + obj.name
+            for coll in list(obj.users_collection):
+                coll.objects.unlink(obj)
+            frozen_collection.objects.link(obj)
+
+        self.report(
+            {'INFO'},
+            f"Froze {len(targets)} object(s) into collection '{collection_name}' -- safe to "
+            f"apply materials/textures now; the next Generate click won't touch them."
+        )
+        return {'FINISHED'}
+
+
 def _add_planar_uv_map(mesh, uv_tile_size=1.0):
     """Every baked-mesh builder below (walls/doors/stairs/ramps/torches/
     decoration) builds its own geometry directly via from_pydata(), which
@@ -3953,6 +4065,20 @@ class OBJECT_OT_CopyLevelArchitectParams(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def _objects_matching_prefix(base_name):
+    """Every object whose name is exactly base_name, or base_name +
+    "_..." (a grouped variant -- e.g. "_Floor0", "_Floor0_02" -- from
+    Per Floor/Per Stair grouping, which can change between generations).
+    Shared by _remove_objects_by_prefix (what a fresh generation deletes)
+    and OBJECT_OT_FreezeForTextureWork (what a freeze protects) so both
+    agree on exactly the same set with no risk of the two definitions
+    drifting apart."""
+    return [
+        obj for obj in bpy.data.objects
+        if obj.name == base_name or obj.name.startswith(base_name + "_")
+    ]
+
+
 def _remove_objects_by_prefix(base_name):
     """Removes the exact single base_name object from an older generation,
     plus any grouped variant (base_name + "_...") from a previous run --
@@ -3963,16 +4089,15 @@ def _remove_objects_by_prefix(base_name):
     Data-block cleanup follows the object's own type -- LIGHT objects
     (see PROPS_LIGHT_NAME_PREFIX) own a Light data-block, not a Mesh, and
     removing the wrong one would either error or silently leak."""
-    for obj in list(bpy.data.objects):
-        if obj.name == base_name or obj.name.startswith(base_name + "_"):
-            data = obj.data
-            obj_type = obj.type
-            bpy.data.objects.remove(obj, do_unlink=True)
-            if data and data.users == 0:
-                if obj_type == 'LIGHT':
-                    bpy.data.lights.remove(data)
-                else:
-                    bpy.data.meshes.remove(data)
+    for obj in _objects_matching_prefix(base_name):
+        data = obj.data
+        obj_type = obj.type
+        bpy.data.objects.remove(obj, do_unlink=True)
+        if data and data.users == 0:
+            if obj_type == 'LIGHT':
+                bpy.data.lights.remove(data)
+            else:
+                bpy.data.meshes.remove(data)
 
 
 def _collection_contains(ancestor, candidate):
@@ -5058,6 +5183,10 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
         util_row.operator("object.separate_level_by_floor", text="Separate by Floor/Room", icon='MOD_EXPLODE')
         util_row.enabled = context.active_object is not None and context.active_object.type == 'MESH'
 
+        freeze_row = layout.row(align=True)
+        freeze_row.operator("object.freeze_level_for_texture_work", text="Freeze for Texture Work", icon='LOCKED')
+        freeze_row.enabled = bpy.data.objects.get(BLUEPRINT_OBJECT_NAME) is not None
+
     def _draw_walls_tab(self, context, layout):
         scene = context.scene
         col = layout.column(align=True)
@@ -5142,6 +5271,7 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
 classes = (
     OBJECT_OT_GenerateGameBlueprint,
     OBJECT_OT_SeparateLevelByFloor,
+    OBJECT_OT_FreezeForTextureWork,
     OBJECT_OT_GenerateLevelWalls,
     OBJECT_OT_GenerateLevelStairs,
     OBJECT_OT_GenerateLevelDoors,

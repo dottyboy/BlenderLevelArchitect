@@ -1224,6 +1224,34 @@ GN complexity there specifically.
           latter two as plain `object`, matching how `Panel` was already stubbed, since the mock
           never needs to model actual UI drawing). Full suite green on 4.2.21 LTS and 5.2.0 LTS,
           plus 50 seeded solver trials with floor_profiles set, under the offline mock.
+- [x] **Freeze for Texture Work.** Every Step operator deletes-and-rebuilds its objects by fixed
+      name each time it runs (`_remove_objects_by_prefix`), so any material/texture work done by
+      hand on the live objects gets silently wiped the moment Generate is clicked again. New
+      `OBJECT_OT_FreezeForTextureWork` (Setup tab, next to Separate by Floor/Room) renames every
+      currently-generated Blueprint/Walls/Stairs/Doors/Torches/Decoration/Light object and moves
+      them into a new `Frozen - Seed{n}` collection, with a copy of `scene.wfc_debug_params`
+      (exact settings/seed) stashed on the collection as a custom property, since the live
+      property itself gets overwritten by the next generation. Deliberately a rename, not a
+      duplicate -- no new datablocks, so freezing costs nothing beyond string renames + one
+      collection, and independence from a future generation falls out of the rename alone (every
+      Step operator only ever looks up objects by their fixed name).
+      **Real bug caught by this feature's own headless test, not found by inspection:** the first
+      version appended the frozen tag to the end of each object's name
+      (`f"{obj.name}_Frozen_{label}"`). `_objects_matching_prefix`'s match is
+      `startswith(base_name + "_")` -- front-anchored -- so a Per Floor/Per Stair grouped object
+      (already named e.g. `Procedural_Level_Stairs_Floor2_02`) kept matching
+      `Procedural_Level_Stairs_` regardless of anything appended after it. A frozen grouped object
+      would have been silently deleted the next time Stairs got regenerated -- the exact opposite
+      of what the feature promises. Caught immediately by the new regression test's "freeze twice
+      in a row" check (the second freeze found the same 62 objects again instead of reporting
+      nothing to freeze) and confirmed directly with a targeted check that regenerates Walls (not
+      just Blueprint) after a freeze and asserts the frozen collection is untouched -- Blueprint's
+      own cleanup is an exact-name lookup, not a prefix match, so regenerating only Blueprint would
+      NOT have caught this. Fixed by prepending the tag instead
+      (`f"Frozen_{label}_{obj.name}"`), which changes what the name STARTS WITH and so can never
+      satisfy any base_name's prefix match again, for every grouping mode at once -- also improves
+      Outliner grouping as a side effect, since every object from one freeze now sorts together.
+      Verified against real Blender 5.2.0 LTS via `run_blender_tests.sh`, full suite green.
 
 ---
 

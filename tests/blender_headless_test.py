@@ -875,6 +875,105 @@ check(
 )
 
 # ==============================================================================
+# Freeze for Texture Work -- renames the current generation out of the
+# fixed-name pattern every Step operator's own _remove_objects_by_prefix
+# matches against, so a later regeneration can't touch it. Verifies both
+# the rename/collection-move itself and the independence it's supposed to
+# guarantee: a regeneration afterward creates a genuinely fresh object
+# under the normal name, while the frozen one survives untouched.
+# ==============================================================================
+pre_freeze_names = set()
+for base_name in (
+    addon.BLUEPRINT_OBJECT_NAME, addon.WALLS_OBJECT_NAME, addon.STAIRS_OBJECT_NAME,
+    addon.DOORS_OBJECT_NAME, addon.PROPS_TORCH_OBJECT_NAME, addon.PROPS_DECORATION_OBJECT_NAME,
+    addon.PROPS_LIGHT_NAME_PREFIX,
+):
+    pre_freeze_names.update(o.name for o in addon._objects_matching_prefix(base_name))
+check(
+    "Freeze: something exists to freeze before running the operator",
+    len(pre_freeze_names) > 0, f"count={len(pre_freeze_names)}",
+)
+
+expected_debug_params = scene.wfc_debug_params
+expected_seed = scene.wfc_seed
+
+result = bpy.ops.object.freeze_level_for_texture_work()
+check("Freeze: operator FINISHED", result == {'FINISHED'}, str(result))
+check(
+    "Freeze: Blueprint object no longer exists under its normal name",
+    bpy.data.objects.get(addon.BLUEPRINT_OBJECT_NAME) is None,
+)
+
+frozen_collection_name = f"{addon.FROZEN_COLLECTION_PREFIX} - Seed{expected_seed}"
+frozen_collection = bpy.data.collections.get(frozen_collection_name)
+check(
+    "Freeze: frozen collection created with the expected name",
+    frozen_collection is not None, frozen_collection_name,
+)
+if frozen_collection is not None:
+    expected_frozen_names = {f"Frozen_Seed{expected_seed}_" + n for n in pre_freeze_names}
+    check(
+        "Freeze: frozen collection contains exactly every object that was renamed",
+        {o.name for o in frozen_collection.objects} == expected_frozen_names,
+        f"expected_count={len(expected_frozen_names)} actual_count={len(frozen_collection.objects)}",
+    )
+    check(
+        "Freeze: frozen collection carries a copy of the generation's debug params",
+        frozen_collection.get("debug_params") == expected_debug_params,
+    )
+
+try:
+    result = bpy.ops.object.freeze_level_for_texture_work()
+except RuntimeError as exc:
+    # bpy.ops.* raises RuntimeError from Python when the operator reports
+    # an 'ERROR'-level message and cancels (same convention documented at
+    # Separate by Floor/Room's own refusal check above), rather than just
+    # returning {'CANCELLED'} the way a plain WARNING/INFO cancellation
+    # would -- Freeze's own "nothing to freeze" report is ERROR-level.
+    result = {'CANCELLED'}
+    check(
+        "Freeze: the re-freeze refusal's error message explains why (nothing to freeze)",
+        "Nothing to freeze" in str(exc), str(exc),
+    )
+check(
+    "Freeze: running it again immediately (nothing regenerated) reports nothing to freeze",
+    result == {'CANCELLED'}, str(result),
+)
+
+result = bpy.ops.object.generate_game_blueprint()
+check("Freeze: regenerating after a freeze FINISHED (proves independence)", result == {'FINISHED'}, str(result))
+blueprint_obj = bpy.data.objects.get(addon.BLUEPRINT_OBJECT_NAME)
+check("Freeze: a genuinely fresh Blueprint object exists under the normal name again", blueprint_obj is not None)
+check(
+    "Freeze: the frozen collection/its objects were untouched by the Blueprint regeneration",
+    frozen_collection is not None and len(frozen_collection.objects) == len(pre_freeze_names),
+)
+
+# Targeted regression check for the actual bug this whole block was built
+# to catch: _remove_objects_by_prefix (what every Walls/Stairs/Doors/Props
+# regeneration calls, unlike Blueprint's own exact-name lookup above) once
+# matched a frozen Per Floor/Per Stair object anyway, because appending a
+# suffix to an already-prefix-matching name like
+# "Procedural_Level_Walls_Floor1" doesn't stop it from still starting with
+# "Procedural_Level_Walls_" -- silently deleting the "frozen" object right
+# along with the fresh batch. Regenerating Walls specifically (the
+# operator that actually calls _remove_objects_by_prefix) is the one
+# real-world action that would have caught this; regenerating Blueprint
+# alone (above) does not, since Blueprint's own cleanup is an exact-name
+# lookup, not a prefix match, and would have passed even with the bug
+# still present.
+result = bpy.ops.object.generate_level_walls()
+check("Freeze: regenerating Walls after a freeze FINISHED", result == {'FINISHED'}, str(result))
+check(
+    "Freeze: the frozen collection/its objects were untouched by the Walls regeneration",
+    frozen_collection is not None and len(frozen_collection.objects) == len(pre_freeze_names),
+)
+check(
+    "Freeze: a genuinely fresh Walls object exists under the normal name again",
+    bpy.data.objects.get(addon.WALLS_OBJECT_NAME) is not None,
+)
+
+# ==============================================================================
 # Cave floor-shape mode -- solver-only connectivity regression
 # ==============================================================================
 # Full-reachability BFS across a handful of seeds/sizes, run directly
