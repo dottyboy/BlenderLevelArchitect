@@ -3,6 +3,14 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.21.0
+
+- **New: One-click glTF/GLB Export** (new **Export** tab). Selects every generated object and
+  exports straight to `.glb`/`.gltf`, aware of the addon's own naming/grouping so you don't have
+  to know which objects to select yourself. Two settings: **Binary (.glb)** (default -- one
+  self-contained file) and **Include Lights** (default on -- exports the real torch-placed Point
+  lights too). glTF only for now, not FBX.
+
 ## 0.20.0
 
 - **New: Arched Doors + Entrance/Exit Gates.** Ordinary doorways can now use a Round or Pointed
