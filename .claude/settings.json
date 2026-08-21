@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./run_blender_tests.sh *)",
+      "Bash(python3 -m py_compile *)"
+    ]
+  }
+}

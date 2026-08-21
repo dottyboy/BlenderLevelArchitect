@@ -21,6 +21,10 @@ __pycache__/
 # tracked, pushed DEVELOPMENT.md (see that file's own note on the split)
 /DEVELOPMENT_OFFLINE.md
 
+# Personal/session-specific Claude Code permissions -- .claude/settings.json
+# (shared, project-level allowlist) stays tracked; this one doesn't.
+/.claude/settings.local.json
+
 # OS cruft
 .DS_Store
 Thumbs.db

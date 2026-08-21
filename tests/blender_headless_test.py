@@ -749,6 +749,65 @@ if doors_obj is not None and stair_objs:
         f"{door_overlap_count}/{len(door_boxes)} door boxes overlap a stair",
     )
 
+
+# Regression checks for Door Style / Entrance-Exit Gates: every ordinary
+# doorway gets material_index 0, but Entrance and Exit each get their OWN
+# dedicated "Gate" pass (material_index 1/2 respectively) -- see
+# _build_door_mesh's own docstring for why that's a separate pass from
+# the ordinary room_id-boundary doorway logic, independent of Door Style.
+if doors_obj is not None:
+    check(
+        "Doors: always exactly 3 material slots (door/entrance/exit), any Door Style",
+        len(doors_obj.data.materials) == 3, f"count={len(doors_obj.data.materials)}",
+    )
+    used_indices = {p.material_index for p in doors_obj.data.polygons}
+    check(
+        "Doors: an Entrance gate was actually built (material_index 1 used)",
+        1 in used_indices, f"used_indices={used_indices}",
+    )
+    check(
+        "Doors: an Exit gate was actually built (material_index 2 used)",
+        2 in used_indices, f"used_indices={used_indices}",
+    )
+
+prev_door_style = scene.wfc_door_style
+prev_arch_height = scene.wfc_door_arch_height
+baseline_door_verts = len(doors_obj.data.vertices) if doors_obj is not None else 0
+for style in ('ROUND', 'POINTED'):
+    scene.wfc_door_style = style
+    scene.wfc_door_arch_height = 0.6
+    result = bpy.ops.object.generate_level_doors()
+    check(f"Doors: regenerate with Door Style={style} FINISHED", result == {'FINISHED'}, str(result))
+    styled_doors_obj = bpy.data.objects.get(addon.DOORS_OBJECT_NAME)
+    check(
+        f"Doors: Door Style={style} object exists with geometry",
+        styled_doors_obj is not None and len(styled_doors_obj.data.vertices) > 0,
+    )
+    if styled_doors_obj is not None:
+        check(
+            f"Doors: Door Style={style} adds real geometry vs. Flat "
+            f"(arch replaces the flat lintel with more boxes)",
+            len(styled_doors_obj.data.vertices) > baseline_door_verts,
+            f"styled={len(styled_doors_obj.data.vertices)} flat_baseline={baseline_door_verts}",
+        )
+        bad_indices = [p.material_index for p in styled_doors_obj.data.polygons if p.material_index not in (0, 1, 2)]
+        check(
+            f"Doors: Door Style={style} every face uses a valid material_index (0/1/2)",
+            len(bad_indices) == 0, f"bad_count={len(bad_indices)}",
+        )
+        used = {p.material_index for p in styled_doors_obj.data.polygons}
+        check(
+            f"Doors: Door Style={style} Entrance and Exit gates still present",
+            1 in used and 2 in used, f"used_indices={used}",
+        )
+
+scene.wfc_door_style = prev_door_style
+scene.wfc_door_arch_height = prev_arch_height
+result = bpy.ops.object.generate_level_doors()
+check("Doors: regenerate back to Door Style default FINISHED", result == {'FINISHED'}, str(result))
+doors_obj = bpy.data.objects.get(addon.DOORS_OBJECT_NAME)
+check("Doors: object still exists after reverting Door Style", doors_obj is not None)
+
 result = bpy.ops.object.generate_level_props()
 check("Props: operator FINISHED or CANCELLED", result in ({'FINISHED'}, {'CANCELLED'}), str(result))
 

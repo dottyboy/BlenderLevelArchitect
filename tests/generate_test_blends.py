@@ -213,6 +213,20 @@ SCENARIOS = [
         "to isolate the effect.",
         dict(wfc_wall_corner_rounding=True, wfc_wall_corner_radius=0.15, wfc_wall_thickness=0.35),
     ),
+    (
+        "test_22.blend",
+        "Door Style = ROUND -- ordinary doorways get a rounded (segmental/elliptical) arch "
+        "instead of a flat lintel. Entrance/Exit always get their own larger, always-arched "
+        "Gate regardless of Door Style, so compare an ordinary doorway against the Entrance/Exit "
+        "corners in this same file to see the intended contrast.",
+        dict(wfc_door_style='ROUND', wfc_door_arch_height=0.6),
+    ),
+    (
+        "test_23.blend",
+        "Door Style = POINTED -- ordinary doorways get a two-centered (Gothic/lancet) arch. "
+        "Same Arch Height as test_22 for a direct side-by-side comparison of the two styles.",
+        dict(wfc_door_style='POINTED', wfc_door_arch_height=0.6),
+    ),
 ]
 
 

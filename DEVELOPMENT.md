@@ -498,6 +498,24 @@ GN complexity there specifically.
       (already named e.g. `Procedural_Level_Stairs_Floor2_02`) kept matching regardless of
       anything appended — a frozen grouped object would have been silently deleted on the next
       regeneration. Fixed by prepending the tag instead, which changes what the name STARTS WITH.
+- [x] **Arched doors + Entrance/Exit Gates.** New `wfc_door_style` (Flat/Round/Pointed) replaces
+      an ordinary doorway's flat lintel with a stepped arch silhouette when set; Entrance and Exit
+      each get their own fixed, larger, always-arched "Gate" regardless of `wfc_door_style`,
+      reusing the existing Entrance/Exit marker materials (green/red) so the two read as landmarks
+      distinct from ordinary doors in every configuration. The arch is built as
+      `DOOR_ARCH_SEGMENTS` small axis-aligned boxes stepping up to a curve profile (a half-ellipse
+      for Round; a generalized two-centered/Gothic construction for Pointed, solved for an
+      arbitrary apex height rather than the classic fixed equilateral proportion) — deliberately
+      reusing the same already-verified `add_box` winding instead of hand-deriving new winding for
+      a smoothly curved surface. Entrance/Exit gates are a separate placement pass keyed off the
+      cell's own exposed side (same exposure check `_build_wall_mesh` uses), not the ordinary
+      room_id-boundary doorway logic — the entrance/exit cell's own room_id is -1 like any corridor
+      cell, so it usually wouldn't get an ordinary doorway there at all. Verified against real
+      Blender 5.2.0 LTS (new material-index/geometry regression checks) and visually via rendered
+      close-ups: confirmed a real, correctly-shaped stepped arch (not flat, not degenerate) for
+      both styles, and confirmed Round vs. Pointed are genuinely different curves (Pointed climbs
+      measurably steeper and has a real tangent discontinuity at the apex, not just a cosmetic
+      label) via direct numeric comparison of the two profile functions.
 
 ---
 
@@ -550,11 +568,15 @@ GN complexity there specifically.
 
 Roughly ordered by how directly they build on what already exists:
 
-- [ ] **Bent / curved ramps and stairwells.** The natural next step after the plain ramp
-      feature — the run data model (one straight direction per run) would need to grow into a
-      multi-segment path, and the room reservation (`_carve_stair_room`) would need to support
-      L-shaped or multi-segment footprints instead of a single rectangle. This is the biggest
-      lift on this list; don't start it casually.
+- [ ] **Bent stairwells/ramps (L or U switchback with one landing) — scoped, not yet built.**
+      Deliberately NOT a true continuous curve (spiral stairs) — that needs an arc-length-
+      parameterized path throughout the solver and stays the "biggest lift, don't start casually"
+      item. A real simplification found during scoping: the room RESERVATION doesn't need to
+      change at all — `_find_stair_footprint`/`_room_fits` still just search for and reserve one
+      rectangle exactly as today; only what's CARVED inside that rectangle changes (an L or U path
+      with a landing instead of one straight center line). Full design (new per-segment run data
+      model, `_carve_stair_room`/`_read_stair_runs`/mesh-builder changes) written up in
+      `DEVELOPMENT_OFFLINE.md` but not yet implemented.
 - [ ] **Actual door leaves/panels**, as an option alongside the current always-open frame — the
       frame deliberately has no panel today (walk-through by design). A closable-looking panel
       would need its own geometry and probably its own material, plus a decision on whether it

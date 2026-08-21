@@ -3645,17 +3645,90 @@ def _cluster_nearby_points(points, merge_distance):
     return [min(members) for members in clusters.values()]
 
 
+# How many stepped boxes approximate one arch's curved silhouette --
+# matches the scale of every other curve-via-N-segments primitive already
+# in this file (barrel/cone use sides=10, Round Corners' Bevel modifier
+# uses segments=6).
+DOOR_ARCH_SEGMENTS = 8
+
+# Entrance/Exit get a fixed, always-arched "Gate" treatment regardless of
+# the ordinary Door Style setting, scaled up from a regular doorway's own
+# dimensions -- the whole point is that these two fixed, always-present
+# landmarks read as visually distinct from every ordinary room doorway in
+# every Door Style configuration, including when ordinary doors are FLAT.
+GATE_STYLE = 'ROUND'
+GATE_HEIGHT_SCALE = 1.35
+GATE_FRAME_THICKNESS_SCALE = 1.6
+GATE_ARCH_HEIGHT_SCALE = 1.6
+
+
+def _round_arch_profile(half_span, rise, segments):
+    """(y, z) points, y relative to the doorway's own center and z above
+    the springline, tracing a half-ELLIPSE (not a true circle unless
+    rise == half_span -- deliberately independently adjustable instead,
+    the same "close enough, not literally the named shape" tradeoff
+    already used for Round rooms' ellipse carve) from the left spring
+    point (-half_span, 0) up over the apex (0, rise) to the right spring
+    point (half_span, 0)."""
+    return [
+        (-half_span * math.cos(math.pi * i / segments), rise * math.sin(math.pi * i / segments))
+        for i in range(segments + 1)
+    ]
+
+
+def _pointed_arch_profile(half_span, rise, segments):
+    """(y, z) points tracing a two-centered ("Gothic"/lancet) arch: two
+    circular arcs, each centered on the springline, meeting at a shared
+    apex point (0, rise) directly above center. The sharp apex -- a real
+    tangent discontinuity between the two arcs, not a smooth curve
+    through it -- is what reads as "pointed" rather than "round".
+
+    The classic hand-drafted construction centers each arc at the
+    OPPOSITE spring point (radius == full span), which locks rise to a
+    fixed proportion of half_span (an equilateral arch) -- generalized
+    here to solve for a center position c (on the springline) and radius
+    r = half_span + c such that the arc still passes through both its own
+    spring point and the shared apex for ANY requested rise, so `rise`
+    controls a POINTED arch exactly the same way it controls a ROUND one:
+        c = (rise^2 - half_span^2) / (2 * half_span)
+    Positive c (rise < half_span) places both centers OUTSIDE the span --
+    a shallow "drop arch". Negative c (rise > half_span) places them
+    INSIDE -- a tall "lancet". Both remain valid, correctly-meeting arcs;
+    only the equilateral case (rise == half_span, c == 0, centers exactly
+    at the opposite spring points) matches the traditional construction
+    exactly."""
+    if half_span <= 1e-6:
+        return [(-half_span, 0.0), (half_span, 0.0)]
+    c = (rise * rise - half_span * half_span) / (2.0 * half_span)
+    r = half_span + c
+    if r <= 1e-6:
+        return [(-half_span, 0.0), (0.0, rise), (half_span, 0.0)]
+    half_segments = max(1, segments // 2)
+    start_angle = math.atan2(0.0, -half_span - c)
+    apex_angle = math.atan2(rise, -c)
+    left = [
+        (
+            c + r * math.cos(start_angle + (apex_angle - start_angle) * (i / half_segments)),
+            r * math.sin(start_angle + (apex_angle - start_angle) * (i / half_segments)),
+        )
+        for i in range(half_segments + 1)
+    ]
+    right = [(-y, z) for y, z in reversed(left[:-1])]
+    return left + right
+
+
 def _build_door_mesh(
     walkable_cells, room_ids, tile_size, level_height, door_height, frame_thickness, name,
     merge_distance=2, z_offsets=None, stair_cells=None, uv_tile_size=1.0,
+    door_style='FLAT', arch_height=0.6, entrance_cells=None, exit_cells=None,
 ):
-    """A walk-through frame (two side posts + a top lintel, deliberately no
-    panel filling the gap) at every same-Z boundary between two walkable
-    cells whose room_id differs -- i.e. every point a corridor enters a
-    room, or two rooms directly meet. That's exactly where _build_wall_mesh
-    already leaves a gap (both cells are walkable, so no wall forms), so
-    this never needs to reason about walls directly -- it can't place a
-    frame anywhere a wall would actually be, and can't miss a real doorway
+    """A walk-through frame (two side posts + a top, deliberately no panel
+    filling the gap) at every same-Z boundary between two walkable cells
+    whose room_id differs -- i.e. every point a corridor enters a room, or
+    two rooms directly meet. That's exactly where _build_wall_mesh already
+    leaves a gap (both cells are walkable, so no wall forms), so this
+    never needs to reason about walls directly -- it can't place a frame
+    anywhere a wall would actually be, and can't miss a real doorway
     either, since it's reading the identical walkable_cells silhouette off
     the same baked blueprint data.
 
@@ -3694,32 +3767,55 @@ def _build_door_mesh(
     doorway, and gets a frame plastered onto the stairs themselves. A
     stairwell's real, legitimate doorway (where an outside corridor
     enters its walkway) is unaffected, since that boundary never touches
-    a stair tile on either side."""
+    a stair tile on either side.
+
+    door_style ('FLAT' / 'ROUND' / 'POINTED') controls every ORDINARY
+    doorway found by the room_id-boundary passes below; arch_height is
+    that arch's rise above the springline (ignored for FLAT). Entrance and
+    Exit each get their OWN fixed, always-arched "Gate" treatment (see
+    GATE_STYLE/GATE_*_SCALE) regardless of door_style, so the two are
+    always visually distinct from ordinary room doorways in every
+    configuration -- entrance_cells/exit_cells (each an optional set of
+    (x,y,z), normally exactly one cell) are placed via a SEPARATE pass
+    keyed off the exposed side(s) of the cell itself (same 4-neighbor
+    exposure check _build_wall_mesh's own wall pass uses), not the
+    room_id-boundary logic below -- the entrance/exit cell's own room_id
+    is -1, same as any corridor cell, so it usually wouldn't produce an
+    ordinary doorway there at all, and even where it would, "flush against
+    the fixed map corner" is a more reliable anchor than "wherever the
+    nearest room_id boundary happens to be."
+
+    Three material slots throughout, always: 0 = ordinary door, 1 =
+    Entrance gate, 2 = Exit gate (matching the order the caller is
+    expected to append door/entrance/exit materials in)."""
     walkable = set(walkable_cells)
     verts = []
     faces = []
+    material_indices = []
     half_frame = frame_thickness / 2.0
     z_offsets = z_offsets or {}
     stair_cells = stair_cells or set()
+    entrance_cells = entrance_cells or set()
+    exit_cells = exit_cells or set()
 
-    def add_box(cx0, cy0, cx1, cy1, z0, z1, floor_touching=True):
+    def add_box(cx0, cy0, cx1, cy1, z0, z1, floor_touching=True, mat_idx=0):
         # See the matching comment in _build_wall_mesh's add_box -- this
         # winding was verified correct against real evaluated Blender
         # geometry; the naive per-corner order pointed every normal inward.
         #
         # floor_touching (default True, matches every post box) drops the
         # bottom face -- always coincident with/hidden behind the floor
-        # tile it stands on, same reasoning as walls. A door's LINTEL is
-        # the one box here that ISN'T floor-touching (it's suspended at
-        # door_height, spanning between the two posts); its underside IS
-        # genuinely visible to anyone standing underneath it, so
-        # add_frame_facing_x/y pass floor_touching=False for that call
-        # specifically to keep it.
+        # tile it stands on, same reasoning as walls. A FLAT door's LINTEL
+        # (and every arch-silhouette box, see add_arch_silhouette) is
+        # suspended above the posts; its underside IS genuinely visible to
+        # anyone standing underneath it, so those calls pass
+        # floor_touching=False specifically to keep it.
         i = len(verts)
         verts.extend([
             (cx0, cy0, z0), (cx1, cy0, z0), (cx1, cy1, z0), (cx0, cy1, z0),
             (cx0, cy0, z1), (cx1, cy0, z1), (cx1, cy1, z1), (cx0, cy1, z1),
         ])
+        added = 5 if floor_touching else 6
         if not floor_touching:
             faces.append((i + 3, i + 2, i + 1, i + 0))  # bottom
         faces.append((i + 4, i + 5, i + 6, i + 7))  # top
@@ -3727,29 +3823,66 @@ def _build_door_mesh(
         faces.append((i + 6, i + 5, i + 1, i + 2))
         faces.append((i + 7, i + 6, i + 2, i + 3))
         faces.append((i + 4, i + 7, i + 3, i + 0))
+        material_indices.extend([mat_idx] * added)
 
-    def add_frame_facing_x(center_x, y_min, y_max, z0):
+    def add_arch_silhouette(axis, center_a, half_frame_a, span_min, span_max, z_spring, rise, style, mat_idx):
+        """Replaces a flat lintel with a stepped approximation of an
+        arch's outer silhouette -- DOOR_ARCH_SEGMENTS small boxes whose
+        top height follows the arch profile at that slice, built entirely
+        from the same add_box already verified correct above rather than
+        hand-deriving new winding for a smoothly curved surface. Solid
+        from the springline up to the curve at each slice (not a separate
+        thin inner/outer band tracing a true hollow arch ring) -- at the
+        depth (frame_thickness) a door frame actually has, this reads
+        visually the same as a true arch from either side of the
+        doorway, and is far lower-risk to get right without a live
+        Blender session to check surface winding against."""
+        profile_fn = _round_arch_profile if style == 'ROUND' else _pointed_arch_profile
+        center_b = (span_min + span_max) / 2.0
+        half_span = (span_max - span_min) / 2.0
+        profile = profile_fn(half_span, rise, DOOR_ARCH_SEGMENTS)
+        a0, a1 = center_a - half_frame_a, center_a + half_frame_a
+        for i in range(DOOR_ARCH_SEGMENTS):
+            b0, h0 = profile[i]
+            b1, h1 = profile[i + 1]
+            seg_b0, seg_b1 = sorted((center_b + b0, center_b + b1))
+            seg_top = z_spring + max(h0, h1)
+            if seg_top <= z_spring:
+                continue  # degenerate sliver right at a spring point -- skip
+            if axis == 'X':
+                add_box(a0, seg_b0, a1, seg_b1, z_spring, seg_top, floor_touching=False, mat_idx=mat_idx)
+            else:
+                add_box(seg_b0, a0, seg_b1, a1, z_spring, seg_top, floor_touching=False, mat_idx=mat_idx)
+
+    def add_frame_facing_x(center_x, y_min, y_max, z0, style='FLAT', rise=0.0, mat_idx=0):
         """Doorway replacing a north-south wall (found via a +X neighbor
         check) -- opening spans Y, walked through east-west. Posts at the
-        Y ends, lintel spanning the full Y width at the top."""
+        Y ends; FLAT caps with a flat lintel spanning the full Y width,
+        ROUND/POINTED cap with a stepped arch silhouette instead."""
         z1 = z0 + door_height
-        add_box(center_x - half_frame, y_min, center_x + half_frame, y_min + frame_thickness, z0, z1)
-        add_box(center_x - half_frame, y_max - frame_thickness, center_x + half_frame, y_max, z0, z1)
-        add_box(
-            center_x - half_frame, y_min, center_x + half_frame, y_max, z1, z1 + frame_thickness,
-            floor_touching=False,
-        )
+        add_box(center_x - half_frame, y_min, center_x + half_frame, y_min + frame_thickness, z0, z1, mat_idx=mat_idx)
+        add_box(center_x - half_frame, y_max - frame_thickness, center_x + half_frame, y_max, z0, z1, mat_idx=mat_idx)
+        if style == 'FLAT':
+            add_box(
+                center_x - half_frame, y_min, center_x + half_frame, y_max, z1, z1 + frame_thickness,
+                floor_touching=False, mat_idx=mat_idx,
+            )
+        else:
+            add_arch_silhouette('X', center_x, half_frame, y_min, y_max, z1, rise, style, mat_idx)
 
-    def add_frame_facing_y(center_y, x_min, x_max, z0):
+    def add_frame_facing_y(center_y, x_min, x_max, z0, style='FLAT', rise=0.0, mat_idx=0):
         """Doorway replacing an east-west wall (found via a +Y neighbor
         check) -- opening spans X, walked through north-south."""
         z1 = z0 + door_height
-        add_box(x_min, center_y - half_frame, x_min + frame_thickness, center_y + half_frame, z0, z1)
-        add_box(x_max - frame_thickness, center_y - half_frame, x_max, center_y + half_frame, z0, z1)
-        add_box(
-            x_min, center_y - half_frame, x_max, center_y + half_frame, z1, z1 + frame_thickness,
-            floor_touching=False,
-        )
+        add_box(x_min, center_y - half_frame, x_min + frame_thickness, center_y + half_frame, z0, z1, mat_idx=mat_idx)
+        add_box(x_max - frame_thickness, center_y - half_frame, x_max, center_y + half_frame, z0, z1, mat_idx=mat_idx)
+        if style == 'FLAT':
+            add_box(
+                x_min, center_y - half_frame, x_max, center_y + half_frame, z1, z1 + frame_thickness,
+                floor_touching=False, mat_idx=mat_idx,
+            )
+        else:
+            add_arch_silhouette('Y', center_y, half_frame, x_min, x_max, z1, rise, style, mat_idx)
 
     # Pass 1: find every doorway boundary, grouped by (axis, z) as (line, b)
     # pairs -- "line" is the perpendicular grid coordinate (which row/column
@@ -3785,18 +3918,72 @@ def _build_door_mesh(
                 center_x = (b + 0.5) * tile_size
                 y_min = (line - 0.5) * tile_size
                 y_max = (line + 0.5) * tile_size
-                add_frame_facing_x(center_x, y_min, y_max, z0)
+                add_frame_facing_x(center_x, y_min, y_max, z0, style=door_style, rise=arch_height)
             else:
                 offset = (z_offsets.get((line, b, z), 0.0) + z_offsets.get((line, b + 1, z), 0.0)) / 2.0
                 z0 = z * level_height + offset
                 center_y = (b + 0.5) * tile_size
                 x_min = (line - 0.5) * tile_size
                 x_max = (line + 0.5) * tile_size
-                add_frame_facing_y(center_y, x_min, x_max, z0)
+                add_frame_facing_y(center_y, x_min, x_max, z0, style=door_style, rise=arch_height)
+
+    # Pass 3: Entrance/Exit gates -- see this function's own docstring for
+    # why this is a separate pass instead of extending Pass 1/2.
+    gate_frame_thickness = frame_thickness * GATE_FRAME_THICKNESS_SCALE
+    gate_half_frame = gate_frame_thickness / 2.0
+    gate_height = door_height * GATE_HEIGHT_SCALE
+    gate_arch_height = arch_height * GATE_ARCH_HEIGHT_SCALE
+
+    def add_gate_facing_x(center_x, y_min, y_max, z0, mat_idx):
+        z1 = z0 + gate_height
+        add_box(
+            center_x - gate_half_frame, y_min, center_x + gate_half_frame, y_min + gate_frame_thickness,
+            z0, z1, mat_idx=mat_idx,
+        )
+        add_box(
+            center_x - gate_half_frame, y_max - gate_frame_thickness, center_x + gate_half_frame, y_max,
+            z0, z1, mat_idx=mat_idx,
+        )
+        add_arch_silhouette('X', center_x, gate_half_frame, y_min, y_max, z1, gate_arch_height, GATE_STYLE, mat_idx)
+
+    def add_gate_facing_y(center_y, x_min, x_max, z0, mat_idx):
+        z1 = z0 + gate_height
+        add_box(
+            x_min, center_y - gate_half_frame, x_min + gate_frame_thickness, center_y + gate_half_frame,
+            z0, z1, mat_idx=mat_idx,
+        )
+        add_box(
+            x_max - gate_frame_thickness, center_y - gate_half_frame, x_max, center_y + gate_half_frame,
+            z0, z1, mat_idx=mat_idx,
+        )
+        add_arch_silhouette('Y', center_y, gate_half_frame, x_min, x_max, z1, gate_arch_height, GATE_STYLE, mat_idx)
+
+    def add_gate(cell, mat_idx):
+        x, y, z = cell
+        z0 = z * level_height + z_offsets.get(cell, 0.0)
+        for dx, dy in HORIZONTAL_NEIGHBORS:
+            neighbor = (x + dx, y + dy, z)
+            if neighbor not in walkable or neighbor in stair_cells:
+                continue
+            if dx == 1:
+                add_gate_facing_x((x + 0.5) * tile_size, (y - 0.5) * tile_size, (y + 0.5) * tile_size, z0, mat_idx)
+            elif dx == -1:
+                add_gate_facing_x((x - 0.5) * tile_size, (y - 0.5) * tile_size, (y + 0.5) * tile_size, z0, mat_idx)
+            elif dy == 1:
+                add_gate_facing_y((y + 0.5) * tile_size, (x - 0.5) * tile_size, (x + 0.5) * tile_size, z0, mat_idx)
+            else:
+                add_gate_facing_y((y - 0.5) * tile_size, (x - 0.5) * tile_size, (x + 0.5) * tile_size, z0, mat_idx)
+
+    for cell in entrance_cells:
+        add_gate(cell, 1)
+    for cell in exit_cells:
+        add_gate(cell, 2)
 
     mesh = bpy.data.meshes.new(name + "_Mesh")
     mesh.from_pydata(verts, [], faces)
     mesh.update()
+    for poly, mat_idx in zip(mesh.polygons, material_indices):
+        poly.material_index = mat_idx
     _add_planar_uv_map(mesh, uv_tile_size)
     return mesh
 
@@ -4584,10 +4771,15 @@ class OBJECT_OT_GenerateLevelStairs(bpy.types.Operator):
 class OBJECT_OT_GenerateLevelDoors(bpy.types.Operator):
     """Builds walk-through door frame object(s) from the already-generated
     blueprint's tile_id/room_id data -- run "Generate Game Blueprint"
-    first. A frame (two posts + a lintel, deliberately no panel) is placed
-    at every point a corridor enters a room or two rooms directly meet --
+    first. A frame (two posts + a top, deliberately no panel) is placed at
+    every point a corridor enters a room or two rooms directly meet --
     exactly wherever the wall silhouette already leaves a gap, so this
-    never conflicts with or duplicates wall geometry."""
+    never conflicts with or duplicates wall geometry. Door Style (Flat/
+    Round/Pointed) controls every ordinary doorway's top; Entrance and
+    Exit always get their own fixed, larger, always-arched "Gate" instead,
+    so the two are visually distinct from ordinary doors regardless of
+    Door Style -- see _build_door_mesh's own docstring for why that's a
+    separate pass rather than an extension of the ordinary-doorway logic."""
     bl_idname = "object.generate_level_doors"
     bl_label = "Generate Level Doors"
     bl_options = {'REGISTER', 'UNDO'}
@@ -4613,6 +4805,8 @@ class OBJECT_OT_GenerateLevelDoors(bpy.types.Operator):
         room_ids = extra["room_id"]
         z_offsets = extra["z_offset"]
         stair_cells = {cell for cell, tid in extra["tile_id"].items() if tid == TILE_STAIR}
+        entrance_cells = {cell for cell, tid in extra["tile_id"].items() if tid == TILE_ENTRANCE}
+        exit_cells = {cell for cell, tid in extra["tile_id"].items() if tid == TILE_EXIT}
 
         if not walkable_cells:
             self.report({'WARNING'}, "No walkable tiles found in the blueprint.")
@@ -4620,7 +4814,9 @@ class OBJECT_OT_GenerateLevelDoors(bpy.types.Operator):
 
         _remove_objects_by_prefix(DOORS_OBJECT_NAME)
 
-        door_material = get_or_create_door_material()
+        # Order matters -- _build_door_mesh bakes material_index 0/1/2 for
+        # ordinary/Entrance/Exit respectively, matching this exact order.
+        door_materials = [get_or_create_door_material(), get_or_create_entrance_material(), get_or_create_exit_material()]
 
         sub_levels = max(1, scene.wfc_sub_levels_per_floor)
         per_floor = scene.wfc_door_grouping == 'PER_FLOOR'
@@ -4639,13 +4835,16 @@ class OBJECT_OT_GenerateLevelDoors(bpy.types.Operator):
                     scene.wfc_door_height, scene.wfc_door_frame_thickness, name,
                     merge_distance=scene.wfc_door_merge_distance, z_offsets=z_offsets,
                     stair_cells=stair_cells, uv_tile_size=scene.wfc_uv_tile_size,
+                    door_style=scene.wfc_door_style, arch_height=scene.wfc_door_arch_height,
+                    entrance_cells=entrance_cells, exit_cells=exit_cells,
                 )
                 if not door_mesh_data.vertices:
                     bpy.data.meshes.remove(door_mesh_data)
                     continue
                 obj = bpy.data.objects.new(name, door_mesh_data)
                 context.collection.objects.link(obj)
-                door_mesh_data.materials.append(door_material)
+                for mat in door_materials:
+                    door_mesh_data.materials.append(mat)
                 _add_viewport_color_attribute(door_mesh_data)
                 created.append(obj)
         else:
@@ -4654,11 +4853,14 @@ class OBJECT_OT_GenerateLevelDoors(bpy.types.Operator):
                 scene.wfc_door_height, scene.wfc_door_frame_thickness, DOORS_OBJECT_NAME,
                 merge_distance=scene.wfc_door_merge_distance, z_offsets=z_offsets,
                 stair_cells=stair_cells, uv_tile_size=scene.wfc_uv_tile_size,
+                door_style=scene.wfc_door_style, arch_height=scene.wfc_door_arch_height,
+                entrance_cells=entrance_cells, exit_cells=exit_cells,
             )
             if door_mesh_data.vertices:
                 obj = bpy.data.objects.new(DOORS_OBJECT_NAME, door_mesh_data)
                 context.collection.objects.link(obj)
-                door_mesh_data.materials.append(door_material)
+                for mat in door_materials:
+                    door_mesh_data.materials.append(mat)
                 _add_viewport_color_attribute(door_mesh_data)
                 created.append(obj)
             else:
@@ -5237,6 +5439,11 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
         row.prop(scene, "wfc_door_frame_thickness", text="Thick")
         col.prop(scene, "wfc_door_merge_distance", text="Merge Distance (tiles)")
         col.prop(scene, "wfc_door_grouping", text="Grouping")
+        col.separator()
+        col.prop(scene, "wfc_door_style", text="Style")
+        arch_row = col.row(align=True)
+        arch_row.enabled = scene.wfc_door_style != 'FLAT'
+        arch_row.prop(scene, "wfc_door_arch_height", text="Arch Height")
         layout.separator()
         _step_button(
             layout, "object.generate_level_doors", "Step 4: Generate Doors",
@@ -5605,6 +5812,23 @@ def register():
         description="Two doorways facing each other across a corridor this many tiles long or "
                     "shorter collapse into a single door instead of one at each end. 0 = never merge"
     )
+    bpy.types.Scene.wfc_door_style = EnumProperty(
+        name="Door Style",
+        items=[
+            ('FLAT', "Flat", "A flat lintel across the top of the frame (default, unchanged)"),
+            ('ROUND', "Round", "A rounded (segmental/elliptical) arch replaces the flat lintel"),
+            ('POINTED', "Pointed", "A two-centered pointed (Gothic/lancet) arch replaces the flat lintel"),
+        ],
+        default='FLAT',
+        description="Shape of every ORDINARY doorway's top. Entrance and Exit always get their "
+                    "own larger, always-arched Gate regardless of this setting, so they stay "
+                    "visually distinct from ordinary doors either way"
+    )
+    bpy.types.Scene.wfc_door_arch_height = FloatProperty(
+        name="Arch Height", default=0.6, min=0.1, max=3.0, unit='LENGTH',
+        description="How far a Round/Pointed arch rises above the springline (ignored for Flat). "
+                    "Also scales the Entrance/Exit Gate's own (larger) arch"
+    )
     bpy.types.Scene.wfc_torch_chance = FloatProperty(
         name="Torch Chance", default=0.15, min=0.0, max=1.0, subtype='FACTOR',
         description="Chance any given wall-adjacent tile gets a torch, independent of the "
@@ -5714,6 +5938,8 @@ def unregister():
     del bpy.types.Scene.wfc_door_frame_thickness
     del bpy.types.Scene.wfc_door_grouping
     del bpy.types.Scene.wfc_door_merge_distance
+    del bpy.types.Scene.wfc_door_style
+    del bpy.types.Scene.wfc_door_arch_height
     del bpy.types.Scene.wfc_torch_chance
     del bpy.types.Scene.wfc_torch_height
     del bpy.types.Scene.wfc_torch_light_energy
