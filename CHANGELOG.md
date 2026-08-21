@@ -3,6 +3,17 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.20.0
+
+- **New: Arched Doors + Entrance/Exit Gates.** Ordinary doorways can now use a Round or Pointed
+  arch instead of a flat lintel (**Style**, Doors tab, plus an **Arch Height** slider). Entrance
+  and Exit always get their own larger, always-arched Gate in the usual green/red, regardless of
+  Style, so they read as landmarks distinct from an ordinary room doorway.
+- **New: Bent Stairwells.** Room-based stairwells can now bend through one flat landing instead
+  of climbing in a single straight line -- a 90-degree L turn or a 180-degree U dog-leg
+  (**Bend Chance** / **Bend Style**, Stairs tab). Off by default; not available with Corridor
+  Stairs, which is too narrow for a landing.
+
 ## 0.19.0
 
 - **New: Trim-sheet-ready UVs.** Every baked mesh (Walls/Doors/Stairs/Ramps/Torches/Decoration)
