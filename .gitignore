@@ -21,9 +21,13 @@ __pycache__/
 # tracked, pushed DEVELOPMENT.md (see that file's own note on the split)
 /DEVELOPMENT_OFFLINE.md
 
-# Personal/session-specific Claude Code permissions -- .claude/settings.json
-# (shared, project-level allowlist) stays tracked; this one doesn't.
-/.claude/settings.local.json
+# Claude Code local settings -- used to track /.claude/settings.json as a
+# shared, project-level permission allowlist, but that allowlist gets added
+# to automatically (including exact commands with local machine paths baked
+# in, e.g. a specific Blender install path under this machine's home
+# directory) and got pushed to the public repo once already. Not worth the
+# leak risk for what it saves; the whole folder is local-only now.
+/.claude/
 
 # OS cruft
 .DS_Store
