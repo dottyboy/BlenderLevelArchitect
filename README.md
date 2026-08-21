@@ -22,7 +22,9 @@ License: GPL-3.0-or-later (see `game_level_architect/LICENSE`).
 
 ## Installing
 
-1. Download `game_level_architect.zip` (don't unzip it).
+1. Download `game_level_architect.zip` from the
+   [Releases page](https://github.com/dottyboy/BlenderLevelArchitect/releases/latest) (don't
+   unzip it).
 2. In Blender: **Edit > Preferences > Add-ons > Install from Disk...**, then pick the zip.
    (On some Blender builds you can also just drag the zip into the 3D viewport.)
 3. Enable **Game Level Architect** in the add-ons list if it isn't already checked.

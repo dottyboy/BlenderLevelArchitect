@@ -3,6 +3,22 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.19.0
+
+- **New: Trim-sheet-ready UVs.** Every baked mesh (Walls/Doors/Stairs/Ramps/Torches/Decoration)
+  now gets real world-space UVs instead of a flat placeholder, so a tiling texture or trim sheet
+  repeats correctly across a wall run instead of sampling one pixel everywhere. New **UV Tile
+  Size** setting (Scale & Style section) controls how large a texture reads in-world (meters per
+  tile). Simple Viewport Colors' flat swatches look identical either way -- this only matters once
+  you assign your own detailed texture.
+- **New: Round Corners** (Walls tab) -- an opt-in live Bevel modifier that rounds sharp wall
+  corners, with an adjustable radius. Doesn't touch the underlying wall mesh, so it's adjustable
+  after generation with no regeneration needed.
+- **New: Freeze for Texture Work** (Setup tab) -- renames the current Blueprint/Walls/Stairs/
+  Doors/Props out of the way into a dedicated collection, so the next Generate click can't touch
+  them. Lets you hand-apply materials/textures to a specific generated level and keep experimenting
+  with settings afterward without losing that work.
+
 ## 0.18.0
 
 - **New: Per-Floor Overrides.** In the Rooms section, add breakpoints like "floor 0: small

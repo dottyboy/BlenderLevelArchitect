@@ -15,6 +15,7 @@ SRC_PY="$SCRIPT_DIR/levelArchitect_v2.py"
 SRC_TEXTURES="$SCRIPT_DIR/Textures"
 SRC_LICENSE="$SCRIPT_DIR/LICENSE"
 SRC_CHANGELOG="$SCRIPT_DIR/CHANGELOG.md"
+SRC_README="$SCRIPT_DIR/README.md"
 SRC_SCREENSHOT="$SCRIPT_DIR/docs/screenshot.png"
 
 DIST_DIR="$SCRIPT_DIR/dist"
@@ -22,7 +23,7 @@ PKG_NAME="game_level_architect"
 PKG_DIR="$DIST_DIR/$PKG_NAME"
 ZIP_PATH="$DIST_DIR/$PKG_NAME.zip"
 
-for required in "$SRC_PY" "$SRC_TEXTURES" "$SRC_LICENSE" "$SRC_CHANGELOG" "$SRC_SCREENSHOT"; do
+for required in "$SRC_PY" "$SRC_TEXTURES" "$SRC_LICENSE" "$SRC_CHANGELOG" "$SRC_README" "$SRC_SCREENSHOT"; do
     if [ ! -e "$required" ]; then
         echo "ERROR: missing $required" >&2
         exit 1
@@ -41,7 +42,25 @@ cp "$SRC_LICENSE" "$PKG_DIR/LICENSE"
 cp "$SRC_TEXTURES"/*.png "$PKG_DIR/Textures/"
 
 # Not part of the installable package itself -- copied alongside the zip in
-# dist/ as release-page assets (README.md already lives there by hand).
+# dist/ as release-page assets. README.md used to be maintained by hand here
+# and quietly drifted out of sync with the real one (missing the showcase
+# video + all 4 tutorial sections added to the root README since) -- always
+# copied fresh now, same as CHANGELOG.md/screenshot.png, so it can't drift
+# again.
+cp "$SRC_README" "$DIST_DIR/README.md"
+# The root README's relative links/video embeds (e.g. "docs/showcase.mp4")
+# are correct from the REPO ROOT, where README.md itself lives -- GitHub
+# resolves relative img/video src paths against the file's own location, so
+# copied verbatim into dist/ (one directory down) they'd point at a
+# nonexistent dist/docs/... and silently render as broken. Rewriting every
+# "docs/" reference to "../docs/" makes them resolve correctly from dist/'s
+# actual location instead. screenshot.png is untouched -- it already has its
+# own local copy directly in dist/ (below), so its bare relative reference
+# is already correct as-is for this file's new location.
+# Only the link TARGETS need rewriting -- "(docs/..." for a markdown link
+# href, `src="docs/...` for the <video> embed -- not the "[docs/..." visible
+# link text, which should keep reading as the real repo-root-relative path.
+sed -i -e 's#(docs/#(../docs/#g' -e 's#src="docs/#src="../docs/#g' "$DIST_DIR/README.md"
 cp "$SRC_CHANGELOG" "$DIST_DIR/CHANGELOG.md"
 cp "$SRC_SCREENSHOT" "$DIST_DIR/screenshot.png"
 

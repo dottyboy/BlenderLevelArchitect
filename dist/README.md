@@ -6,6 +6,12 @@ for walls and stairs).
 
 ![Example generated level -- rooms, corridors, doors, stairs, torches and decoration, each room individually colored](screenshot.png)
 
+**Watch it generate:** [docs/showcase.mp4](../docs/showcase.mp4) — Generate Blueprint, Separate by
+Floor/Room (real per-room color), Cave Mode's organic tunnels, a full populated level, and
+Per-Floor Overrides, ~19 seconds.
+
+<video src="../docs/showcase.mp4" controls width="100%"></video>
+
 **Status: early testing release.** Feedback welcome, expect rough edges.
 
 License: GPL-3.0-or-later (see `game_level_architect/LICENSE`).
@@ -16,7 +22,9 @@ License: GPL-3.0-or-later (see `game_level_architect/LICENSE`).
 
 ## Installing
 
-1. Download `game_level_architect.zip` (don't unzip it).
+1. Download `game_level_architect.zip` from the
+   [Releases page](https://github.com/dottyboy/BlenderLevelArchitect/releases/latest) (don't
+   unzip it).
 2. In Blender: **Edit > Preferences > Add-ons > Install from Disk...**, then pick the zip.
    (On some Blender builds you can also just drag the zip into the 3D viewport.)
 3. Enable **Game Level Architect** in the add-ons list if it isn't already checked.
@@ -25,6 +33,25 @@ License: GPL-3.0-or-later (see `game_level_architect/LICENSE`).
 The `Textures/` folder bundled inside the zip must stay next to the add-on's Python file — it's
 used for the built-in flat-color material set. If you ever move the installed add-on folder by
 hand, move `Textures/` along with it.
+
+## Tutorials
+
+- **Getting Started** ([docs/tutorial_getting_started.mp4](../docs/tutorial_getting_started.mp4),
+  ~2:23) — walks through all 5 steps in order (Blueprint → Walls → Stairs → Doors → Props) plus
+  Separate by Floor/Room, on one level built up step by step, with captions pointing at which
+  panel setting to use.
+- **Room Shapes & Corridor Stairs**
+  ([docs/tutorial_room_shapes.mp4](../docs/tutorial_room_shapes.mp4), ~2:07) — Rectangular, Round,
+  and Mixed room layouts, Cave Mode's organic tunnel networks, and Corridor Stairs (a 1-wide
+  stairwell flush with the corridor, no separate room needed).
+- **Materials & Per-Floor Overrides**
+  ([docs/tutorial_materials.mp4](../docs/tutorial_materials.mp4), ~2:02) — Simple Viewport Colors
+  vs. Style mode's procedural shaders, and Per-Floor Overrides (room size blending smoothly
+  between breakpoints while shape and style switch), with a same-scale side-by-side of a small
+  floor-0 room next to a large floor-3 room.
+- **Props & Lighting** ([docs/tutorial_props_lighting.mp4](../docs/tutorial_props_lighting.mp4),
+  ~2:03) — wall torches (a mesh plus a real Point light per lit torch), scattered crate/barrel/
+  cone decoration, and a fully populated level with everything together.
 
 ## Basic workflow
 
