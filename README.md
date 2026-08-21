@@ -1,3 +1,14 @@
+<meta property="og:title" content="Game Level Architect">
+<meta property="og:description" content="Procedural game-level generator for Blender — a WFC-style room/corridor/stair solver with automatic Geometry Nodes + Python mesh generation.">
+<meta property="og:image" content="https://raw.githubusercontent.com/dottyboy/BlenderLevelArchitect/main/screenshot.png">
+<meta property="og:url" content="https://github.com/dottyboy/BlenderLevelArchitect">
+<meta property="og:type" content="website">
+
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Game Level Architect">
+<meta name="twitter:description" content="Procedural game-level generator for Blender — a WFC-style room/corridor/stair solver with automatic Geometry Nodes + Python mesh generation.">
+<meta name="twitter:image" content="https://raw.githubusercontent.com/dottyboy/BlenderLevelArchitect/main/screenshot.png">
+
 # Game Level Architect
 
 [![License: GPL v3](https://img.shields.io/github/license/dottyboy/BlenderLevelArchitect)](LICENSE)
