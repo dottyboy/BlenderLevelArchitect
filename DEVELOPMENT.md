@@ -9,7 +9,8 @@ Current version: **0.19.0** (see `bl_info` in the source file).
 §2 (Development tree) was condensed 2026-08-21 — dropped the blow-by-blow investigation
 narrative and per-run stress-test numbers from older, fully-resolved entries, kept every
 decision, bug mechanism, and design rationale. Nothing was removed for being wrong or
-obsolete; if a past entry reads thin, the full history is still in git blame/log, not lost.
+obsolete; the full uncondensed version lives in `DEVELOPMENT_OFFLINE.md` (gitignored, local
+only, not on GitHub) if you need the full narrative behind an entry.
 
 ---
 

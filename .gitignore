@@ -17,6 +17,10 @@ __pycache__/
 # and tests/generate_cave_gallery.py
 /test_blends/
 
+# Full internal dev log -- local-only, uncondensed counterpart to the
+# tracked, pushed DEVELOPMENT.md (see that file's own note on the split)
+/DEVELOPMENT_OFFLINE.md
+
 # OS cruft
 .DS_Store
 Thumbs.db
