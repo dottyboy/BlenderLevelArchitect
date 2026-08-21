@@ -3189,21 +3189,56 @@ class OBJECT_OT_SeparateLevelByFloor(bpy.types.Operator):
         return {'FINISHED'}
 
 
-def _add_flat_uv_map(mesh):
+def _add_planar_uv_map(mesh, uv_tile_size=1.0):
     """Every baked-mesh builder below (walls/doors/stairs/ramps/torches/
     decoration) builds its own geometry directly via from_pydata(), which
     never carries UV data -- same gap the Blueprint's GN graph and
-    Separate by Floor/Room's _mesh_from_faces() had, fixed the same way:
-    a flat constant (0.5, 0.5) UV on every corner, since every Simple
-    Viewport Colors swatch (Wall0/Stairs/Doors/Torch/Prop .png) is a
-    single flat color across the whole image, so the actual UV value
-    doesn't matter for correctness, only that Solid Shading's "Texture"
+    Separate by Floor/Room's _mesh_from_faces() had. Used to be patched
+    with a flat constant (0.5, 0.5) UV on every corner: fine for a Simple
+    Viewport Colors swatch (a single flat color across the whole image, so
+    the actual UV value never mattered), but it meant a REAL tiling
+    texture -- a trim sheet, a tileable brick/rock material -- sampled one
+    single pixel across an entire wall run instead of repeating across it.
+
+    This is real box mapping instead: each quad projects onto whichever of
+    the XY/XZ/YZ planes its face normal is most aligned with, using the
+    vertex's own world position -- already in meters, e.g.
+    _build_wall_mesh's `x * tile_size` -- divided by uv_tile_size.
+    uv_tile_size is meters-per-UV-tile (how large the artist's texture is
+    meant to read in-world); 1.0 means "one texture tile per meter," the
+    common trim-sheet/tiling-texture convention. Solid Shading's "Texture"
     color mode (a separate, simpler display path from "Material" that
     needs a real UV map and has no Generated-coordinates fallback the way
-    EEVEE does) has one to sample at all."""
+    EEVEE does) reads this the same as it read the old flat placeholder --
+    nothing about that gap changes, only what the UV coordinates actually
+    encode.
+
+    Every box this file builds is axis-aligned in the space it's finally
+    placed in EXCEPT one: _build_decoration_mesh's CRATE prop, rotated by
+    an arbitrary `random.uniform(0.0, 2*pi)` angle (stairs/ramps also
+    rotate their local geometry, but only by the four cardinal
+    STAIR_EXIT_ROTATION values -- 0/90/180/270 degrees -- which stay
+    axis-aligned in world space). Box mapping still produces a valid,
+    fully-covered UV for a freely-rotated crate (picking the best-fit
+    plane per face never fails), just with a slight per-face shear/stretch
+    proportional to how far that face's real orientation has drifted from
+    the projection axes -- imperceptible for a small placeholder prop, but
+    worth knowing about before assuming every face here reads texture
+    seams perfectly square."""
     uv_layer = mesh.uv_layers.new(name="UVMap")
-    for loop_uv in uv_layer.data:
-        loop_uv.uv = (0.5, 0.5)
+    inv_scale = 1.0 / uv_tile_size if uv_tile_size else 1.0
+    for poly in mesh.polygons:
+        normal = poly.normal
+        ax, ay, az = abs(normal.x), abs(normal.y), abs(normal.z)
+        if az >= ax and az >= ay:
+            axis_a, axis_b = 0, 1  # top/bottom-facing -- project onto XY
+        elif ay >= ax:
+            axis_a, axis_b = 0, 2  # front/back-facing -- project onto XZ
+        else:
+            axis_a, axis_b = 1, 2  # left/right-facing -- project onto YZ
+        for loop_index in poly.loop_indices:
+            co = mesh.vertices[mesh.loops[loop_index].vertex_index].co
+            uv_layer.data[loop_index].uv = (co[axis_a] * inv_scale, co[axis_b] * inv_scale)
 
 
 def _add_viewport_color_attribute(mesh):
@@ -3228,9 +3263,61 @@ def _add_viewport_color_attribute(mesh):
     mesh.color_attributes.active_color_index = len(mesh.color_attributes) - 1
 
 
+def _add_corner_rounding_modifier(obj, radius):
+    """Adds a live Bevel modifier to `obj`, angle-limited so it only
+    rounds genuinely sharp edges (real ~90-degree wall corners, and --
+    if Cap Top is on -- the top rim where a wall's side meets its cap)
+    rather than the near-flat edges running along a straight wall run.
+
+    Deliberately a Bevel modifier and not hand-derived fillet geometry:
+    _build_wall_mesh emits one merged box per straight run (see its own
+    docstring), so a real per-corner quarter-cylinder fillet would need
+    each run's two endpoints classified as an actual building corner
+    (another run starting at the identical point) vs. a doorway/opening
+    jamb (the wall just stops, nothing perpendicular meets it there) --
+    real, doable, but enough extra geometry logic to be its own follow-up,
+    not blindly added on top of an already-working mesh builder without a
+    real Blender session to verify it against. The Bevel modifier is a
+    long-stable, ordinary mesh modifier (not Geometry Nodes -- this file's
+    documented reason for baking walls/stairs as plain Python meshes in
+    the first place was specifically GN's uncertain live-API behavior, a
+    risk this doesn't carry), so it's the lower-risk way to ship real
+    rounded corners today.
+
+    Honest limitation, not a bug: 'ANGLE' limit mode rounds every sharp
+    edge uniformly, so it also rounds doorway/opening jambs (a wall run
+    simply ending in open air) alongside true building corners, and the
+    top rim too whenever Cap Top is on -- there's no way to tell those
+    apart from edge angle alone (a jamb and a corner both meet at ~90
+    degrees). All of that reads as a reasonable, if slightly broader than
+    strictly "room corners," softened look; a future WEIGHT-based version
+    that marks only genuine corner edges (see the class docstring's
+    Ideas-for-future-work entry) would need each edge's exact bevel-weight
+    attribute name/API verified live first -- Blender 4.0 moved Bevel
+    Weight onto the generic attribute system, another exact detail not
+    worth guessing blind.
+
+    Boundary (single-face) edges -- every wall box's dropped bottom face,
+    see add_box's own comment -- have no second face to measure an angle
+    against, so 'ANGLE' limit mode leaves them alone by construction; no
+    special-casing needed here for that.
+
+    `radius` is the Bevel modifier's Width; Blender's own Clamp Overlap
+    (left at its default True) already prevents an oversized radius from
+    self-intersecting on a thin wall, so this doesn't need to duplicate
+    that clamp against wall_thickness itself."""
+    mod = obj.modifiers.new(name="Corner Rounding", type='BEVEL')
+    _set_prop(mod, 'width', radius)
+    _set_prop(mod, 'segments', 6)
+    _set_prop(mod, 'limit_method', 'ANGLE')
+    _set_prop(mod, 'angle_limit', math.radians(35.0))
+    _set_prop(mod, 'harden_normals', True)
+    return mod
+
+
 def _build_wall_mesh(
     walkable_cells, tile_size, level_height, wall_height, wall_thickness, cap_top, name,
-    organic_amount=0.0, z_offsets=None, forced_wall_edges=None,
+    organic_amount=0.0, z_offsets=None, forced_wall_edges=None, uv_tile_size=1.0,
 ):
     """Fully-baked wall geometry, computed in plain Python rather than a
     Geometry Nodes region-extrude (whose exact Selection/mode defaults proved
@@ -3400,7 +3487,7 @@ def _build_wall_mesh(
     mesh = bpy.data.meshes.new(name + "_Mesh")
     mesh.from_pydata(verts, [], faces)
     mesh.update()
-    _add_flat_uv_map(mesh)
+    _add_planar_uv_map(mesh, uv_tile_size)
     return mesh
 
 
@@ -3448,7 +3535,7 @@ def _cluster_nearby_points(points, merge_distance):
 
 def _build_door_mesh(
     walkable_cells, room_ids, tile_size, level_height, door_height, frame_thickness, name,
-    merge_distance=2, z_offsets=None, stair_cells=None,
+    merge_distance=2, z_offsets=None, stair_cells=None, uv_tile_size=1.0,
 ):
     """A walk-through frame (two side posts + a top lintel, deliberately no
     panel filling the gap) at every same-Z boundary between two walkable
@@ -3598,11 +3685,13 @@ def _build_door_mesh(
     mesh = bpy.data.meshes.new(name + "_Mesh")
     mesh.from_pydata(verts, [], faces)
     mesh.update()
-    _add_flat_uv_map(mesh)
+    _add_planar_uv_map(mesh, uv_tile_size)
     return mesh
 
 
-def _build_stair_mesh(stair_runs, tile_size, level_height, steps_per_tile, name, organic_amount=0.0):
+def _build_stair_mesh(
+    stair_runs, tile_size, level_height, steps_per_tile, name, organic_amount=0.0, uv_tile_size=1.0,
+):
     """Fully-baked ascending stair geometry, same reasoning as
     _build_wall_mesh: plain Python boxes rather than a Geometry Nodes
     instancing pass. stair_runs is a list of (x, y, z, rotation, length)
@@ -3665,11 +3754,11 @@ def _build_stair_mesh(stair_runs, tile_size, level_height, steps_per_tile, name,
     mesh = bpy.data.meshes.new(name + "_Mesh")
     mesh.from_pydata(verts, [], faces)
     mesh.update()
-    _add_flat_uv_map(mesh)
+    _add_planar_uv_map(mesh, uv_tile_size)
     return mesh
 
 
-def _build_ramp_mesh(stair_runs, tile_size, level_height, name, organic_amount=0.0):
+def _build_ramp_mesh(stair_runs, tile_size, level_height, name, organic_amount=0.0, uv_tile_size=1.0):
     """One continuous sloped ramp per run instead of discrete steps -- same
     stair_runs data as _build_stair_mesh (same rooms, same buffer, same
     orientation fix; this only swaps the mesh representation), better
@@ -3746,7 +3835,7 @@ def _build_ramp_mesh(stair_runs, tile_size, level_height, name, organic_amount=0
     mesh = bpy.data.meshes.new(name + "_Mesh")
     mesh.from_pydata(verts, [], faces)
     mesh.update()
-    _add_flat_uv_map(mesh)
+    _add_planar_uv_map(mesh, uv_tile_size)
     return mesh
 
 
@@ -3983,7 +4072,7 @@ def _read_blueprint_points(blueprint_obj, tile_size, level_height, extra_attrs=(
     return walkable_cells, extra
 
 
-def _build_torch_mesh(torches, tile_size, torch_height, name):
+def _build_torch_mesh(torches, tile_size, torch_height, name, uv_tile_size=1.0):
     """Fully-baked wall-mounted torch placeholder: a thin bracket box
     protruding from the wall face, capped by a slightly larger "flame"
     box at its outer end -- two material slots (bracket, flame), same
@@ -4056,13 +4145,13 @@ def _build_torch_mesh(torches, tile_size, torch_height, name):
     mesh = bpy.data.meshes.new(name + "_Mesh")
     mesh.from_pydata(verts, [], faces)
     mesh.update()
-    _add_flat_uv_map(mesh)
+    _add_planar_uv_map(mesh, uv_tile_size)
     for poly, mat_idx in zip(mesh.polygons, material_indices):
         poly.material_index = mat_idx
     return mesh
 
 
-def _build_decoration_mesh(props, tile_size, name):
+def _build_decoration_mesh(props, tile_size, name, uv_tile_size=1.0):
     """Fully-baked placeholder decoration -- crates, barrels, and simple
     cone-topped props (chests/furniture/dressing in general), scattered
     per room by OBJECT_OT_GenerateLevelProps. One shared material slot;
@@ -4137,7 +4226,7 @@ def _build_decoration_mesh(props, tile_size, name):
     mesh = bpy.data.meshes.new(name + "_Mesh")
     mesh.from_pydata(verts, [], faces)
     mesh.update()
-    _add_flat_uv_map(mesh)
+    _add_planar_uv_map(mesh, uv_tile_size)
     return mesh
 
 
@@ -4233,7 +4322,7 @@ class OBJECT_OT_GenerateLevelWalls(bpy.types.Operator):
                     cells_by_floor[floor_idx], tile_size, level_height,
                     scene.wfc_wall_height, scene.wfc_wall_thickness, scene.wfc_wall_cap_top,
                     name, organic_amount=organic_amount, z_offsets=z_offsets,
-                    forced_wall_edges=forced_wall_edges,
+                    forced_wall_edges=forced_wall_edges, uv_tile_size=scene.wfc_uv_tile_size,
                 )
                 if not wall_mesh_data.vertices:
                     bpy.data.meshes.remove(wall_mesh_data)
@@ -4248,13 +4337,17 @@ class OBJECT_OT_GenerateLevelWalls(bpy.types.Operator):
                 walkable_cells, tile_size, level_height,
                 scene.wfc_wall_height, scene.wfc_wall_thickness, scene.wfc_wall_cap_top,
                 WALLS_OBJECT_NAME, organic_amount=organic_amount, z_offsets=z_offsets,
-                forced_wall_edges=forced_wall_edges,
+                forced_wall_edges=forced_wall_edges, uv_tile_size=scene.wfc_uv_tile_size,
             )
             obj = bpy.data.objects.new(WALLS_OBJECT_NAME, wall_mesh_data)
             context.collection.objects.link(obj)
             wall_mesh_data.materials.append(wall_material)
             _add_viewport_color_attribute(wall_mesh_data)
             created.append(obj)
+
+        if scene.wfc_wall_corner_rounding:
+            for obj in created:
+                _add_corner_rounding_modifier(obj, scene.wfc_wall_corner_radius)
 
         for obj in created:
             obj.select_set(True)
@@ -4334,11 +4427,14 @@ class OBJECT_OT_GenerateLevelStairs(bpy.types.Operator):
                     else f"{STAIRS_OBJECT_NAME}_Floor{floor_idx}"
                 )
                 if scene.wfc_stair_mesh_style == 'RAMP':
-                    mesh_data = _build_ramp_mesh(group, tile_size, level_height, name, organic_amount=organic_amount)
+                    mesh_data = _build_ramp_mesh(
+                        group, tile_size, level_height, name,
+                        organic_amount=organic_amount, uv_tile_size=scene.wfc_uv_tile_size,
+                    )
                 else:
                     mesh_data = _build_stair_mesh(
                         group, tile_size, level_height, scene.wfc_stair_steps, name,
-                        organic_amount=organic_amount,
+                        organic_amount=organic_amount, uv_tile_size=scene.wfc_uv_tile_size,
                     )
                 obj = bpy.data.objects.new(name, mesh_data)
                 context.collection.objects.link(obj)
@@ -4417,7 +4513,7 @@ class OBJECT_OT_GenerateLevelDoors(bpy.types.Operator):
                     floor_cells, floor_room_ids, tile_size, level_height,
                     scene.wfc_door_height, scene.wfc_door_frame_thickness, name,
                     merge_distance=scene.wfc_door_merge_distance, z_offsets=z_offsets,
-                    stair_cells=stair_cells,
+                    stair_cells=stair_cells, uv_tile_size=scene.wfc_uv_tile_size,
                 )
                 if not door_mesh_data.vertices:
                     bpy.data.meshes.remove(door_mesh_data)
@@ -4432,7 +4528,7 @@ class OBJECT_OT_GenerateLevelDoors(bpy.types.Operator):
                 walkable_cells, room_ids, tile_size, level_height,
                 scene.wfc_door_height, scene.wfc_door_frame_thickness, DOORS_OBJECT_NAME,
                 merge_distance=scene.wfc_door_merge_distance, z_offsets=z_offsets,
-                stair_cells=stair_cells,
+                stair_cells=stair_cells, uv_tile_size=scene.wfc_uv_tile_size,
             )
             if door_mesh_data.vertices:
                 obj = bpy.data.objects.new(DOORS_OBJECT_NAME, door_mesh_data)
@@ -4620,7 +4716,10 @@ class OBJECT_OT_GenerateLevelProps(bpy.types.Operator):
         created = []
 
         if torches:
-            torch_mesh = _build_torch_mesh(torches, tile_size, scene.wfc_torch_height, PROPS_TORCH_OBJECT_NAME)
+            torch_mesh = _build_torch_mesh(
+                torches, tile_size, scene.wfc_torch_height, PROPS_TORCH_OBJECT_NAME,
+                uv_tile_size=scene.wfc_uv_tile_size,
+            )
             torch_obj = bpy.data.objects.new(PROPS_TORCH_OBJECT_NAME, torch_mesh)
             torch_collection.objects.link(torch_obj)
             torch_mesh.materials.append(get_or_create_torch_material())
@@ -4650,7 +4749,9 @@ class OBJECT_OT_GenerateLevelProps(bpy.types.Operator):
                 created.append(light_obj)
 
         if decorations:
-            decoration_mesh = _build_decoration_mesh(decorations, tile_size, PROPS_DECORATION_OBJECT_NAME)
+            decoration_mesh = _build_decoration_mesh(
+                decorations, tile_size, PROPS_DECORATION_OBJECT_NAME, uv_tile_size=scene.wfc_uv_tile_size,
+            )
             decoration_obj = bpy.data.objects.new(PROPS_DECORATION_OBJECT_NAME, decoration_mesh)
             decoration_collection.objects.link(decoration_obj)
             decoration_mesh.materials.append(get_or_create_prop_material())
@@ -4938,6 +5039,7 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
             ceiling_row.enabled = scene.wfc_add_ceiling
             ceiling_row.prop(scene, "wfc_ceiling_thickness", text="Ceiling Thickness (m)")
             col.prop(scene, "wfc_organic_amount", text="Organic Irregularity (m)")
+            col.prop(scene, "wfc_uv_tile_size", text="UV Tile Size (m)")
             col.separator()
             col.prop(scene, "wfc_simple_materials", text="Simple Viewport Colors")
             style_col = section.column(align=True)
@@ -4964,6 +5066,11 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
         row.prop(scene, "wfc_wall_thickness", text="Thick")
         col.prop(scene, "wfc_wall_cap_top", text="Cap Top")
         col.prop(scene, "wfc_wall_grouping", text="Grouping")
+        col.separator()
+        col.prop(scene, "wfc_wall_corner_rounding", text="Round Corners")
+        radius_row = col.row(align=True)
+        radius_row.enabled = scene.wfc_wall_corner_rounding
+        radius_row.prop(scene, "wfc_wall_corner_radius", text="Radius")
         layout.separator()
         _step_button(
             layout, "object.generate_level_walls", "Step 2: Generate Walls",
@@ -5293,11 +5400,33 @@ def register():
         ],
         default='SINGLE',
     )
+    bpy.types.Scene.wfc_wall_corner_rounding = BoolProperty(
+        name="Round Corners", default=False,
+        description="Add a live Bevel modifier to the wall object(s) that rounds every sharp "
+                    "vertical edge -- genuine building corners, and wall runs ending at a "
+                    "doorway/opening jamb alike (edge angle alone can't tell those apart). Also "
+                    "rounds the top rim if Cap Top is on. Live/adjustable -- no regeneration "
+                    "needed to change the radius"
+    )
+    bpy.types.Scene.wfc_wall_corner_radius = FloatProperty(
+        name="Corner Radius", default=0.1, min=0.01, max=1.0, unit='LENGTH',
+        description="Bevel width for Round Corners -- Blender's own Clamp Overlap keeps an "
+                    "oversized radius from self-intersecting on a thin wall"
+    )
     bpy.types.Scene.wfc_organic_amount = FloatProperty(
         name="Organic Irregularity", default=0.0, min=0.0, max=0.3, unit='LENGTH',
         description="Jitters wall height/thickness, stair tread width, and ramp edges for a "
                     "hand-carved look -- purely cosmetic, never affects which cells are walkable "
                     "or connectivity. 0 = perfectly regular (default)"
+    )
+    bpy.types.Scene.wfc_uv_tile_size = FloatProperty(
+        name="UV Tile Size", default=1.0, min=0.05, max=20.0, unit='LENGTH',
+        description="Meters-per-UV-tile used to box-map every baked mesh (walls/doors/stairs/"
+                    "ramps/torches/decoration) -- set this to match a tiling texture or trim "
+                    "sheet's real-world size so it repeats correctly instead of stretching across "
+                    "a whole wall run. Doesn't affect Simple Viewport Colors (flat swatches read "
+                    "the same regardless of UV), only materials that actually sample varying "
+                    "texture detail across a face"
     )
     bpy.types.Scene.wfc_stair_mesh_style = EnumProperty(
         name="Mesh Style",
@@ -5444,7 +5573,10 @@ def unregister():
     del bpy.types.Scene.wfc_wall_thickness
     del bpy.types.Scene.wfc_wall_cap_top
     del bpy.types.Scene.wfc_wall_grouping
+    del bpy.types.Scene.wfc_wall_corner_rounding
+    del bpy.types.Scene.wfc_wall_corner_radius
     del bpy.types.Scene.wfc_organic_amount
+    del bpy.types.Scene.wfc_uv_tile_size
     del bpy.types.Scene.wfc_stair_mesh_style
     del bpy.types.Scene.wfc_stair_steps
     del bpy.types.Scene.wfc_stair_grouping

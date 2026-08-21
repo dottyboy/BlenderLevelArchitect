@@ -566,6 +566,43 @@ if walls_obj is not None:
         top_ok = all(polys[b * faces_per_box].normal.z > 0.5 for b in range(n_boxes))
         check("Walls: top (cap) face winding points +Z", top_ok, f"boxes checked={n_boxes}")
 
+    # Regression check: Round Corners (wfc_wall_corner_rounding) adds a
+    # live Bevel modifier to the wall object(s) instead of baking fillet
+    # geometry into the mesh -- see _add_corner_rounding_modifier's
+    # docstring for why (angle-limited Bevel is a long-stable modifier,
+    # deliberately chosen over hand-derived corner geometry that couldn't
+    # be verified without a real Blender session). Toggled on, regenerated,
+    # and checked directly here, then reverted so the default (off) wall
+    # mesh is what every later check in this file keeps seeing.
+    prev_rounding = scene.wfc_wall_corner_rounding
+    prev_radius = scene.wfc_wall_corner_radius
+    scene.wfc_wall_corner_rounding = True
+    scene.wfc_wall_corner_radius = 0.12
+    result = bpy.ops.object.generate_level_walls()
+    check("Walls: regenerate with Round Corners on FINISHED", result == {'FINISHED'}, str(result))
+    rounded_walls_obj = bpy.data.objects.get(addon.WALLS_OBJECT_NAME)
+    if rounded_walls_obj is not None:
+        bevel_mods = [m for m in rounded_walls_obj.modifiers if m.type == 'BEVEL']
+        check(
+            "Walls: Round Corners adds exactly one Bevel modifier",
+            len(bevel_mods) == 1, f"count={len(bevel_mods)}",
+        )
+        if bevel_mods:
+            check(
+                "Walls: Bevel modifier width matches Corner Radius",
+                abs(bevel_mods[0].width - 0.12) < 1e-6, f"width={bevel_mods[0].width}",
+            )
+            check(
+                "Walls: Bevel modifier uses angle-limited selection (not every edge)",
+                bevel_mods[0].limit_method == 'ANGLE', f"limit_method={bevel_mods[0].limit_method}",
+            )
+    scene.wfc_wall_corner_rounding = prev_rounding
+    scene.wfc_wall_corner_radius = prev_radius
+    result = bpy.ops.object.generate_level_walls()
+    check("Walls: regenerate back to Round Corners default FINISHED", result == {'FINISHED'}, str(result))
+    walls_obj = bpy.data.objects.get(addon.WALLS_OBJECT_NAME)
+    check("Walls: object still exists after reverting Round Corners", walls_obj is not None)
+
     if scene.wfc_corridor_stairs:
         # Regression check for a real, accepted-as-residual bug
         # (DEVELOPMENT.md "Corridor Stairs, rare residual wall gap", ~7-10%
@@ -782,7 +819,7 @@ if decoration_obj is not None:
 # Regression check: every baked-mesh builder (walls/doors/stairs/torches/
 # decoration) builds geometry directly via from_pydata(), which never
 # carries UV data -- same gap the Blueprint's GN graph had, fixed the same
-# way (_add_flat_uv_map). Solid Shading's "Texture" color mode needs a
+# way (_add_planar_uv_map). Solid Shading's "Texture" color mode needs a
 # real UV map to show anything on these at all.
 stairs_objs = [
     o for o in bpy.data.objects
@@ -797,6 +834,24 @@ check(
     "Baked meshes (walls/doors/stairs/torches/decoration) have a UV map, every loop covered",
     len(uv_targets) > 0 and len(uncovered) == 0,
     f"checked={[o.name for o in uv_targets]} uncovered={uncovered}",
+)
+
+# Regression check: _add_planar_uv_map replaced the old flat-constant
+# (0.5, 0.5) placeholder with real world-space box mapping (see its
+# docstring), specifically so a tiling/trim-sheet texture repeats across a
+# wall run instead of sampling one pixel everywhere. If this ever
+# regresses back to a constant, every UV in a mesh collapses to the same
+# tuple -- checked directly rather than trusting the box-mapping math is
+# still wired up.
+flat_uv_targets = [o for o in uv_targets if o.data.uv_layers]
+still_flat = [
+    o.name for o in flat_uv_targets
+    if len({tuple(round(c, 4) for c in loop_uv.uv) for loop_uv in o.data.uv_layers[0].data}) <= 1
+]
+check(
+    "Baked meshes have real (non-constant) box-mapped UVs, not the old flat placeholder",
+    len(flat_uv_targets) > 0 and len(still_flat) == 0,
+    f"checked={[o.name for o in flat_uv_targets]} still_flat={still_flat}",
 )
 
 # Regression check: "viewport_color" Color Attribute (_add_viewport_color_

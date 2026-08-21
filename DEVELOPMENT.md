@@ -1229,6 +1229,13 @@ GN complexity there specifically.
 
 ## 3. Known issues / things that need fixing
 
+- [ ] **`downgraded-32.hex` (the master palette source) has 32 colors, but only 31 made it into
+      `levelArchitect_v2.py`.** `b8b4b2` (line 13) isn't `FLOOR_RAMP_HEX`, `ROOM_POOL_HEX`,
+      `WALL_HEX`, `STAIR_HEX`, `DOOR_HEX`, `ENTRANCE_HEX`, `EXIT_HEX`, `TORCH_HEX`, `TORCH_FLAME_HEX`,
+      or `PROP_HEX` -- it never got assigned to anything. Every other line in the hex file maps 1:1
+      to a constant. Need to decide what `b8b4b2` was meant for (an unused slot? a second wall
+      variant, given `WALL_HEX`'s neighbor `WALL_FILE`/`Wall1.png` already exists unreferenced in
+      `Textures/`?) and wire it in, or drop it from the palette file if it's genuinely spare.
 - [x] **`Room17.png` / `Room18.png` were duplicate colors** (both `fcef8d`) in the shipped
       Textures set — `658d78` (dark sage), `ROOM_POOL_HEX`'s actual entry for Room18, never made
       it into the shipped swatch. Fixed by regenerating `Room18.png` as a flat `658d78` PNG to
@@ -1279,8 +1286,94 @@ Roughly ordered by how directly they build on what already exists:
       would need its own geometry and probably its own material, plus a decision on whether it
       should ever visually block the opening (it shouldn't block *pathing* — connectivity must
       stay frame-based) or just sit ajar for looks.
-- [ ] **Props / decoration scattering** (torches, rubble, furniture) for atmosphere — would want
-      its own opt-in step, probably after Walls, since it'd want wall-adjacency info.
+- [x] **Props / decoration scattering — done, see §2.** Shipped as `OBJECT_OT_GenerateLevelProps`
+      (Step 5): wall-mounted torches (baked mesh + real Point lights) and per-room crate/barrel/
+      cone decoration. This entry was stale — left unchecked after the feature actually landed.
+- [x] **Trim-sheet-ready UVs — done.** Every baked-mesh builder (walls/doors/stairs/ramps/torches/
+      decoration) used to write a flat constant `(0.5, 0.5)` UV on every corner
+      (`_add_flat_uv_map`) — correct for a flat-color Simple Viewport Colors swatch, but it meant
+      any texture with real detail (a trim sheet, a tiling brick/rock material) sampled one single
+      pixel across an entire wall run instead of repeating. Replaced with `_add_planar_uv_map`:
+      real box-mapped UVs (project each quad onto whichever of XY/XZ/YZ its face normal is most
+      aligned with, using its actual world-space position in meters) — needs no separate unwrap
+      step, and every box this file builds is axis-aligned in world space EXCEPT
+      `_build_decoration_mesh`'s CRATE prop (rotated by an arbitrary angle, not the cardinal
+      0/90/180/270 stair/ramp rotations), which still gets a valid, fully-covered UV, just with a
+      slight per-face shear — imperceptible on a small placeholder prop. New `wfc_uv_tile_size`
+      scene property (Setup tab, Scale & Style section) controls meters-per-UV-tile so a texture's
+      real-world size can be matched.
+      Deliberately does NOT touch the Blueprint floor's own UV (still the GN graph's constant
+      `(0.5, 0.5)` `GeometryNodeStoreNamedAttribute` — see `create_geometry_nodes_modifier`) — GN
+      changes are the exact category of "uncertain live-API behavior" this addon has deliberately
+      avoided (§1), so that stays a separate, deliberately-not-attempted follow-up, not scope creep
+      onto this change. **Verified against real Blender 5.2.0 LTS** (this project's primary
+      target — see §5 for how to point `run_blender_tests.sh` at a local install) via
+      `run_blender_tests.sh`, including the new regression check asserting the UVs are no longer a
+      single constant tuple across a mesh — full suite green.
+- [x] **Rounded / filleted wall corners — done (v1, Bevel-modifier based).** `_build_wall_mesh`
+      still emits one merged box per straight run, meeting at hard 90° corners in the base mesh —
+      unchanged. New opt-in `wfc_wall_corner_rounding` + `wfc_wall_corner_radius` (Walls tab) adds
+      a live `BEVEL` modifier (`_add_corner_rounding_modifier`) to the wall object(s), angle-limited
+      (`limit_method='ANGLE'`, ~35°) so it only catches genuinely sharp edges, not the near-flat
+      edges running along a straight wall. Chose this over hand-derived per-corner quarter-cylinder
+      fillet geometry specifically because Bevel is a long-stable, ordinary mesh modifier — not
+      Geometry Nodes, the exact "uncertain live-API behavior" category §1 already flags as the
+      reason walls/stairs are baked Python in the first place — so it's verifiable and low-risk.
+      **Verified against real Blender 5.2.0 LTS** via `run_blender_tests.sh` (new checks: exactly
+      one Bevel modifier added, width matches Corner Radius, `limit_method == 'ANGLE'`) — full
+      suite green. Still only confirms the modifier is wired up correctly, not that the rounded
+      result looks good at a glance — worth an actual visual look in the viewport before relying
+      on the default radius/angle-limit values for a real level.
+      **Known, disclosed limitation (not a bug):** angle-limited selection can't distinguish a true
+      building corner from a wall run simply ending at a doorway/opening jamb — both read as ~90°
+      edges — so it rounds both, and also rounds the top rim whenever Cap Top is on. Reads as a
+      reasonable, broader-than-strictly-"corners" softened look in practice.
+      **v2, if the broader effect above turns out to matter:** hand-derived fillet geometry
+      directly in `_build_wall_mesh`, built only at cells where a run's endpoint coincides with
+      another perpendicular run's endpoint (a real corner) — composes correctly with Organic
+      Irregularity and continuous-elevation z_offsets the way a blind modifier can't, but needs
+      that corner-vs-jamb classification logic first. **v2-alt:** a `WEIGHT`-limited Bevel marking
+      only true corner edges via each box's own known vertical-edge vertex pairs — much less new
+      geometry code than v2, but Blender 4.0 moved Bevel Weight onto the generic attribute system,
+      so the exact attribute name/API needs live-Blender verification before attempting it, not a
+      blind guess.
+- [ ] **Alternative layout-generation algorithms (Voronoi / Perlin-Simplex noise).** Two genuinely
+      different approaches from what exists today (grid scatter+MST for RECT/ROUND/MIXED,
+      drunkard's-walk tunnels for CAVE — see §1's pipeline and `_carve_cave_floors`):
+      - **Voronoi room partitioning.** Scatter N seed points per floor, assign every grid cell to
+        its nearest seed (a rasterized Voronoi diagram) instead of carving discrete rectangles —
+        rooms become irregular polygonal cells with naturally organic, non-axis-aligned boundaries.
+        The big appeal: almost everything downstream is already keyed off `room_id` differing
+        across a walkable boundary (doors, per-room materials, wall silhouette) — a Voronoi cell is
+        just a different way to *fill* `room_id`/`grid`, so doors/walls/materials would need zero
+        changes. The real work is corridor connectivity: adjacent Voronoi cells sharing a border
+        need an explicit opening carved through it (a "portal" a few cells wide), then the existing
+        MST-over-adjacency-graph idea (§1) still applies, just over Voronoi-cell adjacency instead
+        of room-rect adjacency.
+      - **Perlin/simplex noise-thresholded caves**, as an alternative to `_carve_cave_tunnel`'s
+        drunkard's-walk: threshold a noise field per Z-level (walkable where noise > cutoff) for
+        naturally winding caverns without an explicit random walk. Needs its own connectivity
+        story — noise thresholding doesn't guarantee traversability the way a walk that always
+        starts from an already-connected chamber does — but `_ensure_connectivity`/
+        `_bfs_reachable`'s generic BFS-and-repair pass is already agnostic to how a grid got
+        carved, so that part is reusable as-is, not a new subsystem.
+      - Both are self-contained alternative `room_shape` values (like `'CAVE'` today), not changes
+        to the existing modes — same reasoning §4's Cave-mode-is-all-or-nothing note already gives
+        for why per-floor mixing is a separate, larger concern than adding the mode itself.
+- [ ] **Windows.** Would reuse most of `_build_door_mesh`'s same-Z boundary-detection logic
+      (frame at a wall-facing edge instead of only room-to-room boundaries), sized/positioned
+      differently (mid-wall-height opening, not floor-to-lintel) and gated by its own placement
+      rule (e.g. only on true exterior walls) rather than "wherever a doorway already is."
+- [ ] **Collision mesh / navmesh export.** The solver already has the full walkable-cell graph
+      (`WFC_Level_Solver.grid` / `room_id` / connectivity) — nothing downstream currently emits
+      anything beyond visual mesh. A simplified collision box set (reuse `_build_wall_mesh`'s
+      run-merging, just without the cosmetic jitter path) or a baked nav-polygon mesh from the
+      same walkable cells would mostly be "read data already computed, emit different geometry,"
+      not a new subsystem.
+- [ ] **One-click game-engine export operator** (FBX/glTF), aware of the addon's own split object
+      structure (Walls/Doors/Stairs/Props per floor, see `_remove_objects_by_prefix`'s naming
+      convention) so a user doesn't have to know to reach for Blender's generic exporter and
+      manually select the right object set.
 - [x] **Delete interior/hidden faces for faster rendering — done for Walls/Doors/Stairs/Ramps/
       Decoration, see §2 (0.17.4, extended in 0.17.4b/0.18.0).** Every wall box's, stair tread
       box's, and ramp segment box's bottom face (always hidden behind the floor beneath it) is
@@ -1355,6 +1448,10 @@ Roughly ordered by how directly they build on what already exists:
   modifier interaction, or mesh-winding change actually done — it's the only thing in this
   project that can catch what the mock structurally can't (it already found one real,
   project-wide winding bug the mock had no way to see).
+- **This project's primary target is Blender 5.2.0 LTS** — prefer that version's binary for the
+  `[path-to-blender]` argument above when more than one Blender install is available locally.
+  Exact install paths are machine-specific and deliberately not recorded here; confirm whichever
+  binary you point at with `[binary] --version` before trusting it.
 - **Visual spot-checking**: `./generate_test_blends.sh [path-to-blender]` runs the full pipeline
   once per scenario in `tests/generate_test_blends.py`'s `SCENARIOS` list, all on the same fixed
   seed (so the toggled option is the only thing that varies between files, not layout too), and
@@ -1364,6 +1461,13 @@ Roughly ordered by how directly they build on what already exists:
   settings. Add a new tuple to `SCENARIOS` (and bump `NUM_SCENARIOS` in the `.sh` wrapper) for
   any new toggle worth a look. `test_blends/` isn't swept into the distributed package by
   `build_package.sh` (which only ever copies specific named files/folders), same as `tests/`.
+  Each scenario also gets a top-down Workbench render (cavity shading on, so edge/corner
+  geometry actually reads) saved to `test_blends/Renders/test_NN.png`
+  (`render_top_down_preview`, framed to every `WALLS_OBJECT_NAME`-prefixed object's combined
+  bounding box) — lets a scenario be glanced at without opening Blender at all, though a render
+  can still miss something an interactive look wouldn't (occlusion between stacked floors from
+  directly above, wrong-looking materials that only show under a different shading mode, etc.) —
+  it's a faster first pass, not a full replacement for opening the file when something looks off.
 - **Before touching wall/stair/ramp/torch/decoration mesh math**: re-derive the vertex/face
   winding by comparing against `_build_wall_mesh`'s `add_box` — every other `add_box`-style
   builder in this file was deliberately kept in sync with its exact winding convention (bottom

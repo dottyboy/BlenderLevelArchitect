@@ -1,12 +1,17 @@
 # Generates one .blend file per scenario in SCENARIOS, each running the
 # full pipeline (Blueprint -> Walls -> Stairs -> Doors -> Props) against
 # the SAME fixed seed, so the option being showcased is the only thing
-# that differs between files -- not random layout variance too.
+# that differs between files -- not random layout variance too. Also
+# renders a top-down PNG of each scenario into Renders/ alongside the
+# .blend -- see render_top_down_preview -- so a scenario's shape can be
+# glanced at without opening Blender at all, not just confirmed to
+# generate without erroring.
 #
 # Filenames are deliberately generic (test_01.blend, test_02.blend, ...)
 # rather than settings-encoded -- with this many toggles a descriptive
 # filename would be unreadable. testfiles.txt (written alongside them)
-# is the actual index: which file has which settings.
+# is the actual index: which file has which settings. Renders/test_NN.png
+# matches its test_NN.blend one-to-one.
 #
 # Usage (one scenario per Blender process, invoked by generate_test_blends.sh):
 #   blender --background --factory-startup --python tests/generate_test_blends.py -- <scenario_index>
@@ -18,6 +23,7 @@ import os
 import sys
 
 import bpy
+from mathutils import Vector
 
 ADDON_PATH = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "levelArchitect_v2.py")
@@ -25,6 +31,7 @@ ADDON_PATH = os.path.normpath(
 OUTPUT_DIR = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "test_blends")
 )
+RENDERS_DIR = os.path.join(OUTPUT_DIR, "Renders")
 TESTFILES_TXT = os.path.join(OUTPUT_DIR, "testfiles.txt")
 
 FIXED_SEED = 424242
@@ -198,6 +205,14 @@ SCENARIOS = [
             wfc_room_shape='MIXED', wfc_corridor_stairs=True, wfc_stairs_per_level=4,
         ),
     ),
+    (
+        "test_21.blend",
+        "Round Corners ON (new this session) -- a live Bevel modifier (angle-limited, radius "
+        "0.15m) rounds sharp wall edges. Wall Thickness bumped to 0.35m so the rounding reads "
+        "clearly at this tile size; everything else at baseline (RECT rooms, no other toggles) "
+        "to isolate the effect.",
+        dict(wfc_wall_corner_rounding=True, wfc_wall_corner_radius=0.15, wfc_wall_thickness=0.35),
+    ),
 ]
 
 
@@ -209,6 +224,81 @@ def apply_settings(scene, overrides):
     settings.update({k: v for k, v in overrides.items() if not k.startswith("_")})
     for key, value in settings.items():
         setattr(scene, key, value)
+
+
+def render_top_down_preview(scene, addon, png_path):
+    """Top-down orthographic Workbench render (cavity shading on, so
+    corner/edge geometry -- e.g. Round Corners' Bevel fillets -- actually
+    reads in a still image) of every WALLS_OBJECT_NAME-prefixed object in
+    the scene, framed to their combined bounding box. Multiple floors
+    share the same X/Y footprint (only Z differs), so a straight-down view
+    naturally overlays every story, same as looking at a normal top-down
+    map. Best-effort: skipped (with a printed reason, not a raised
+    exception) if there's no wall geometry to frame at all, since a
+    render is a bonus artifact, not something that should fail a whole
+    scenario's .blend from being saved.
+
+    The camera and camera data are created fresh and REMOVED again before
+    the caller saves the .blend -- these are rendering scaffolding for
+    this script, not part of what the addon itself generates, so they
+    shouldn't end up saved inside the showcase file."""
+    wall_objects = [
+        obj for obj in bpy.data.objects
+        if obj.type == 'MESH' and (
+            obj.name == addon.WALLS_OBJECT_NAME or obj.name.startswith(addon.WALLS_OBJECT_NAME + "_")
+        )
+    ]
+    if not wall_objects:
+        print(f"  (skipping render for {png_path} -- no wall geometry found)")
+        return False
+
+    min_co = Vector((float('inf'),) * 3)
+    max_co = Vector((float('-inf'),) * 3)
+    for obj in wall_objects:
+        for corner in obj.bound_box:
+            world_co = obj.matrix_world @ Vector(corner)
+            min_co = Vector(min(a, b) for a, b in zip(min_co, world_co))
+            max_co = Vector(max(a, b) for a, b in zip(max_co, world_co))
+
+    span_x, span_y = max_co.x - min_co.x, max_co.y - min_co.y
+    ortho_scale = max(span_x, span_y, 2.0) * 1.05  # small floor + margin
+
+    cam_data = bpy.data.cameras.new("PreviewRenderCam")
+    cam_data.type = 'ORTHO'
+    cam_data.ortho_scale = ortho_scale
+    cam_obj = bpy.data.objects.new("PreviewRenderCam", cam_data)
+    scene.collection.objects.link(cam_obj)
+    cam_obj.location = ((min_co.x + max_co.x) / 2.0, (min_co.y + max_co.y) / 2.0, max_co.z + 20.0)
+    cam_obj.rotation_euler = (0.0, 0.0, 0.0)  # straight down -Z
+
+    prev_camera = scene.camera
+    prev_engine = scene.render.engine
+    prev_filepath = scene.render.filepath
+    prev_res_x, prev_res_y = scene.render.resolution_x, scene.render.resolution_y
+
+    try:
+        scene.camera = cam_obj
+        scene.render.engine = 'BLENDER_WORKBENCH'
+        scene.display.shading.light = 'STUDIO'
+        scene.display.shading.color_type = 'MATERIAL'
+        scene.display.shading.show_cavity = True
+        scene.display.shading.cavity_type = 'BOTH'
+        scene.render.resolution_x = 1000
+        scene.render.resolution_y = 1000
+        scene.render.image_settings.file_format = 'PNG'
+        scene.render.filepath = png_path
+        bpy.ops.render.render(write_still=True)
+        return True
+    except Exception as exc:  # best-effort -- a render failure shouldn't block saving the .blend
+        print(f"  (render failed for {png_path}: {exc})")
+        return False
+    finally:
+        scene.camera = prev_camera
+        scene.render.engine = prev_engine
+        scene.render.filepath = prev_filepath
+        scene.render.resolution_x, scene.render.resolution_y = prev_res_x, prev_res_y
+        bpy.data.objects.remove(cam_obj, do_unlink=True)
+        bpy.data.cameras.remove(cam_data)
 
 
 def run_pipeline(run_separate, addon):
@@ -250,6 +340,13 @@ def main():
     error = run_pipeline(overrides.get("_run_separate", False), addon)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(RENDERS_DIR, exist_ok=True)
+
+    if error is None:
+        png_path = os.path.join(RENDERS_DIR, os.path.splitext(filename)[0] + ".png")
+        rendered = render_top_down_preview(scene, addon, png_path)
+        print(f"Saved {png_path}" if rendered else f"No render saved for {filename}")
+
     out_path = os.path.join(OUTPUT_DIR, filename)
     bpy.ops.wm.save_as_mainfile(filepath=out_path)
 
