@@ -3,6 +3,13 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.22.0
+
+- **New: Export Collision Mesh** (Export tab, second button). Exports Floor + Walls + Stairs
+  only -- no Doors, Torches, Decoration, or Lights -- suitable to assign directly as a level's
+  collision geometry in a game engine. Doors are left out because they're a walk-through frame by
+  design; their posts would otherwise be a minor snag at every doorway.
+
 ## 0.21.0
 
 - **New: One-click glTF/GLB Export** (new **Export** tab). Selects every generated object and
