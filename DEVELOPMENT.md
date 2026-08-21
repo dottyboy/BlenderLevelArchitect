@@ -599,6 +599,48 @@ GN complexity there specifically.
       empty shell. Also verified: the refusal path with nothing generated reports a clear error
       instead of a silent no-op, and Include Lights off round-trips with zero lights. All checks
       passed on the first real-Blender run.
+- [x] **Collision mesh export.** Follow-up to glTF export above: without collision geometry, an
+      exported level looks right in-engine but can't be walked on unless the target engine happens
+      to auto-generate collision from complex static geometry. New
+      `OBJECT_OT_ExportLevelCollisionGLTF` (second button, same Export tab) — deliberately **a
+      filtered re-export of already-built geometry**, not a freshly-built simplified/merged mesh:
+      there's no existing floor-region box-merging code anywhere in this file (confirmed by
+      reading it directly), and it would be a materially harder 2D problem than
+      `_build_wall_mesh`'s existing 1D per-line wall run-merge. Re-exporting the already-verified
+      visual meshes carries zero new geometry-correctness risk, and for static level architecture
+      (not moving physics props) using the real level mesh directly as collision is standard
+      practice in Unity/Unreal/Godot alike.
+
+      Exports Blueprint (floor) + Walls + Stairs only — deliberately excludes Doors, Torches,
+      Decoration, and Lights. Doors are a walk-through frame overlaid on an already-open gap
+      (`_build_wall_mesh`'s `is_exposed` never places a wall box between two walkable cells), so
+      leaving them out of collision doesn't reopen anything — it just avoids the door posts
+      themselves becoming a minor physical snag at every doorway, matching a doorway's own
+      "walk-through by design" intent. Torches/Decoration are cosmetic and shouldn't block
+      movement; Lights obviously don't belong in a collision mesh. Stairwell holes
+      (`floor_openings`) are handled correctly for free, with zero new code, since the Blueprint's
+      own GN graph already skips floor/ceiling geometry there (the same mechanism the Add Ceiling
+      feature's own hole-skipping already relies on).
+
+      Deliberately **no hand-baked navmesh** — once collision geometry is exported, Unity/Unreal/
+      Godot can all auto-bake their own navmesh from it at import/edit time, so a hand-rolled one
+      here would duplicate something the target engine already does for free, for a narrower
+      audience (only matters with AI/NPCs).
+
+      Shares `_gltf_export_targets`/`_run_gltf_export`, two small helpers factored out of the main
+      export operator during this feature (object-gathering and the select-and-call-exporter
+      plumbing) so both operators can never disagree about what "the level" or "how to export it"
+      means. The main export operator's own behavior is unchanged by the refactor — confirmed by
+      its existing round-trip test still passing unmodified. `invoke()` suggests a
+      `<blend-name>_collision.glb` default filename (distinct from the main export's own default)
+      so the two buttons don't tempt an accidental overwrite of one export with the other.
+
+      Verified against real Blender 5.2.0 LTS: the same round-trip discipline as the main export
+      (re-import via `bpy.ops.import_scene.gltf`, confirm real non-empty mesh geometry) plus two
+      checks specific to this feature — confirming the exclusion actually took effect, not just
+      "some geometry exists": zero light objects come back, and none of the round-tripped objects'
+      names match the Doors/Torches/Decoration prefixes. All checks passed on the first
+      real-Blender run.
 
 ---
 
@@ -739,12 +781,10 @@ Roughly ordered by how directly they build on what already exists:
       (frame at a wall-facing edge instead of only room-to-room boundaries), sized/positioned
       differently (mid-wall-height opening, not floor-to-lintel) and gated by its own placement
       rule (e.g. only on true exterior walls) rather than "wherever a doorway already is."
-- [ ] **Collision mesh / navmesh export.** The solver already has the full walkable-cell graph
-      (`WFC_Level_Solver.grid` / `room_id` / connectivity) — nothing downstream currently emits
-      anything beyond visual mesh. A simplified collision box set (reuse `_build_wall_mesh`'s
-      run-merging, just without the cosmetic jitter path) or a baked nav-polygon mesh from the
-      same walkable cells would mostly be "read data already computed, emit different geometry,"
-      not a new subsystem.
+- [x] **Collision mesh export — done, see §2.** Shipped as `OBJECT_OT_ExportLevelCollisionGLTF`.
+      Scoped down from the original note's "simplified box set" to a filtered re-export of
+      already-built geometry (no new floor-region merging code); no hand-baked navmesh — engines
+      already auto-bake their own from imported collision geometry.
 - [x] **One-click glTF/GLB export — done, see §2.** Shipped as `OBJECT_OT_ExportLevelGLTF`
       (new Export tab). glTF only for now, not FBX — deliberately scoped down (see §2) for a
       standardized, engine-agnostic axis convention with zero addon-side conversion math.

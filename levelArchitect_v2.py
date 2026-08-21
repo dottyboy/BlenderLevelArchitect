@@ -3571,19 +3571,59 @@ class OBJECT_OT_FreezeForTextureWork(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def _gltf_export_targets(base_names, include_lights):
+    """Every object a glTF export should include for the given set of
+    base names, plus Lights when include_lights -- via the same
+    _objects_matching_prefix helper OBJECT_OT_FreezeForTextureWork
+    already uses, so every caller's notion of "which objects" can never
+    drift apart, regardless of Per Floor/Per Stair grouping mode.
+    Shared by both Export Level and Export Collision Mesh."""
+    targets = []
+    for base_name in base_names:
+        targets.extend(_objects_matching_prefix(base_name))
+    if include_lights:
+        targets.extend(_objects_matching_prefix(PROPS_LIGHT_NAME_PREFIX))
+    return targets
+
+
+def _run_gltf_export(context, filepath, targets, include_lights):
+    """Shared plumbing for both export operators: fixes filepath's
+    extension to match Binary (.glb) vs separate .gltf, selects exactly
+    `targets`, and calls Blender's own export_scene.gltf with
+    use_selection + export_apply so live modifiers (the Blueprint's GN
+    graph, Walls' optional Round Corners Bevel) bake into real exported
+    geometry instead of their un-evaluated base mesh. Returns the
+    (possibly extension-corrected) filepath actually written."""
+    scene = context.scene
+    export_format = 'GLB' if scene.wfc_export_binary else 'GLTF_SEPARATE'
+    desired_ext = '.glb' if export_format == 'GLB' else '.gltf'
+    stem, ext = os.path.splitext(filepath)
+    if ext.lower() != desired_ext:
+        filepath = stem + desired_ext
+
+    bpy.ops.object.select_all(action='DESELECT')
+    for obj in targets:
+        obj.select_set(True)
+    context.view_layer.objects.active = targets[0]
+
+    bpy.ops.export_scene.gltf(
+        filepath=filepath,
+        export_format=export_format,
+        use_selection=True,
+        export_apply=True,
+        export_lights=include_lights,
+    )
+    return filepath
+
+
 class OBJECT_OT_ExportLevelGLTF(bpy.types.Operator, ExportHelper):
     """Selects every currently-generated object (Blueprint, Walls, Stairs,
-    Doors, Torches, Decoration, and optionally Lights -- same base_names
-    set OBJECT_OT_FreezeForTextureWork uses, via the same
-    _objects_matching_prefix helper, so this always agrees with what the
-    rest of the addon considers "the level" regardless of grouping mode)
-    and hands them to Blender's own bpy.ops.export_scene.gltf with
-    use_selection + export_apply set -- so the Blueprint's live Geometry
-    Nodes modifier (and Walls' optional Round Corners Bevel modifier) bake
-    into real mesh data in the export, not just their un-evaluated base
-    mesh. glTF's own exporter handles the Blender-Z-up -> glTF-Y-up axis
-    conversion and Principled BSDF -> PBR material mapping itself -- no
-    addon-side geometry or material translation needed here at all."""
+    Doors, Torches, Decoration, and optionally Lights) and hands them to
+    Blender's own bpy.ops.export_scene.gltf -- see _gltf_export_targets/
+    _run_gltf_export. glTF's own exporter handles the Blender-Z-up ->
+    glTF-Y-up axis conversion and Principled BSDF -> PBR material mapping
+    itself -- no addon-side geometry or material translation needed here
+    at all."""
     bl_idname = "object.export_level_gltf"
     bl_label = "Export Level (glTF/GLB)"
     bl_description = "Export every generated Blueprint/Walls/Stairs/Doors/Props object to glTF/GLB"
@@ -3594,17 +3634,11 @@ class OBJECT_OT_ExportLevelGLTF(bpy.types.Operator, ExportHelper):
 
     def execute(self, context):
         scene = context.scene
-
         base_names = (
             BLUEPRINT_OBJECT_NAME, WALLS_OBJECT_NAME, STAIRS_OBJECT_NAME, DOORS_OBJECT_NAME,
             PROPS_TORCH_OBJECT_NAME, PROPS_DECORATION_OBJECT_NAME,
         )
-        targets = []
-        for base_name in base_names:
-            targets.extend(_objects_matching_prefix(base_name))
-        light_targets = _objects_matching_prefix(PROPS_LIGHT_NAME_PREFIX)
-        if scene.wfc_export_include_lights:
-            targets.extend(light_targets)
+        targets = _gltf_export_targets(base_names, scene.wfc_export_include_lights)
 
         if not targets:
             self.report(
@@ -3622,30 +3656,89 @@ class OBJECT_OT_ExportLevelGLTF(bpy.types.Operator, ExportHelper):
             )
             return {'CANCELLED'}
 
-        export_format = 'GLB' if scene.wfc_export_binary else 'GLTF_SEPARATE'
-        desired_ext = '.glb' if export_format == 'GLB' else '.gltf'
-        filepath = self.filepath
-        stem, ext = os.path.splitext(filepath)
-        if ext.lower() != desired_ext:
-            filepath = stem + desired_ext
+        filepath = _run_gltf_export(context, self.filepath, targets, scene.wfc_export_include_lights)
 
-        bpy.ops.object.select_all(action='DESELECT')
-        for obj in targets:
-            obj.select_set(True)
-        context.view_layer.objects.active = targets[0]
-
-        bpy.ops.export_scene.gltf(
-            filepath=filepath,
-            export_format=export_format,
-            use_selection=True,
-            export_apply=True,
-            export_lights=scene.wfc_export_include_lights,
-        )
-
-        light_count = len(light_targets) if scene.wfc_export_include_lights else 0
+        light_count = len(_objects_matching_prefix(PROPS_LIGHT_NAME_PREFIX)) if scene.wfc_export_include_lights else 0
         self.report(
             {'INFO'},
             f"Exported {len(targets)} object(s) ({light_count} light(s)) to '{filepath}'."
+        )
+        return {'FINISHED'}
+
+
+class OBJECT_OT_ExportLevelCollisionGLTF(bpy.types.Operator, ExportHelper):
+    """Exports a filtered subset of the SAME already-built, already-
+    verified objects OBJECT_OT_ExportLevelGLTF exports -- just Blueprint
+    (floor) + Walls + Stairs, deliberately excluding Doors, Torches,
+    Decoration, and Lights, so the result is suitable to assign as a
+    level's collision geometry in an engine: Doors are a walk-through
+    frame overlaid on an already-open gap (see _build_wall_mesh's
+    is_exposed, which never places a wall box between two walkable
+    cells), so leaving them out doesn't reopen anything -- it just avoids
+    the door posts themselves becoming a minor physical snag at every
+    doorway, matching the doorway's own "walk-through by design" intent.
+    Torches/Decoration are cosmetic and shouldn't block movement; Lights
+    obviously don't belong in a collision mesh.
+
+    Deliberately NOT a freshly-built simplified/merged mesh -- there's no
+    existing floor-region box-merging code in this file (a materially
+    harder 2D problem than _build_wall_mesh's own 1D per-line wall run-
+    merge), and re-exporting the already-verified visual meshes carries
+    zero new geometry-correctness risk for what is, for static level
+    architecture, already completely standard engine practice (Unity
+    MeshCollider / Godot ConcavePolygonShape3D / Unreal per-poly static
+    collision all commonly use the real level mesh directly)."""
+    bl_idname = "object.export_level_collision_gltf"
+    bl_label = "Export Collision Mesh (glTF/GLB)"
+    bl_description = (
+        "Export Floor + Walls + Stairs only (no Doors/Torches/Decoration/Lights) -- suitable to "
+        "assign as a level's collision geometry in a game engine"
+    )
+    bl_options = {'REGISTER'}
+
+    filename_ext = ".glb"
+    filter_glob: StringProperty(default="*.glb;*.gltf", options={'HIDDEN'})
+
+    def invoke(self, context, event):
+        # Suggest a distinct default filename from the main Export Level
+        # button -- without this, both buttons would default to
+        # suggesting the exact same name (ExportHelper's own default is
+        # just the current .blend's name + filename_ext), a real
+        # accidental-overwrite footgun since a user is likely to click
+        # both in the same session.
+        if not self.filepath:
+            blend_filepath = context.blend_data.filepath
+            stem = os.path.splitext(blend_filepath)[0] if blend_filepath else "untitled"
+            self.filepath = stem + "_collision" + self.filename_ext
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        base_names = (BLUEPRINT_OBJECT_NAME, WALLS_OBJECT_NAME, STAIRS_OBJECT_NAME)
+        targets = _gltf_export_targets(base_names, include_lights=False)
+
+        if not targets:
+            self.report(
+                {'ERROR'},
+                "Nothing to export -- no Blueprint/Walls/Stairs objects found under their normal "
+                "names. Generate a level first (Step 1)."
+            )
+            return {'CANCELLED'}
+
+        if not hasattr(bpy.ops.export_scene, "gltf"):
+            self.report(
+                {'ERROR'},
+                "glTF exporter isn't available -- enable Import-Export: glTF 2.0 in "
+                "Preferences > Add-ons."
+            )
+            return {'CANCELLED'}
+
+        filepath = _run_gltf_export(context, self.filepath, targets, include_lights=False)
+
+        self.report(
+            {'INFO'},
+            f"Exported {len(targets)} collision object(s) (Floor + Walls + Stairs only) to "
+            f"'{filepath}'."
         )
         return {'FINISHED'}
 
@@ -5883,6 +5976,16 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
         export_row.operator("object.export_level_gltf", text="Export Level (glTF/GLB)", icon='EXPORT')
         export_row.enabled = bpy.data.objects.get(BLUEPRINT_OBJECT_NAME) is not None
 
+        layout.separator()
+        layout.label(text="Collision Mesh -- Floor + Walls + Stairs only")
+        collision_row = layout.row(align=True)
+        collision_row.scale_y = 1.2
+        _color_swatch(collision_row, 'COLLECTION_COLOR_04')
+        collision_row.operator(
+            "object.export_level_collision_gltf", text="Export Collision Mesh", icon='PHYSICS',
+        )
+        collision_row.enabled = bpy.data.objects.get(BLUEPRINT_OBJECT_NAME) is not None
+
 
 # ==============================================================================
 # 5. REGISTRATION
@@ -5896,6 +5999,7 @@ classes = (
     OBJECT_OT_GenerateLevelDoors,
     OBJECT_OT_GenerateLevelProps,
     OBJECT_OT_ExportLevelGLTF,
+    OBJECT_OT_ExportLevelCollisionGLTF,
     OBJECT_OT_CopyLevelArchitectParams,
     WFC_FloorProfile,
     WFC_UL_FloorProfiles,

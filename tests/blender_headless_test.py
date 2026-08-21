@@ -1004,6 +1004,58 @@ for obj in imported_objects:
             bpy.data.lights.remove(data)
 scene.wfc_export_include_lights = True
 
+# Export Collision Mesh -- a filtered re-export (Floor + Walls + Stairs
+# only, no Doors/Torches/Decoration/Lights) of the SAME already-verified
+# objects the main export just checked above. The real thing worth
+# checking isn't just "did it export something" but that the EXCLUSION
+# actually took effect -- a collision mesh that accidentally still
+# carries Doors/Torches/Decoration would be the whole point of this
+# feature silently not working.
+collision_path = os.path.join(export_dir, "level_collision.glb")
+pre_export_object_names = {o.name for o in bpy.data.objects}
+result = bpy.ops.object.export_level_collision_gltf(filepath=collision_path)
+check("Export Collision: operator FINISHED", result == {'FINISHED'}, str(result))
+check(
+    "Export Collision: .glb file was actually written with real content",
+    os.path.isfile(collision_path) and os.path.getsize(collision_path) > 0,
+    f"exists={os.path.isfile(collision_path)}",
+)
+
+bpy.ops.import_scene.gltf(filepath=collision_path)
+imported_objects = [o for o in bpy.data.objects if o.name not in pre_export_object_names]
+imported_meshes = [o for o in imported_objects if o.type == 'MESH']
+imported_lights = [o for o in imported_objects if o.type == 'LIGHT']
+imported_vert_count = sum(len(o.data.vertices) for o in imported_meshes)
+check(
+    "Export Collision: round-trip contains real mesh geometry",
+    len(imported_meshes) > 0 and imported_vert_count > 0,
+    f"mesh_objects={len(imported_meshes)} verts={imported_vert_count}",
+)
+check(
+    "Export Collision: round-trip has no lights (never included in collision export)",
+    len(imported_lights) == 0, f"lights={len(imported_lights)}",
+)
+excluded_prefixes = (
+    addon.DOORS_OBJECT_NAME, addon.PROPS_TORCH_OBJECT_NAME, addon.PROPS_DECORATION_OBJECT_NAME,
+)
+leaked = [
+    o.name for o in imported_meshes
+    if any(o.name.startswith(p) for p in excluded_prefixes)
+]
+check(
+    "Export Collision: Doors/Torches/Decoration are actually excluded, not just 'some geometry exists'",
+    len(leaked) == 0, f"leaked={leaked}",
+)
+for obj in imported_objects:
+    data = obj.data
+    obj_type = obj.type
+    bpy.data.objects.remove(obj, do_unlink=True)
+    if data and data.users == 0:
+        if obj_type == 'MESH':
+            bpy.data.meshes.remove(data)
+        elif obj_type == 'LIGHT':
+            bpy.data.lights.remove(data)
+
 # ==============================================================================
 # Freeze for Texture Work -- renames the current generation out of the
 # fixed-name pattern every Step operator's own _remove_objects_by_prefix
@@ -1049,6 +1101,20 @@ except RuntimeError as exc:
     )
 check(
     "Export: refuses to run with nothing generated under the normal names",
+    result == {'CANCELLED'}, str(result),
+)
+try:
+    result = bpy.ops.object.export_level_collision_gltf(
+        filepath=os.path.join(export_dir, "unused_collision.glb")
+    )
+except RuntimeError as exc:
+    result = {'CANCELLED'}
+    check(
+        "Export Collision: refusal error message explains why (nothing to export)",
+        "Nothing to export" in str(exc), str(exc),
+    )
+check(
+    "Export Collision: refuses to run with nothing generated under the normal names",
     result == {'CANCELLED'}, str(result),
 )
 
