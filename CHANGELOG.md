@@ -3,6 +3,13 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.24.0
+
+- **Round room doors now follow the curved wall too.** A doorway on a Round room's rim still
+  placed a straight, axis-aligned frame -- now it's oriented along the wall's own curve at that
+  exact spot, matching the real n-gon wall ring instead of standing at a mismatched angle against
+  it. Works with Flat, Round, and Pointed Door Style. Rect rooms are unaffected.
+
 ## 0.23.0
 
 - **Round rooms now have a real shape.** Every Round room's floor is a real merged n-gon disc

@@ -14,6 +14,8 @@
 # a script/CI context, not just interactively.
 
 import importlib.util
+import json
+import math
 import os
 import sys
 import tempfile
@@ -1068,7 +1070,8 @@ pre_freeze_names = set()
 for base_name in (
     addon.BLUEPRINT_OBJECT_NAME, addon.ROUND_FLOOR_OBJECT_NAME, addon.WALLS_OBJECT_NAME,
     addon.WALLS_ROUND_OBJECT_NAME, addon.STAIRS_OBJECT_NAME, addon.DOORS_OBJECT_NAME,
-    addon.PROPS_TORCH_OBJECT_NAME, addon.PROPS_DECORATION_OBJECT_NAME, addon.PROPS_LIGHT_NAME_PREFIX,
+    addon.DOORS_ROUND_OBJECT_NAME, addon.PROPS_TORCH_OBJECT_NAME, addon.PROPS_DECORATION_OBJECT_NAME,
+    addon.PROPS_LIGHT_NAME_PREFIX,
 ):
     pre_freeze_names.update(o.name for o in addon._objects_matching_prefix(base_name))
 check(
@@ -1756,19 +1759,65 @@ if round_walls_obj is not None:
     )
 
 result = bpy.ops.object.generate_level_doors()
-check("Round rooms: Doors FINISHED or CANCELLED", result in ({'FINISHED'}, {'CANCELLED'}), str(result))
+check("Round rooms: Doors FINISHED", result == {'FINISHED'}, str(result))
+round_doors_obj = bpy.data.objects.get(addon.DOORS_ROUND_OBJECT_NAME)
+check("Round rooms: RoundDoors object exists", round_doors_obj is not None)
+if round_doors_obj is not None:
+    check("Round rooms: RoundDoors has geometry", len(round_doors_obj.data.polygons) > 0)
+    # Every RoundDoors vertex should sit close to SOME Round room's own
+    # ellipse rim (normalized radial distance near 1.0) -- confirms the
+    # frame is actually oriented along the curved wall, not placed
+    # generically. Tolerance is loose (0.35 in normalized units) since
+    # posts/lintels have real thickness, offsetting vertices in/out from
+    # the true rim -- this is a sanity check, not a precise metric one.
+    room_meta_check = json.loads(bpy.data.objects[addon.BLUEPRINT_OBJECT_NAME].get("gla_room_meta", "[]"))
+    round_rooms_check = [r for r in room_meta_check if r['shape'] == 'ROUND']
+    off_rim = 0
+    for v in round_doors_obj.data.vertices:
+        wx, wy = v.co.x, v.co.y
+        deviations = []
+        for r in round_rooms_check:
+            cx = (r['x'] + r['w'] / 2.0) * scene.wfc_tile_size
+            cy = (r['y'] + r['l'] / 2.0) * scene.wfc_tile_size
+            rx = (r['w'] / 2.0) * scene.wfc_tile_size
+            ry = (r['l'] / 2.0) * scene.wfc_tile_size
+            deviations.append(abs(math.hypot((wx - cx) / rx, (wy - cy) / ry) - 1.0))
+        if not deviations or min(deviations) > 0.35:
+            off_rim += 1
+    check(
+        "Round rooms: RoundDoors vertices sit near a Round room's own rim (angled, not generic)",
+        off_rim == 0, f"off_rim_count={off_rim} of {len(round_doors_obj.data.vertices)}",
+    )
+
+# Arched door styles on Round rooms specifically exercise the oriented
+# arch-silhouette path (add_arch_silhouette_oriented) -- the FLAT case
+# above never touches it.
+for style in ('ROUND', 'POINTED'):
+    scene.wfc_door_style = style
+    result = bpy.ops.object.generate_level_doors()
+    check(f"Round rooms: Doors FINISHED with Door Style={style}", result == {'FINISHED'}, str(result))
+    round_doors_obj = bpy.data.objects.get(addon.DOORS_ROUND_OBJECT_NAME)
+    check(
+        f"Round rooms: RoundDoors has geometry with Door Style={style}",
+        round_doors_obj is not None and len(round_doors_obj.data.polygons) > 0,
+    )
+scene.wfc_door_style = 'FLAT'
+result = bpy.ops.object.generate_level_doors()
+check("Round rooms: Doors regenerate back to FLAT FINISHED", result == {'FINISHED'}, str(result))
+
 result = bpy.ops.object.generate_level_props()
 check("Round rooms: Props FINISHED or CANCELLED", result in ({'FINISHED'}, {'CANCELLED'}), str(result))
 
 export_targets = addon._gltf_export_targets(
     (addon.BLUEPRINT_OBJECT_NAME, addon.ROUND_FLOOR_OBJECT_NAME, addon.WALLS_OBJECT_NAME,
-     addon.WALLS_ROUND_OBJECT_NAME),
+     addon.WALLS_ROUND_OBJECT_NAME, addon.DOORS_OBJECT_NAME, addon.DOORS_ROUND_OBJECT_NAME),
     include_lights=False,
 )
 check(
-    "Round rooms: export targets include both RoundFloors and RoundWalls",
+    "Round rooms: export targets include RoundFloors, RoundWalls, and RoundDoors",
     any(o.name == addon.ROUND_FLOOR_OBJECT_NAME for o in export_targets)
-    and any(o.name.startswith(addon.WALLS_ROUND_OBJECT_NAME) for o in export_targets),
+    and any(o.name.startswith(addon.WALLS_ROUND_OBJECT_NAME) for o in export_targets)
+    and any(o.name.startswith(addon.DOORS_ROUND_OBJECT_NAME) for o in export_targets),
     str([o.name for o in export_targets]),
 )
 

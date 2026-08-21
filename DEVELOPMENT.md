@@ -4,7 +4,7 @@ Internal dev-facing doc: what's built, what's known-broken, what's next. Not for
 (see `dist/README.md` for that). Source of truth for the addon's actual behavior is always
 `levelArchitect_v2.py` — this file can drift out of date; the code can't.
 
-Current version: **0.23.0** (see `bl_info` in the source file).
+Current version: **0.24.0** (see `bl_info` in the source file).
 
 §2 (Development tree) was condensed 2026-08-21 — dropped the blow-by-blow investigation
 narrative and per-run stress-test numbers from older, fully-resolved entries, kept every
@@ -711,11 +711,47 @@ GN complexity there specifically.
       scenarios — Round at 4 and 24 `wfc_room_shape_sides` (visibly diamond vs. smooth circle,
       floor and wall ring matching exactly) and one per Preset.
 
-      Known, deliberately-not-fixed limitation: door frames stay straight/axis-aligned even
-      against a now-curved wall (door placement logic detects boundary crossings via `room_id`
-      changes on grid-aligned neighbors, independent of wall shape, so doors still place at the
-      right locations — just with a straight frame at a curved opening). A curved door frame is a
-      distinct, separately-scoped feature.
+      Known limitation (fixed next, see below): door frames stay straight/axis-aligned even
+      against a now-curved wall.
+
+- [x] **Curved door frames for Round rooms.** Closes the known limitation the Round-shape pass
+      above left open, by request right after it shipped.
+
+      `_build_door_mesh`'s existing doorway detection (a `room_id` boundary crossing between two
+      walkable cells) is independent of wall shape, so it already places doors at the CORRECT
+      locations against a curved wall — only the frame's own geometry was wrong (always a straight
+      axis-aligned box). New `_build_round_room_doors_mesh` recomputes each Round room's open rim
+      edges the exact same way `_build_round_room_walls_mesh` already does (so a door always lands
+      exactly where the wall ring's own gap is, by construction), then builds a frame ORIENTED
+      along that edge's own tangent direction — new `add_oriented_box` generalizes
+      `_build_door_mesh`'s own `add_box` from an axis-aligned footprint to an arbitrarily-rotated
+      one (same winding, just a rotated footprint quad), reused for both posts and the flat
+      lintel. The stepped arch silhouette (Round/Pointed Door Style) needed the same treatment:
+      new `add_arch_silhouette_oriented` expresses the existing profile-stepping technique in the
+      doorway's own local (tangent, normal) basis instead of a hardcoded world X/Y axis --
+      `add_oriented_box` already derives the perpendicular/normal from whichever two tangent-
+      direction points it's given, so no separate normal-vector plumbing was needed.
+
+      `_build_door_mesh` gained one new optional `skip_room_ids` param (mirrors `_build_wall_mesh`'s
+      own `skip_cells`) so a boundary touching a Round room on either side is skipped by the
+      straight-axis pass entirely — otherwise a Round room's real doorway would get BOTH a straight
+      frame (old pass, wrong shape) and an angled one (new pass) stacked on top of each other.
+      Entrance/Exit Gates are untouched — they're fixed, always-arched, map-corner landmarks
+      unrelated to per-room doorway shape, so they stay on `_build_door_mesh`'s existing pass
+      regardless of which room type they're near.
+
+      Verified: offline (`stub_bpy`) — 400 more seeded trials (reusing the same 8-Round-room setup
+      the floor/wall-ring trials already use) confirming the builder never crashes and every
+      resulting vertex sits close to SOME Round room's own ellipse rim (a normalized radial-
+      distance check, loose enough to allow for post/lintel thickness) — the same check, run again
+      with Door Style Round/Pointed, confirms the oriented arch path specifically. Real Blender
+      5.2.0 LTS: the full pre-existing suite still passes unmodified; new checks add the same
+      rim-distance verification against real evaluated geometry, plus Round/Pointed Door Style
+      exercised specifically against Round rooms (the arch-silhouette path the FLAT-only check
+      above doesn't reach), plus RoundDoors added to the export-target check. Visual: a close-up
+      render (not one of the regular `generate_test_blends.py` scenarios, whose top-down framing is
+      too zoomed-out to show doorway-level detail) confirmed the frame visibly follows the wall's
+      curve right at the opening, not standing at a mismatched straight angle against it.
 
 ---
 
@@ -761,12 +797,8 @@ GN complexity there specifically.
       than 4.2 LTS (pre-4.0's `node_group.inputs.new()` node-tree API is meaningfully different, so
       3.x is a real, not just unverified, incompatibility — not worth chasing for an early testing
       release).
-- [ ] **A Round room's door frame stays straight/axis-aligned against its now-curved wall.**
-      `_build_door_mesh` detects doorway boundary crossings via `room_id` changes on grid-aligned
-      neighbors, independent of wall shape, so doors still place at the correct locations — just
-      with a straight frame at a curved opening, a real visible mismatch. Would need a dedicated
-      arc-aware frame builder for Round rooms specifically, deferred rather than folded into the
-      Round-shape pass (see §2's entry) that added it.
+- [x] **A Round room's door frame used to stay straight/axis-aligned against its curved wall** —
+      see §2, now fixed.
 
 ---
 

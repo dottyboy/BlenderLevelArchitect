@@ -32,7 +32,7 @@ from bpy_extras.io_utils import ExportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 23, 0),
+    "version": (0, 24, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -62,6 +62,7 @@ WALLS_OBJECT_NAME = "Procedural_Level_Walls"
 WALLS_ROUND_OBJECT_NAME = "Procedural_Level_RoundWalls"
 STAIRS_OBJECT_NAME = "Procedural_Level_Stairs"
 DOORS_OBJECT_NAME = "Procedural_Level_Doors"
+DOORS_ROUND_OBJECT_NAME = "Procedural_Level_RoundDoors"
 PROPS_TORCH_OBJECT_NAME = "Procedural_Level_Torches"
 PROPS_DECORATION_OBJECT_NAME = "Procedural_Level_Decoration"
 PROPS_LIGHT_NAME_PREFIX = "Procedural_Level_Light"
@@ -3568,8 +3569,8 @@ class OBJECT_OT_FreezeForTextureWork(bpy.types.Operator):
 
         base_names = (
             BLUEPRINT_OBJECT_NAME, ROUND_FLOOR_OBJECT_NAME, WALLS_OBJECT_NAME, WALLS_ROUND_OBJECT_NAME,
-            STAIRS_OBJECT_NAME, DOORS_OBJECT_NAME, PROPS_TORCH_OBJECT_NAME, PROPS_DECORATION_OBJECT_NAME,
-            PROPS_LIGHT_NAME_PREFIX,
+            STAIRS_OBJECT_NAME, DOORS_OBJECT_NAME, DOORS_ROUND_OBJECT_NAME, PROPS_TORCH_OBJECT_NAME,
+            PROPS_DECORATION_OBJECT_NAME, PROPS_LIGHT_NAME_PREFIX,
         )
         targets = []
         for base_name in base_names:
@@ -3691,7 +3692,8 @@ class OBJECT_OT_ExportLevelGLTF(bpy.types.Operator, ExportHelper):
         scene = context.scene
         base_names = (
             BLUEPRINT_OBJECT_NAME, ROUND_FLOOR_OBJECT_NAME, WALLS_OBJECT_NAME, WALLS_ROUND_OBJECT_NAME,
-            STAIRS_OBJECT_NAME, DOORS_OBJECT_NAME, PROPS_TORCH_OBJECT_NAME, PROPS_DECORATION_OBJECT_NAME,
+            STAIRS_OBJECT_NAME, DOORS_OBJECT_NAME, DOORS_ROUND_OBJECT_NAME, PROPS_TORCH_OBJECT_NAME,
+            PROPS_DECORATION_OBJECT_NAME,
         )
         targets = _gltf_export_targets(base_names, scene.wfc_export_include_lights)
 
@@ -4392,7 +4394,7 @@ def _pointed_arch_profile(half_span, rise, segments):
 def _build_door_mesh(
     walkable_cells, room_ids, tile_size, level_height, door_height, frame_thickness, name,
     merge_distance=2, z_offsets=None, stair_cells=None, uv_tile_size=1.0,
-    door_style='FLAT', arch_height=0.6, entrance_cells=None, exit_cells=None,
+    door_style='FLAT', arch_height=0.6, entrance_cells=None, exit_cells=None, skip_room_ids=None,
 ):
     """A walk-through frame (two side posts + a top, deliberately no panel
     filling the gap) at every same-Z boundary between two walkable cells
@@ -4459,7 +4461,14 @@ def _build_door_mesh(
 
     Three material slots throughout, always: 0 = ordinary door, 1 =
     Entrance gate, 2 = Exit gate (matching the order the caller is
-    expected to append door/entrance/exit materials in)."""
+    expected to append door/entrance/exit materials in).
+
+    skip_room_ids (optional set of room_index) -- a boundary touching a
+    room in this set on EITHER side is skipped entirely here, even though
+    it's a real doorway. Used for Round rooms, which get their own
+    angled frame instead (see _build_round_room_doors_mesh) that actually
+    follows the curved wall instead of standing at a mismatched straight
+    angle against it."""
     walkable = set(walkable_cells)
     verts = []
     faces = []
@@ -4469,6 +4478,7 @@ def _build_door_mesh(
     stair_cells = stair_cells or set()
     entrance_cells = entrance_cells or set()
     exit_cells = exit_cells or set()
+    skip_room_ids = skip_room_ids or set()
 
     def add_box(cx0, cy0, cx1, cy1, z0, z1, floor_touching=True, mat_idx=0):
         # See the matching comment in _build_wall_mesh's add_box -- this
@@ -4571,11 +4581,19 @@ def _build_door_mesh(
         rid = room_ids.get((x, y, z), -1)
 
         east = (x + 1, y, z)
-        if east in walkable and east not in stair_cells and room_ids.get(east, -1) != rid:
+        east_rid = room_ids.get(east, -1)
+        if (
+            east in walkable and east not in stair_cells and east_rid != rid
+            and rid not in skip_room_ids and east_rid not in skip_room_ids
+        ):
             groups.setdefault(('X', z), []).append((y, x))
 
         north = (x, y + 1, z)
-        if north in walkable and north not in stair_cells and room_ids.get(north, -1) != rid:
+        north_rid = room_ids.get(north, -1)
+        if (
+            north in walkable and north not in stair_cells and north_rid != rid
+            and rid not in skip_room_ids and north_rid not in skip_room_ids
+        ):
             groups.setdefault(('Y', z), []).append((x, y))
 
     # Pass 2: cluster every (line, b) pair within merge_distance tiles (on
@@ -4650,6 +4668,148 @@ def _build_door_mesh(
         add_gate(cell, 1)
     for cell in exit_cells:
         add_gate(cell, 2)
+
+    mesh = bpy.data.meshes.new(name + "_Mesh")
+    mesh.from_pydata(verts, [], faces)
+    mesh.update()
+    for poly, mat_idx in zip(mesh.polygons, material_indices):
+        poly.material_index = mat_idx
+    _add_planar_uv_map(mesh, uv_tile_size)
+    return mesh
+
+
+def _build_round_room_doors_mesh(
+    room_meta, room_id_grid, walkable_cells, tile_size, level_height, door_height,
+    frame_thickness, room_shape_sides, z_offsets, door_style, arch_height, name,
+    uv_tile_size=1.0,
+):
+    """A door frame for every Round room's real doorway opening, oriented
+    along that opening's own actual rim edge instead of forced to a
+    straight X/Y axis -- so the frame actually matches the curved wall
+    ring (_build_round_room_walls_mesh) instead of standing at a
+    mismatched straight angle against it. Rect rooms keep their existing
+    straight, axis-aligned doors from _build_door_mesh -- unchanged,
+    nothing to fix there. Only material slot 0 (ordinary door) is used
+    here; Entrance/Exit gates are always axis-aligned map-corner
+    landmarks (see _build_door_mesh's own docstring), untouched by this.
+
+    Recomputes each Round room's open rim edges the same way
+    _build_round_room_walls_mesh does (a room cell bordering a walkable
+    cell belonging to a DIFFERENT room is a real doorway; its angle
+    around the room's own ellipse picks which polygon edge it's on) --
+    so a door here always lands exactly where the wall ring's own gap
+    is, by construction, not by coincidence."""
+    walkable = set(walkable_cells)
+    half_frame = frame_thickness / 2.0
+    verts, faces, material_indices = [], [], []
+
+    def add_oriented_box(x0, y0, x1, y1, half_thickness, z0, z1, floor_touching, mat_idx=0):
+        dx, dy = x1 - x0, y1 - y0
+        length = math.hypot(dx, dy)
+        if length < 1e-9:
+            return
+        nx, ny = -dy / length * half_thickness, dx / length * half_thickness
+        corners = ((x0 - nx, y0 - ny), (x1 - nx, y1 - ny), (x1 + nx, y1 + ny), (x0 + nx, y0 + ny))
+        i = len(verts)
+        verts.extend((cx, cy, z0) for cx, cy in corners)
+        verts.extend((cx, cy, z1) for cx, cy in corners)
+        added = 5 if floor_touching else 6
+        if not floor_touching:
+            faces.append((i + 3, i + 2, i + 1, i + 0))  # bottom
+        faces.append((i + 4, i + 5, i + 6, i + 7))  # top
+        faces.append((i + 5, i + 4, i + 0, i + 1))
+        faces.append((i + 6, i + 5, i + 1, i + 2))
+        faces.append((i + 7, i + 6, i + 2, i + 3))
+        faces.append((i + 4, i + 7, i + 3, i + 0))
+        material_indices.extend([mat_idx] * added)
+
+    def add_arch_silhouette_oriented(cx, cy, tx, ty, half_span, half_frame_a, z_spring, rise, style):
+        """Same stepped-arch-silhouette technique _build_door_mesh's own
+        add_arch_silhouette already uses (DOOR_ARCH_SEGMENTS boxes along
+        the profile), expressed in the doorway's own local (tangent,
+        normal) basis instead of a hardcoded world X/Y axis --
+        add_oriented_box already derives the perpendicular (normal) from
+        whatever two tangent-direction points it's given, so no separate
+        normal vector needs computing here."""
+        profile_fn = _round_arch_profile if style == 'ROUND' else _pointed_arch_profile
+        profile = profile_fn(half_span, rise, DOOR_ARCH_SEGMENTS)
+        for i in range(DOOR_ARCH_SEGMENTS):
+            b0, h0 = profile[i]
+            b1, h1 = profile[i + 1]
+            seg_top = z_spring + max(h0, h1)
+            if seg_top <= z_spring:
+                continue
+            x0, y0 = cx + tx * b0, cy + ty * b0
+            x1, y1 = cx + tx * b1, cy + ty * b1
+            add_oriented_box(x0, y0, x1, y1, half_frame_a, z_spring, seg_top, floor_touching=False)
+
+    for room_id, room in enumerate(room_meta):
+        if room['shape'] != 'ROUND':
+            continue
+        x, y, rw, rl, z = room['x'], room['y'], room['w'], room['l'], room['z']
+        cx, cy = (x + rw / 2.0) * tile_size, (y + rl / 2.0) * tile_size
+        rx, ry = (rw / 2.0) * tile_size, (rl / 2.0) * tile_size
+
+        room_cells_here = [c for c, rid in room_id_grid.items() if rid == room_id and c[2] == z]
+        if not room_cells_here:
+            continue
+        centroid_x = sum(c[0] for c in room_cells_here) / len(room_cells_here)
+        centroid_y = sum(c[1] for c in room_cells_here) / len(room_cells_here)
+        nearest_cell = min(
+            room_cells_here, key=lambda c: (c[0] - centroid_x) ** 2 + (c[1] - centroid_y) ** 2
+        )
+
+        open_edges = set()
+        for (cellx, celly, cellz) in room_cells_here:
+            exposed = False
+            for dx, dy in HORIZONTAL_NEIGHBORS:
+                neighbor = (cellx + dx, celly + dy, cellz)
+                if neighbor in walkable and room_id_grid.get(neighbor) != room_id:
+                    exposed = True
+                    break
+            if not exposed:
+                continue
+            px = (cellx + 0.5) * tile_size
+            py = (celly + 0.5) * tile_size
+            angle = math.atan2((py - cy) / ry, (px - cx) / rx) % (2.0 * math.pi)
+            open_edges.add(int(angle / (2.0 * math.pi / room_shape_sides)) % room_shape_sides)
+
+        z0 = z * level_height + z_offsets.get(nearest_cell, 0.0)
+        z1 = z0 + door_height
+        positions = [
+            (
+                cx + rx * math.cos(2.0 * math.pi * s / room_shape_sides),
+                cy + ry * math.sin(2.0 * math.pi * s / room_shape_sides),
+            )
+            for s in range(room_shape_sides)
+        ]
+        for s in open_edges:
+            x0e, y0e = positions[s]
+            x1e, y1e = positions[(s + 1) % room_shape_sides]
+            length = math.hypot(x1e - x0e, y1e - y0e)
+            if length < 1e-6 or length <= 2 * frame_thickness:
+                continue  # opening too narrow for two inset posts to fit without overlapping
+            tx, ty = (x1e - x0e) / length, (y1e - y0e) / length
+            ecx, ecy = (x0e + x1e) / 2.0, (y0e + y1e) / 2.0
+            half_span = length / 2.0
+
+            near_a, near_b = -half_span, -half_span + frame_thickness
+            far_b, far_a = half_span, half_span - frame_thickness
+            add_oriented_box(
+                ecx + tx * near_a, ecy + ty * near_a, ecx + tx * near_b, ecy + ty * near_b,
+                half_frame, z0, z1, floor_touching=True,
+            )
+            add_oriented_box(
+                ecx + tx * far_a, ecy + ty * far_a, ecx + tx * far_b, ecy + ty * far_b,
+                half_frame, z0, z1, floor_touching=True,
+            )
+            if door_style == 'FLAT':
+                add_oriented_box(
+                    ecx + tx * near_a, ecy + ty * near_a, ecx + tx * far_b, ecy + ty * far_b,
+                    half_frame, z1, z1 + frame_thickness, floor_touching=False,
+                )
+            else:
+                add_arch_silhouette_oriented(ecx, ecy, tx, ty, half_span, half_frame, z1, arch_height, door_style)
 
     mesh = bpy.data.meshes.new(name + "_Mesh")
     mesh.from_pydata(verts, [], faces)
@@ -5564,11 +5724,37 @@ class OBJECT_OT_GenerateLevelDoors(bpy.types.Operator):
             self.report({'WARNING'}, "No walkable tiles found in the blueprint.")
             return {'CANCELLED'}
 
+        # Round rooms get a real angled frame (see
+        # _build_round_room_doors_mesh) instead of the straight-axis frame
+        # _build_door_mesh would otherwise still build for them -- room
+        # shape/bounding-box metadata was baked onto the Blueprint at
+        # Step 1 time (see OBJECT_OT_GenerateGameBlueprint), since this
+        # step deliberately never re-runs the solver.
+        room_meta = json.loads(blueprint_obj.get("gla_room_meta", "[]"))
+        round_room_ids = {i for i, r in enumerate(room_meta) if r['shape'] == 'ROUND'}
+
         _remove_objects_by_prefix(DOORS_OBJECT_NAME)
+        _remove_objects_by_prefix(DOORS_ROUND_OBJECT_NAME)
 
         # Order matters -- _build_door_mesh bakes material_index 0/1/2 for
         # ordinary/Entrance/Exit respectively, matching this exact order.
         door_materials = [get_or_create_door_material(), get_or_create_entrance_material(), get_or_create_exit_material()]
+
+        def _add_round_doors(name, meta_for_floor):
+            round_mesh_data = _build_round_room_doors_mesh(
+                meta_for_floor, room_ids, walkable_cells, tile_size, level_height,
+                scene.wfc_door_height, scene.wfc_door_frame_thickness, scene.wfc_room_shape_sides,
+                z_offsets, scene.wfc_door_style, scene.wfc_door_arch_height, name,
+                uv_tile_size=scene.wfc_uv_tile_size,
+            )
+            if not round_mesh_data.vertices:
+                bpy.data.meshes.remove(round_mesh_data)
+                return None
+            round_obj = bpy.data.objects.new(name, round_mesh_data)
+            context.collection.objects.link(round_obj)
+            round_mesh_data.materials.append(door_materials[0])
+            _add_viewport_color_attribute(round_mesh_data)
+            return round_obj
 
         sub_levels = max(1, scene.wfc_sub_levels_per_floor)
         per_floor = scene.wfc_door_grouping == 'PER_FLOOR'
@@ -5588,17 +5774,22 @@ class OBJECT_OT_GenerateLevelDoors(bpy.types.Operator):
                     merge_distance=scene.wfc_door_merge_distance, z_offsets=z_offsets,
                     stair_cells=stair_cells, uv_tile_size=scene.wfc_uv_tile_size,
                     door_style=scene.wfc_door_style, arch_height=scene.wfc_door_arch_height,
-                    entrance_cells=entrance_cells, exit_cells=exit_cells,
+                    entrance_cells=entrance_cells, exit_cells=exit_cells, skip_room_ids=round_room_ids,
                 )
                 if not door_mesh_data.vertices:
                     bpy.data.meshes.remove(door_mesh_data)
-                    continue
-                obj = bpy.data.objects.new(name, door_mesh_data)
-                context.collection.objects.link(obj)
-                for mat in door_materials:
-                    door_mesh_data.materials.append(mat)
-                _add_viewport_color_attribute(door_mesh_data)
-                created.append(obj)
+                else:
+                    obj = bpy.data.objects.new(name, door_mesh_data)
+                    context.collection.objects.link(obj)
+                    for mat in door_materials:
+                        door_mesh_data.materials.append(mat)
+                    _add_viewport_color_attribute(door_mesh_data)
+                    created.append(obj)
+
+                meta_for_floor = [r for r in room_meta if r['z'] // sub_levels == floor_idx]
+                round_obj = _add_round_doors(f"{DOORS_ROUND_OBJECT_NAME}_Floor{floor_idx}", meta_for_floor)
+                if round_obj is not None:
+                    created.append(round_obj)
         else:
             door_mesh_data = _build_door_mesh(
                 walkable_cells, room_ids, tile_size, level_height,
@@ -5606,7 +5797,7 @@ class OBJECT_OT_GenerateLevelDoors(bpy.types.Operator):
                 merge_distance=scene.wfc_door_merge_distance, z_offsets=z_offsets,
                 stair_cells=stair_cells, uv_tile_size=scene.wfc_uv_tile_size,
                 door_style=scene.wfc_door_style, arch_height=scene.wfc_door_arch_height,
-                entrance_cells=entrance_cells, exit_cells=exit_cells,
+                entrance_cells=entrance_cells, exit_cells=exit_cells, skip_room_ids=round_room_ids,
             )
             if door_mesh_data.vertices:
                 obj = bpy.data.objects.new(DOORS_OBJECT_NAME, door_mesh_data)
@@ -5617,6 +5808,10 @@ class OBJECT_OT_GenerateLevelDoors(bpy.types.Operator):
                 created.append(obj)
             else:
                 bpy.data.meshes.remove(door_mesh_data)
+
+            round_obj = _add_round_doors(DOORS_ROUND_OBJECT_NAME, room_meta)
+            if round_obj is not None:
+                created.append(round_obj)
 
         if not created:
             self.report({'WARNING'}, "No doorways found -- every walkable boundary shares a room_id.")
