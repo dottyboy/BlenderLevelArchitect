@@ -63,6 +63,10 @@ WALLS_ROUND_OBJECT_NAME = "Procedural_Level_RoundWalls"
 STAIRS_OBJECT_NAME = "Procedural_Level_Stairs"
 DOORS_OBJECT_NAME = "Procedural_Level_Doors"
 DOORS_ROUND_OBJECT_NAME = "Procedural_Level_RoundDoors"
+# Panels are named f"{DOORS_OBJECT_NAME}_Panel_{i:03d}" (see
+# _build_door_panels), which _remove_objects_by_prefix(DOORS_OBJECT_NAME)
+# already cleans up on regeneration -- it matches base_name + "_...".
+DOOR_PANELS_COLLECTION_NAME = "Procedural Level Door Panels"
 PROPS_TORCH_OBJECT_NAME = "Procedural_Level_Torches"
 PROPS_DECORATION_OBJECT_NAME = "Procedural_Level_Decoration"
 PROPS_LIGHT_NAME_PREFIX = "Procedural_Level_Light"
@@ -2095,10 +2099,70 @@ def create_geometry_nodes_modifier(
     ceiling_realize_node.location = (620, -560)
     links.new(ceiling_instance_node.outputs['Instances'], ceiling_realize_node.inputs['Geometry'])
 
+    # Isometric Mode: strip the top slice of the CEILING (only) so a
+    # top-down camera can see into the rooms below, on every story at once
+    # (modulo against level height, not a single global Z threshold).
+    # Deliberately scoped to ceiling alone, applied BEFORE the floor+
+    # ceiling join below -- walls used to live in this same graph and get
+    # culled here too (hence "top slice of every level's walls" in this
+    # step's original design), but they were split out into their own
+    # separately-baked object (_build_wall_mesh) at some point and this
+    # cull was never re-scoped to match. Left applying to the WHOLE
+    # post-join geometry, it also culled FLOOR -- invisible for an
+    # ordinary flat floor tile sitting at the very bottom of its band, but
+    # a room shifted down by continuous elevation (Elevation Chance/Split
+    # Level Chance) can land close enough to a sub-level boundary that a
+    # small negative offset wraps the modulo around to just under the TOP
+    # of the previous band, landing inside the cull zone -- confirmed
+    # directly: an elevated room's entire floor (all 30 of its points)
+    # silently deleted this way, visible as both "missing floor tiles"
+    # under an elevated area and a round room's floor disc reading as
+    # floating on nothing once its own supporting blocky floor vanished
+    # underneath it. Floor should never be culled anyway -- the whole
+    # point of Isometric Mode is seeing INTO the room, not through the
+    # thing you're trying to look at.
+    ceiling_band = level_height * 0.95  # local Z within a level above which ceiling geometry is culled
+
+    ceiling_pos_node = nodes.new(type="GeometryNodeInputPosition")
+    ceiling_pos_node.location = (620, -700)
+    ceiling_sep_xyz = nodes.new(type="ShaderNodeSeparateXYZ")
+    ceiling_sep_xyz.location = (620, -780)
+    links.new(ceiling_pos_node.outputs['Position'], ceiling_sep_xyz.inputs['Vector'])
+
+    ceiling_mod_z = nodes.new(type="ShaderNodeMath")
+    _set_prop(ceiling_mod_z, 'operation', 'MODULO')
+    ceiling_mod_z.location = (620, -860)
+    links.new(ceiling_sep_xyz.outputs['Z'], ceiling_mod_z.inputs[0])
+    ceiling_mod_z.inputs[1].default_value = level_height
+
+    ceiling_compare_band = nodes.new(type="FunctionNodeCompare")
+    ceiling_compare_band.data_type = 'FLOAT'
+    ceiling_compare_band.operation = 'GREATER_THAN'
+    ceiling_compare_band.location = (780, -860)
+    links.new(ceiling_mod_z.outputs['Value'], ceiling_compare_band.inputs['A'])
+    _set_input(ceiling_compare_band, 'B', ceiling_band)
+
+    ceiling_delete_geom = nodes.new(type="GeometryNodeDeleteGeometry")
+    ceiling_delete_geom.location = (780, -700)
+    _set_prop(ceiling_delete_geom, 'domain', 'FACE')
+    _set_prop(ceiling_delete_geom, 'mode', 'ALL')
+    links.new(ceiling_realize_node.outputs['Geometry'], ceiling_delete_geom.inputs['Geometry'])
+    links.new(ceiling_compare_band.outputs['Result'], ceiling_delete_geom.inputs['Selection'])
+
+    # Live toggle: pick full ceiling or the top-slice-culled variant --
+    # floor+markers (realize_node, below) never pass through this switch
+    # at all, so Isometric Mode can no longer touch floor geometry.
+    iso_switch = nodes.new(type="GeometryNodeSwitch")
+    iso_switch.input_type = 'GEOMETRY'
+    iso_switch.location = (940, -560)
+    links.new(input_node.outputs['Isometric Mode'], iso_switch.inputs[0])
+    links.new(ceiling_realize_node.outputs['Geometry'], iso_switch.inputs[1])  # False -> untouched
+    links.new(ceiling_delete_geom.outputs['Geometry'], iso_switch.inputs[2])   # True  -> culled
+
     join_geo = nodes.new(type="GeometryNodeJoinGeometry")
-    join_geo.location = (700, -280)
+    join_geo.location = (1100, -280)
     links.new(realize_node.outputs['Geometry'], join_geo.inputs['Geometry'])
-    links.new(ceiling_realize_node.outputs['Geometry'], join_geo.inputs['Geometry'])
+    links.new(iso_switch.outputs[0], join_geo.inputs['Geometry'])
 
     # Snapshot room_id/logical_floor/level_z to FACE domain BEFORE the merge
     # below welds boundary vertices together. These are still POINT-domain
@@ -2167,45 +2231,6 @@ def create_geometry_nodes_modifier(
     merge_node.location = (1040, 0)
     links.new(pre_merge_geo, merge_node.inputs['Geometry'])
     links.new(input_node.outputs['Merge Distance'], merge_node.inputs['Distance'])
-
-    # 5. Isometric Mode: strip the top slice of every level's walls so a
-    #    top-down camera can see into the rooms below, on every story at once
-    #    (modulo against level height, not a single global Z threshold).
-    ceiling_band = level_height * 0.95  # local Z within a level above which geometry is culled
-
-    pos_node = nodes.new(type="GeometryNodeInputPosition")
-    pos_node.location = (780, -220)
-    sep_xyz = nodes.new(type="ShaderNodeSeparateXYZ")
-    sep_xyz.location = (960, -220)
-    links.new(pos_node.outputs['Position'], sep_xyz.inputs['Vector'])
-
-    mod_z = nodes.new(type="ShaderNodeMath")
-    _set_prop(mod_z, 'operation', 'MODULO')
-    mod_z.location = (1120, -220)
-    links.new(sep_xyz.outputs['Z'], mod_z.inputs[0])
-    mod_z.inputs[1].default_value = level_height
-
-    compare_band = nodes.new(type="FunctionNodeCompare")
-    compare_band.data_type = 'FLOAT'
-    compare_band.operation = 'GREATER_THAN'
-    compare_band.location = (1280, -220)
-    links.new(mod_z.outputs['Value'], compare_band.inputs['A'])
-    _set_input(compare_band, 'B', ceiling_band)
-
-    delete_geom = nodes.new(type="GeometryNodeDeleteGeometry")
-    delete_geom.location = (1280, -60)
-    _set_prop(delete_geom, 'domain', 'FACE')
-    _set_prop(delete_geom, 'mode', 'ALL')
-    links.new(merge_node.outputs['Geometry'], delete_geom.inputs['Geometry'])
-    links.new(compare_band.outputs['Result'], delete_geom.inputs['Selection'])
-
-    # Live toggle: pick full geometry or the ceiling-culled variant.
-    iso_switch = nodes.new(type="GeometryNodeSwitch")
-    iso_switch.input_type = 'GEOMETRY'
-    iso_switch.location = (1460, 0)
-    links.new(input_node.outputs['Isometric Mode'], iso_switch.inputs[0])
-    links.new(merge_node.outputs['Geometry'], iso_switch.inputs[1])  # False -> untouched
-    links.new(delete_geom.outputs['Geometry'], iso_switch.inputs[2])  # True  -> culled
 
     # 6. Material index, three layers of priority:
     #      base:     corridor/structure slot = this cell's level index MOD
@@ -2297,7 +2322,7 @@ def create_geometry_nodes_modifier(
 
     set_material_index = nodes.new(type="GeometryNodeSetMaterialIndex")
     set_material_index.location = (next_x, 0)
-    links.new(iso_switch.outputs[0], set_material_index.inputs['Geometry'])
+    links.new(merge_node.outputs['Geometry'], set_material_index.inputs['Geometry'])
     links.new(final_index_socket, set_material_index.inputs['Material Index'])
 
     links.new(set_material_index.outputs['Geometry'], output_node.inputs['Geometry'])
@@ -3615,6 +3640,20 @@ class OBJECT_OT_FreezeForTextureWork(bpy.types.Operator):
             # the name STARTS WITH actually removes it from every future
             # base_name's prefix match, for every grouping mode at once.
             obj.name = tag + obj.name
+            # Mesh/Light DATA keeps its own separate name -- renaming only
+            # the object (above) would leave a frozen object's underlying
+            # data-block still sitting on the exact name the next
+            # regeneration tries to create a fresh one under, silently
+            # bumping the new one to a numeric ".001" suffix instead.
+            # Confirmed directly: every object type this operator touches
+            # (Blueprint/Walls/Stairs/Doors/Door Panels/Round variants)
+            # drifted this way after a single freeze+regenerate cycle, and
+            # it compounds with every additional freeze. Guarded against
+            # double-tagging in case two frozen objects ever share one
+            # data-block (not currently possible given how every mesh here
+            # is built fresh per-object, but cheap insurance).
+            if obj.data is not None and not obj.data.name.startswith(tag):
+                obj.data.name = tag + obj.data.name
             for coll in list(obj.users_collection):
                 coll.objects.unlink(obj)
             frozen_collection.objects.link(obj)
@@ -4391,6 +4430,77 @@ def _pointed_arch_profile(half_span, rise, segments):
     return left + right
 
 
+def _find_ordinary_doorways(
+    walkable_cells, room_ids, tile_size, level_height, merge_distance,
+    z_offsets=None, stair_cells=None, skip_room_ids=None,
+):
+    """Every ordinary doorway (a same-Z boundary between two walkable cells
+    whose room_id differs, excluding stairs and any room in skip_room_ids)
+    as a resolved world-space record: {'axis', 'z0', 'center', 'span_min',
+    'span_max'}. 'axis' 'X' means the opening spans Y (walked through
+    east-west, matches add_frame_facing_x in _build_door_mesh); 'axis' 'Y'
+    spans X (matches add_frame_facing_y).
+
+    Extracted from _build_door_mesh's own former Pass 1/2 so both the door
+    FRAME and the door PANEL (see _build_door_panels) build from the exact
+    same doorway set, with no risk of the two drifting apart. See
+    _build_door_mesh's docstring for the full reasoning behind the
+    boundary-detection/clustering approach -- this is that same logic with
+    geometry-building removed, kept behaviorally identical (same groups
+    dict construction and iteration order) so extracting it here changed
+    nothing about what _build_door_mesh actually draws."""
+    walkable = set(walkable_cells)
+    z_offsets = z_offsets or {}
+    stair_cells = stair_cells or set()
+    skip_room_ids = skip_room_ids or set()
+
+    groups = {}
+    for x, y, z in walkable_cells:
+        if (x, y, z) in stair_cells:
+            continue
+        rid = room_ids.get((x, y, z), -1)
+
+        east = (x + 1, y, z)
+        east_rid = room_ids.get(east, -1)
+        if (
+            east in walkable and east not in stair_cells and east_rid != rid
+            and rid not in skip_room_ids and east_rid not in skip_room_ids
+        ):
+            groups.setdefault(('X', z), []).append((y, x))
+
+        north = (x, y + 1, z)
+        north_rid = room_ids.get(north, -1)
+        if (
+            north in walkable and north not in stair_cells and north_rid != rid
+            and rid not in skip_room_ids and north_rid not in skip_room_ids
+        ):
+            groups.setdefault(('Y', z), []).append((x, y))
+
+    records = []
+    for (axis, z), points in groups.items():
+        kept = _cluster_nearby_points(points, merge_distance)
+        for line, b in kept:
+            if axis == 'X':
+                offset = (z_offsets.get((b, line, z), 0.0) + z_offsets.get((b + 1, line, z), 0.0)) / 2.0
+                records.append({
+                    'axis': 'X',
+                    'z0': z * level_height + offset,
+                    'center': (b + 0.5) * tile_size,
+                    'span_min': (line - 0.5) * tile_size,
+                    'span_max': (line + 0.5) * tile_size,
+                })
+            else:
+                offset = (z_offsets.get((line, b, z), 0.0) + z_offsets.get((line, b + 1, z), 0.0)) / 2.0
+                records.append({
+                    'axis': 'Y',
+                    'z0': z * level_height + offset,
+                    'center': (b + 0.5) * tile_size,
+                    'span_min': (line - 0.5) * tile_size,
+                    'span_max': (line + 0.5) * tile_size,
+                })
+    return records
+
+
 def _build_door_mesh(
     walkable_cells, room_ids, tile_size, level_height, door_height, frame_thickness, name,
     merge_distance=2, z_offsets=None, stair_cells=None, uv_tile_size=1.0,
@@ -4566,56 +4676,17 @@ def _build_door_mesh(
         else:
             add_arch_silhouette('Y', center_y, half_frame, x_min, x_max, z1, rise, style, mat_idx)
 
-    # Pass 1: find every doorway boundary, grouped by (axis, z) as (line, b)
-    # pairs -- "line" is the perpendicular grid coordinate (which row/column
-    # the boundary runs along), "b" is the LOWER cell's index on the axis
-    # the doorway crosses (e.g. an X-facing doorway found between cell x
-    # and x+1 is keyed by x). Both are kept, rather than only b within a
-    # fixed line, so Pass 2 can catch doorways that sit on ADJACENT lines
-    # too (a wide corridor/shared edge), not just ones stacked on the exact
-    # same line.
-    groups = {}
-    for x, y, z in walkable_cells:
-        if (x, y, z) in stair_cells:
-            continue
-        rid = room_ids.get((x, y, z), -1)
-
-        east = (x + 1, y, z)
-        east_rid = room_ids.get(east, -1)
-        if (
-            east in walkable and east not in stair_cells and east_rid != rid
-            and rid not in skip_room_ids and east_rid not in skip_room_ids
-        ):
-            groups.setdefault(('X', z), []).append((y, x))
-
-        north = (x, y + 1, z)
-        north_rid = room_ids.get(north, -1)
-        if (
-            north in walkable and north not in stair_cells and north_rid != rid
-            and rid not in skip_room_ids and north_rid not in skip_room_ids
-        ):
-            groups.setdefault(('Y', z), []).append((x, y))
-
-    # Pass 2: cluster every (line, b) pair within merge_distance tiles (on
-    # both axes) of one another and keep one frame per cluster.
-    for (axis, z), points in groups.items():
-        kept = _cluster_nearby_points(points, merge_distance)
-
-        for line, b in kept:
-            if axis == 'X':
-                offset = (z_offsets.get((b, line, z), 0.0) + z_offsets.get((b + 1, line, z), 0.0)) / 2.0
-                z0 = z * level_height + offset
-                center_x = (b + 0.5) * tile_size
-                y_min = (line - 0.5) * tile_size
-                y_max = (line + 0.5) * tile_size
-                add_frame_facing_x(center_x, y_min, y_max, z0, style=door_style, rise=arch_height)
-            else:
-                offset = (z_offsets.get((line, b, z), 0.0) + z_offsets.get((line, b + 1, z), 0.0)) / 2.0
-                z0 = z * level_height + offset
-                center_y = (b + 0.5) * tile_size
-                x_min = (line - 0.5) * tile_size
-                x_max = (line + 0.5) * tile_size
-                add_frame_facing_y(center_y, x_min, x_max, z0, style=door_style, rise=arch_height)
+    # Pass 1/2: find every ordinary doorway (see _find_ordinary_doorways,
+    # which is this exact former inline logic extracted so the door PANEL
+    # builder can reuse the identical doorway set -- unchanged behavior).
+    for rec in _find_ordinary_doorways(
+        walkable_cells, room_ids, tile_size, level_height, merge_distance,
+        z_offsets=z_offsets, stair_cells=stair_cells, skip_room_ids=skip_room_ids,
+    ):
+        if rec['axis'] == 'X':
+            add_frame_facing_x(rec['center'], rec['span_min'], rec['span_max'], rec['z0'], style=door_style, rise=arch_height)
+        else:
+            add_frame_facing_y(rec['center'], rec['span_min'], rec['span_max'], rec['z0'], style=door_style, rise=arch_height)
 
     # Pass 3: Entrance/Exit gates -- see this function's own docstring for
     # why this is a separate pass instead of extending Pass 1/2.
@@ -4676,6 +4747,160 @@ def _build_door_mesh(
         poly.material_index = mat_idx
     _add_planar_uv_map(mesh, uv_tile_size)
     return mesh
+
+
+def _build_door_panels(
+    doorway_records, door_height, frame_thickness, door_material, name_prefix,
+    panel_clearance=0.04, panel_thickness_scale=0.4, uv_tile_size=1.0,
+):
+    """One separate mesh Object per doorway record from
+    _find_ordinary_doorways -- unlike every other mesh category in this
+    file, panels are NOT merged into one shared mesh, because a hinge is
+    inherently object-level (its own origin, its own transform, its own
+    physics/constraint data). Each panel is built in LOCAL space with its
+    hinge edge at local (0,0,0); the caller sets obj.location to that
+    edge's world position, so obj IS the hinge pivot -- no Empty or driver
+    needed to fake one.
+
+    Always hinges on the doorway's span_min side, for a predictable,
+    level-wide-consistent swing direction. If the opening is too narrow to
+    fit a panel plus clearance inside the frame posts, that doorway is
+    skipped (frame-only, matching how it already looks today) rather than
+    emitting a degenerate sliver.
+
+    Local-to-world orientation (derived from add_frame_facing_x/y's own
+    post placement, not guessed): an 'X' doorway's span runs along world Y
+    with post thickness along world X, so the panel (local width along
+    local +X) gets rotated 90 deg around Z; a 'Y' doorway's span already
+    runs along world X with thickness along world Y, matching the panel's
+    local axes directly, so no added rotation. Verified against real
+    evaluated mesh bounds in tests/blender_headless_test.py, not just
+    reasoned about on paper -- see the "Doors: panel" checks there.
+
+    Returns a list of the created Objects (not yet linked into any
+    collection or scene -- see OBJECT_OT_GenerateLevelDoors, which also
+    calls _try_setup_hinge_physics on each one only after linking, since
+    UPBGE's rigid body operators need the object to already be in the
+    view layer)."""
+    created = []
+    for i, rec in enumerate(doorway_records):
+        span = rec['span_max'] - rec['span_min']
+        panel_width = span - 2.0 * (frame_thickness + panel_clearance)
+        if panel_width <= 0.01:
+            continue
+        panel_height = max(0.01, door_height - panel_clearance)
+        panel_thickness = frame_thickness * panel_thickness_scale
+        half_t = panel_thickness / 2.0
+
+        # Same 8-vert/face winding as this file's other add_box helpers
+        # (verified correct against real evaluated geometry there; reused
+        # verbatim here rather than re-derived), just written out directly
+        # since this is a single standalone box per call, not accumulated
+        # into a shared verts/faces list like the frame builders use.
+        verts = [
+            (0.0, -half_t, 0.0), (panel_width, -half_t, 0.0), (panel_width, half_t, 0.0), (0.0, half_t, 0.0),
+            (0.0, -half_t, panel_height), (panel_width, -half_t, panel_height),
+            (panel_width, half_t, panel_height), (0.0, half_t, panel_height),
+        ]
+        faces = [
+            (3, 2, 1, 0),  # bottom -- always visible on a panel, unlike a floor-touching post
+            (4, 5, 6, 7),  # top
+            (5, 4, 0, 1),
+            (6, 5, 1, 2),
+            (7, 6, 2, 3),
+            (4, 7, 3, 0),
+        ]
+
+        mesh = bpy.data.meshes.new(f"{name_prefix}_{i:03d}_Mesh")
+        mesh.from_pydata(verts, [], faces)
+        mesh.update()
+        mesh.materials.append(door_material)
+        _add_planar_uv_map(mesh, uv_tile_size)
+
+        obj = bpy.data.objects.new(f"{name_prefix}_{i:03d}", mesh)
+        if rec['axis'] == 'X':
+            obj.location = (rec['center'], rec['span_min'], rec['z0'])
+            obj.rotation_euler = (0.0, 0.0, math.radians(90.0))
+        else:
+            obj.location = (rec['span_min'], rec['center'], rec['z0'])
+            obj.rotation_euler = (0.0, 0.0, 0.0)
+
+        created.append(obj)
+    return created
+
+
+def _try_setup_hinge_physics(context, obj):
+    """Best-effort, EXPERIMENTAL only -- off by default (see
+    wfc_upbge_hinge_physics) for a concrete, demonstrated reason, not just
+    caution: `context.temp_override(object=obj, active_object=obj)`
+    reliably targets `obj` on UPBGE 0.53-alpha/Blender 5.3.0, but on UPBGE
+    0.50/Blender 5.0.1 it does NOT -- confirmed directly, the rigid body
+    operators silently acted on a stale, unrelated, already-selected
+    object from an earlier generation step instead (a Stairs object
+    repeatedly, uselessly re-targeted, while every door panel got no
+    constraint at all), and running that misdirected path through this
+    addon's full repeated-regeneration test suite crashed Blender outright
+    (segfault) on that same older version. Selection state (select_set +
+    view_layer.objects.active) is used here instead of temp_override,
+    since it's the older, more broadly-compatible way to give an operator
+    an unambiguous target -- confirmed by direct inspection to correctly
+    target `obj` on both tested Blender/UPBGE versions where temp_override
+    alone did not -- but given temp_override itself already looked correct
+    in isolated testing before the version-dependent failure surfaced, no
+    single fix here should be trusted without the SAME kind of direct
+    re-verification (not just "it didn't raise") before ever defaulting
+    this back on.
+
+    If running on UPBGE (object.game exists -- absent on stock Blender,
+    confirmed empirically), sets obj up as a RIGID_BODY and adds a HINGE
+    RigidBodyConstraint clamped to swing roughly closed-to-open (0 to
+    ~100 degrees), not spin freely. Whether UPBGE's LIVE game runtime
+    actually simulates this constraint during real-time play, versus it
+    only being used for Blender's own pre-baked physics animation, ALSO
+    could not be verified headlessly -- that needs an actual interactive
+    UPBGE session (Start Game, push the door).
+
+    Never raises: any failure -- including the constraint ending up
+    missing or misdirected, checked explicitly below rather than just
+    trusting the operators didn't error -- is returned as a message string
+    for the caller to report as a warning, not an exception. `obj` must
+    already be linked into the scene/view layer before calling this."""
+    if not hasattr(obj, 'game'):
+        return None
+    try:
+        obj.game.physics_type = 'RIGID_BODY'
+
+        bpy.ops.object.select_all(action='DESELECT')
+        obj.select_set(True)
+        context.view_layer.objects.active = obj
+
+        bpy.ops.rigidbody.object_add(type='ACTIVE')
+        bpy.ops.rigidbody.constraint_add(type='HINGE')
+
+        rbc = obj.rigid_body_constraint
+        if rbc is None:
+            return "rigidbody.constraint_add reported success but obj.rigid_body_constraint is still None"
+
+        # object_add/constraint_add with a single object selected creates
+        # the constraint DATA on obj but leaves object1/object2 both None
+        # -- an unconnected constraint, confirmed by direct inspection to
+        # do nothing. Setting object1 = obj is what actually anchors the
+        # panel's rigid body to this constraint; object2 stays None
+        # deliberately, since there's no separate rigid body for "the
+        # wall" to hinge against -- that anchors the hinge to a fixed
+        # point in world space instead (the constraint object's own
+        # transform, i.e. obj's), which is exactly what a
+        # door-hinged-to-a-fixed-frame needs.
+        rbc.object1 = obj
+        rbc.use_limit_ang_z = True
+        rbc.limit_ang_z_lower = 0.0
+        rbc.limit_ang_z_upper = math.radians(100.0)
+
+        if rbc.object1 is not obj:
+            return f"rigid_body_constraint.object1 did not end up as {obj.name!r} after setting it"
+        return None
+    except Exception as exc:
+        return str(exc)
 
 
 def _build_round_room_doors_mesh(
@@ -5683,15 +5908,23 @@ class OBJECT_OT_GenerateLevelStairs(bpy.types.Operator):
 class OBJECT_OT_GenerateLevelDoors(bpy.types.Operator):
     """Builds walk-through door frame object(s) from the already-generated
     blueprint's tile_id/room_id data -- run "Generate Game Blueprint"
-    first. A frame (two posts + a top, deliberately no panel) is placed at
-    every point a corridor enters a room or two rooms directly meet --
-    exactly wherever the wall silhouette already leaves a gap, so this
-    never conflicts with or duplicates wall geometry. Door Style (Flat/
-    Round/Pointed) controls every ordinary doorway's top; Entrance and
-    Exit always get their own fixed, larger, always-arched "Gate" instead,
-    so the two are visually distinct from ordinary doors regardless of
-    Door Style -- see _build_door_mesh's own docstring for why that's a
-    separate pass rather than an extension of the ordinary-doorway logic."""
+    first. A frame (two posts + a top) is placed at every point a corridor
+    enters a room or two rooms directly meet -- exactly wherever the wall
+    silhouette already leaves a gap, so this never conflicts with or
+    duplicates wall geometry. Door Style (Flat/Round/Pointed) controls
+    every ordinary doorway's top; Entrance and Exit always get their own
+    fixed, larger, always-arched "Gate" instead, so the two are visually
+    distinct from ordinary doors regardless of Door Style -- see
+    _build_door_mesh's own docstring for why that's a separate pass rather
+    than an extension of the ordinary-doorway logic.
+
+    Generate Door Panels (on by default) additionally builds one real,
+    separate swinging panel Object per ordinary doorway (never for
+    Entrance/Exit gates, which stay open set pieces) -- see
+    _build_door_panels. On UPBGE, each panel also gets a best-effort HINGE
+    rigid body constraint (see _try_setup_hinge_physics); on stock
+    Blender, that step is a silent no-op and only the panel geometry
+    appears."""
     bl_idname = "object.generate_level_doors"
     bl_label = "Generate Level Doors"
     bl_options = {'REGISTER', 'UNDO'}
@@ -5740,6 +5973,33 @@ class OBJECT_OT_GenerateLevelDoors(bpy.types.Operator):
         # ordinary/Entrance/Exit respectively, matching this exact order.
         door_materials = [get_or_create_door_material(), get_or_create_entrance_material(), get_or_create_exit_material()]
 
+        panel_warnings = []
+
+        def _add_door_panels_for(cells_for_panels, room_ids_for_panels, name_prefix):
+            # Reuses the exact doorway set _build_door_mesh itself just
+            # found for these same cells (see _find_ordinary_doorways),
+            # so panels can never drift out of sync with frames.
+            if not scene.wfc_generate_door_panels:
+                return []
+            doorway_records = _find_ordinary_doorways(
+                cells_for_panels, room_ids_for_panels, tile_size, level_height,
+                merge_distance=scene.wfc_door_merge_distance, z_offsets=z_offsets,
+                stair_cells=stair_cells, skip_room_ids=round_room_ids,
+            )
+            panels = _build_door_panels(
+                doorway_records, scene.wfc_door_height, scene.wfc_door_frame_thickness,
+                door_materials[0], name_prefix, uv_tile_size=scene.wfc_uv_tile_size,
+            )
+            if panels:
+                panels_collection = _get_or_create_collection(DOOR_PANELS_COLLECTION_NAME, context.collection)
+                for panel_obj in panels:
+                    panels_collection.objects.link(panel_obj)
+                    if scene.wfc_upbge_hinge_physics:
+                        warning = _try_setup_hinge_physics(context, panel_obj)
+                        if warning:
+                            panel_warnings.append(warning)
+            return panels
+
         def _add_round_doors(name, meta_for_floor):
             round_mesh_data = _build_round_room_doors_mesh(
                 meta_for_floor, room_ids, walkable_cells, tile_size, level_height,
@@ -5786,6 +6046,8 @@ class OBJECT_OT_GenerateLevelDoors(bpy.types.Operator):
                     _add_viewport_color_attribute(door_mesh_data)
                     created.append(obj)
 
+                created.extend(_add_door_panels_for(floor_cells, floor_room_ids, f"{DOORS_OBJECT_NAME}_Floor{floor_idx}_Panel"))
+
                 meta_for_floor = [r for r in room_meta if r['z'] // sub_levels == floor_idx]
                 round_obj = _add_round_doors(f"{DOORS_ROUND_OBJECT_NAME}_Floor{floor_idx}", meta_for_floor)
                 if round_obj is not None:
@@ -5809,6 +6071,8 @@ class OBJECT_OT_GenerateLevelDoors(bpy.types.Operator):
             else:
                 bpy.data.meshes.remove(door_mesh_data)
 
+            created.extend(_add_door_panels_for(walkable_cells, room_ids, f"{DOORS_OBJECT_NAME}_Panel"))
+
             round_obj = _add_round_doors(DOORS_ROUND_OBJECT_NAME, room_meta)
             if round_obj is not None:
                 created.append(round_obj)
@@ -5821,7 +6085,17 @@ class OBJECT_OT_GenerateLevelDoors(bpy.types.Operator):
             obj.select_set(True)
         context.view_layer.objects.active = created[-1]
 
-        self.report({'INFO'}, f"Doors generated, in {len(created)} object(s).")
+        if panel_warnings:
+            print(f"Generate Level Doors: hinge physics setup failed for {len(panel_warnings)} panel(s):")
+            for warning in panel_warnings:
+                print(f"  - {warning}")
+            self.report(
+                {'WARNING'},
+                f"Doors generated, in {len(created)} object(s). Panel geometry is fine, but hinge "
+                f"physics setup failed for {len(panel_warnings)} panel(s) -- see the console for detail.",
+            )
+        else:
+            self.report({'INFO'}, f"Doors generated, in {len(created)} object(s).")
         _update_debug_snapshot(context, "Step 4: Generate Doors")
         return {'FINISHED'}
 
@@ -6508,6 +6782,11 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
         arch_row = col.row(align=True)
         arch_row.enabled = scene.wfc_door_style != 'FLAT'
         arch_row.prop(scene, "wfc_door_arch_height", text="Arch Height")
+        col.separator()
+        col.prop(scene, "wfc_generate_door_panels", text="Generate Door Panels")
+        hinge_row = col.row(align=True)
+        hinge_row.enabled = scene.wfc_generate_door_panels
+        hinge_row.prop(scene, "wfc_upbge_hinge_physics", text="UPBGE Hinge Physics (Experimental)")
         layout.separator()
         _step_button(
             layout, "object.generate_level_doors", "Step 4: Generate Doors",
@@ -6942,6 +7221,22 @@ def register():
         description="How far a Round/Pointed arch rises above the springline (ignored for Flat). "
                     "Also scales the Entrance/Exit Gate's own (larger) arch"
     )
+    bpy.types.Scene.wfc_generate_door_panels = BoolProperty(
+        name="Generate Door Panels", default=True,
+        description="Also build one real swinging panel object per ordinary doorway (never for "
+                    "Entrance/Exit gates), hinged on its span_min side -- see _build_door_panels"
+    )
+    bpy.types.Scene.wfc_upbge_hinge_physics = BoolProperty(
+        name="UPBGE Hinge Physics (Experimental)", default=False,
+        description="EXPERIMENTAL, off by default: on UPBGE only (silent no-op on stock Blender), "
+                    "best-effort adds a RIGID_BODY + HINGE constraint to each door panel so it can "
+                    "swing during play. Confirmed working correctly on UPBGE 0.53-alpha, but on "
+                    "UPBGE 0.50 the constraint-setup step was unreliable enough to crash Blender "
+                    "under repeated regeneration -- see _try_setup_hinge_physics. Whether UPBGE's "
+                    "live game runtime actually simulates the constraint in real time, even when "
+                    "setup succeeds, was also not verified -- confirm by pressing Start Game and "
+                    "pushing a door before relying on this for anything"
+    )
     bpy.types.Scene.wfc_torch_chance = FloatProperty(
         name="Torch Chance", default=0.15, min=0.0, max=1.0, subtype='FACTOR',
         description="Chance any given wall-adjacent tile gets a torch, independent of the "
@@ -7069,6 +7364,8 @@ def unregister():
     del bpy.types.Scene.wfc_door_merge_distance
     del bpy.types.Scene.wfc_door_style
     del bpy.types.Scene.wfc_door_arch_height
+    del bpy.types.Scene.wfc_generate_door_panels
+    del bpy.types.Scene.wfc_upbge_hinge_physics
     del bpy.types.Scene.wfc_torch_chance
     del bpy.types.Scene.wfc_torch_height
     del bpy.types.Scene.wfc_torch_light_energy

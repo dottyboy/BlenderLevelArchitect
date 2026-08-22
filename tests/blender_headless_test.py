@@ -811,6 +811,139 @@ check("Doors: regenerate back to Door Style default FINISHED", result == {'FINIS
 doors_obj = bpy.data.objects.get(addon.DOORS_OBJECT_NAME)
 check("Doors: object still exists after reverting Door Style", doors_obj is not None)
 
+# Door panels: independent check, not just "did it not crash." Re-derive
+# the exact doorway set _build_door_mesh itself used (via the same
+# _find_ordinary_doorways helper the operator calls) and confirm one
+# panel per wide-enough doorway, every panel's world origin sits exactly
+# at that doorway's hinge (span_min) edge, and the panel's width actually
+# runs along the doorway's span axis (catches a rotation-sign mistake, not
+# just a missing/extra object) -- the same kind of independent recheck
+# that caught a real bug in WorldMaker's platformer gap logic earlier: a
+# plain rerun would never catch a systematically-wrong-but-self-consistent
+# placement.
+panel_tile_size = scene.wfc_tile_size
+panel_level_height = addon._fine_level_height(scene)
+panel_walkable_cells, panel_extra = addon._read_blueprint_points(
+    blueprint_obj, panel_tile_size, panel_level_height, ("room_id", "z_offset", "tile_id"),
+)
+panel_room_ids = panel_extra["room_id"]
+panel_z_offsets = panel_extra["z_offset"]
+panel_stair_cells = {cell for cell, tid in panel_extra["tile_id"].items() if tid == addon.TILE_STAIR}
+panel_room_meta = json.loads(blueprint_obj.get("gla_room_meta", "[]"))
+panel_round_room_ids = {i for i, r in enumerate(panel_room_meta) if r['shape'] == 'ROUND'}
+
+expected_doorways = addon._find_ordinary_doorways(
+    panel_walkable_cells, panel_room_ids, panel_tile_size, panel_level_height,
+    merge_distance=scene.wfc_door_merge_distance, z_offsets=panel_z_offsets,
+    stair_cells=panel_stair_cells, skip_room_ids=panel_round_room_ids,
+)
+panel_clearance = 0.04
+expected_panelable = [
+    rec for rec in expected_doorways
+    if (rec['span_max'] - rec['span_min']) - 2.0 * (scene.wfc_door_frame_thickness + panel_clearance) > 0.01
+]
+
+actual_panels = [
+    o for o in bpy.data.objects
+    if o.name.startswith(addon.DOORS_OBJECT_NAME) and "_Panel_" in o.name
+]
+check(
+    "Doors: panel count matches the number of wide-enough ordinary doorways",
+    len(actual_panels) == len(expected_panelable),
+    f"panels={len(actual_panels)} expected={len(expected_panelable)}",
+)
+
+
+def _hinge_world_pos(rec):
+    if rec['axis'] == 'X':
+        return (rec['center'], rec['span_min'], rec['z0'])
+    return (rec['span_min'], rec['center'], rec['z0'])
+
+
+eps = 0.01
+unmatched = 0
+oriented_ok = 0
+oriented_checked = 0
+for panel_obj in actual_panels:
+    loc = panel_obj.location
+    match_rec = None
+    for rec in expected_panelable:
+        hinge = _hinge_world_pos(rec)
+        if all(abs(loc[i] - hinge[i]) < eps for i in range(3)):
+            match_rec = rec
+            break
+    if match_rec is None:
+        unmatched += 1
+        continue
+
+    oriented_checked += 1
+    world_verts = [panel_obj.matrix_world @ v.co for v in panel_obj.data.vertices]
+    span_axis_index = 1 if match_rec['axis'] == 'X' else 0
+    span_values = [v[span_axis_index] for v in world_verts]
+    world_span_extent = max(span_values) - min(span_values)
+    expected_width = (match_rec['span_max'] - match_rec['span_min']) - 2.0 * (scene.wfc_door_frame_thickness + panel_clearance)
+    if abs(world_span_extent - expected_width) < 0.05:
+        oriented_ok += 1
+
+check(
+    "Doors: every panel's origin sits exactly at its doorway's hinge edge",
+    unmatched == 0, f"{unmatched}/{len(actual_panels)} panels have no matching doorway hinge position",
+)
+check(
+    "Doors: panel width actually runs along its doorway's span axis (rotation is correct)",
+    oriented_checked > 0 and oriented_ok == oriented_checked,
+    f"{oriented_ok}/{oriented_checked} panels correctly oriented",
+)
+
+# Toggling panels off should remove them on the next regeneration (via the
+# existing _remove_objects_by_prefix(DOORS_OBJECT_NAME) call, which
+# matches "_Panel_..." names too).
+scene.wfc_generate_door_panels = False
+result = bpy.ops.object.generate_level_doors()
+check("Doors: regenerate with panels disabled FINISHED", result == {'FINISHED'}, str(result))
+remaining_panels = [o for o in bpy.data.objects if o.name.startswith(addon.DOORS_OBJECT_NAME) and "_Panel_" in o.name]
+check("Doors: disabling Generate Door Panels removes existing panels", len(remaining_panels) == 0, f"count={len(remaining_panels)}")
+scene.wfc_generate_door_panels = True
+result = bpy.ops.object.generate_level_doors()
+check("Doors: regenerate with panels re-enabled FINISHED", result == {'FINISHED'}, str(result))
+
+# UPBGE Hinge Physics: EXPERIMENTAL and off by default (see
+# wfc_upbge_hinge_physics's own tooltip -- unreliable object-targeting via
+# context.temp_override crashed Blender outright on UPBGE 0.50 under
+# REPEATED regeneration). Deliberately exercised here as a single,
+# isolated regeneration, never looped, so this stays covered without
+# reproducing the conditions that caused the crash. A no-op on stock
+# Blender (hasattr(obj, 'game') is False there), so these checks only
+# assert anything meaningful on UPBGE.
+scene.wfc_upbge_hinge_physics = True
+result = bpy.ops.object.generate_level_doors()
+check("Doors: regenerate with UPBGE Hinge Physics on FINISHED", result == {'FINISHED'}, str(result))
+hinge_panels = [o for o in bpy.data.objects if o.name.startswith(addon.DOORS_OBJECT_NAME) and "_Panel_" in o.name]
+if hinge_panels and hasattr(hinge_panels[0], "game"):
+    checked = 0
+    correctly_wired = 0
+    for p in hinge_panels:
+        checked += 1
+        rbc = p.rigid_body_constraint
+        if rbc is not None and rbc.type == 'HINGE' and rbc.object1 is p:
+            correctly_wired += 1
+    check(
+        "Doors: UPBGE Hinge Physics -- every panel got a HINGE constraint correctly wired to itself",
+        checked > 0 and correctly_wired == checked,
+        f"{correctly_wired}/{checked} panels correctly wired",
+    )
+scene.wfc_upbge_hinge_physics = False
+result = bpy.ops.object.generate_level_doors()
+check("Doors: regenerate with UPBGE Hinge Physics back off FINISHED", result == {'FINISHED'}, str(result))
+# Refresh the shared doors_obj reference -- every generate_level_doors()
+# call above deleted the previous Doors object and made a new one, so
+# code further down the file that still reads doors_obj (assigned back
+# near line 811, before any of these regenerations) would otherwise hold
+# a stale reference to a long-deleted object. Confirmed directly: without
+# this, a later UV-map check crashed with "ReferenceError: StructRNA of
+# type Object has been removed" instead of failing cleanly.
+doors_obj = bpy.data.objects.get(addon.DOORS_OBJECT_NAME)
+
 result = bpy.ops.object.generate_level_props()
 check("Props: operator FINISHED or CANCELLED", result in ({'FINISHED'}, {'CANCELLED'}), str(result))
 
@@ -1188,6 +1321,33 @@ check(
 check(
     "Freeze: a genuinely fresh Walls object exists under the normal name again",
     bpy.data.objects.get(addon.WALLS_OBJECT_NAME) is not None,
+)
+
+# Targeted regression check for a second, separate bug this same block
+# also caught: Freeze renamed each frozen OBJECT (to escape future
+# _remove_objects_by_prefix matching, see above) but never its underlying
+# mesh/light DATA-block -- so a frozen object's mesh kept sitting on the
+# exact name the next regeneration tries to create a fresh one under,
+# silently bumping the new one to a numeric ".001" suffix instead (Blender
+# auto-disambiguates bpy.data.meshes.new() name collisions rather than
+# erroring). Confirmed directly: every object type this operator touches
+# drifted this way after a single freeze+regenerate cycle before the fix.
+import re as _re
+fresh_walls_obj = bpy.data.objects.get(addon.WALLS_OBJECT_NAME)
+if fresh_walls_obj is not None and fresh_walls_obj.data is not None:
+    check(
+        "Freeze: the fresh Walls object's mesh data has no numeric collision suffix",
+        not _re.search(r"\.\d{3}$", fresh_walls_obj.data.name),
+        f"mesh name={fresh_walls_obj.data.name!r}",
+    )
+frozen_mismatched = [
+    o for o in (frozen_collection.objects if frozen_collection is not None else [])
+    if o.data is not None and not o.data.name.startswith("Frozen_")
+]
+check(
+    "Freeze: every frozen object's data-block also carries the Frozen_ tag, not just the object",
+    len(frozen_mismatched) == 0,
+    f"{len(frozen_mismatched)} frozen object(s) with untagged data, e.g. {frozen_mismatched[0].name if frozen_mismatched else None}",
 )
 
 # ==============================================================================
