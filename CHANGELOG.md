@@ -3,6 +3,24 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.25.0
+
+- **New: Door panels + experimental UPBGE hinge physics.** Every ordinary doorway now gets a real
+  swinging panel object, not just a frame -- "Generate Door Panels" in the Doors tab, on by
+  default, hinged on one edge. On UPBGE specifically, an experimental "UPBGE Hinge Physics" toggle
+  (off by default) also wires up a rigid body + hinge constraint per panel. Whether UPBGE's live
+  game runtime actually simulates that constraint hasn't been verified -- confirm by pressing
+  Start Game and pushing a door before relying on it. Entrance/Exit gates and Round room doorways
+  are unaffected -- gates stay fixed set pieces, Round doors are still frame-only for now.
+- Fixed: Isometric Mode's top-slice cull could silently delete an elevated room's entire floor.
+  Continuous elevation (Elevation Chance/Split Level Chance) could push a room's Z close enough to
+  a sub-level boundary that the cull's modulo math wrapped around into the cull zone meant for
+  ceilings -- rescoped the cull to ceiling only, since floor should never be culled by this
+  feature in the first place.
+- Fixed: Freeze for Texture Work renamed a frozen object but never its underlying mesh/light data,
+  so the next regeneration's same-named data silently drifted to a numeric `.001` suffix instead
+  -- the data-block gets the same rename treatment as the object now.
+
 ## 0.24.0
 
 - **Round room doors now follow the curved wall too.** A doorway on a Round room's rim still
