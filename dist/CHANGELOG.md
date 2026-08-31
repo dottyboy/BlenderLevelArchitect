@@ -3,6 +3,93 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.25.1
+
+- **Fixed: Round rooms could clip stairs, or wall off a corridor that should be walkable.** User
+  repro (a Round-room level with multiple Sub-Levels per Floor): stairs sometimes visibly clipped
+  through a nearby Round room's wall, and some corridors dead-ended at a low wall a player would
+  have to jump rather than walk through. Three real, independent bugs, all in the Round room wall
+  ring/floor disc/door frame machinery added in 0.23.0/0.24.0:
+  - A Round room only carves cells inside its inscribed ellipse, leaving its own bounding-box
+    corners empty -- room/stairwell placement treated that as free space (it genuinely has no
+    floor there), but the wall ring is a real ellipse spanning the room's FULL rectangle, cutting
+    straight through those corners. Room/stairwell placement now also reserves a Round room's full
+    rectangle, not just its carved cells.
+  - A corridor can still legitimately route through that same "empty" corner (corridors can't be
+    allowed to fail mid-carve) -- the wall ring and door-frame builders now also open wherever that
+    happens, instead of silently sealing a real, walkable corridor.
+  - The deeper root cause behind the actual clipping: the ring/disc/door builders computed a Round
+    room's world-space center half a tile off from where its cells are actually carved (an
+    off-by-one ported in from the sibling project, which uses a different grid convention) -- fixed
+    to match the grid-space ellipse test exactly.
+  - Added a dedicated multi-seed regression test (Round rooms + multi-floor Stairs together) --
+    the existing Round rooms test pins Height=1 (no stairs ever run), so this exact combination had
+    no guaranteed coverage before.
+
+## 0.25.0
+
+- **New: Door panels + experimental UPBGE hinge physics.** Every ordinary doorway now gets a real
+  swinging panel object, not just a frame -- "Generate Door Panels" in the Doors tab, on by
+  default, hinged on one edge. On UPBGE specifically, an experimental "UPBGE Hinge Physics" toggle
+  (off by default) also wires up a rigid body + hinge constraint per panel. Whether UPBGE's live
+  game runtime actually simulates that constraint hasn't been verified -- confirm by pressing
+  Start Game and pushing a door before relying on it. Entrance/Exit gates and Round room doorways
+  are unaffected -- gates stay fixed set pieces, Round doors are still frame-only for now.
+- Fixed: Isometric Mode's top-slice cull could silently delete an elevated room's entire floor.
+  Continuous elevation (Elevation Chance/Split Level Chance) could push a room's Z close enough to
+  a sub-level boundary that the cull's modulo math wrapped around into the cull zone meant for
+  ceilings -- rescoped the cull to ceiling only, since floor should never be culled by this
+  feature in the first place.
+- Fixed: Freeze for Texture Work renamed a frozen object but never its underlying mesh/light data,
+  so the next regeneration's same-named data silently drifted to a numeric `.001` suffix instead
+  -- the data-block gets the same rename treatment as the object now.
+
+## 0.24.0
+
+- **Round room doors now follow the curved wall too.** A doorway on a Round room's rim still
+  placed a straight, axis-aligned frame -- now it's oriented along the wall's own curve at that
+  exact spot, matching the real n-gon wall ring instead of standing at a mismatched angle against
+  it. Works with Flat, Round, and Pointed Door Style. Rect rooms are unaffected.
+
+## 0.23.0
+
+- **Round rooms now have a real shape.** Every Round room's floor is a real merged n-gon disc
+  (`Room Shape Sides`, 3=triangle, 4=square/diamond, higher=smoother circle) instead of a blocky
+  per-tile grid approximation, and the guard-rail wall now hugs that same shape exactly -- with a
+  real opening left wherever a corridor connects, not a fully sealed ring. Rect rooms are
+  unchanged.
+- **New: Presets** (Isometric / FPS-Immersive-Sim / Compact Roguelike / Megadungeon). One click
+  sets Width/Rooms/Room Shape/Sub-Levels/Elevation/Stairs/Walls/Doors/Torches to values tuned for
+  a target camera/genre -- Step 1 still has to be pressed afterward, same as any other setting.
+- Known limitation: a Round room's door frame is still a straight box, even against its now-curved
+  wall -- doors still open in the correct place, the frame shape itself just doesn't match yet.
+
+## 0.22.0
+
+- **New: Export Collision Mesh** (Export tab, second button). Exports Floor + Walls + Stairs
+  only -- no Doors, Torches, Decoration, or Lights -- suitable to assign directly as a level's
+  collision geometry in a game engine. Doors are left out because they're a walk-through frame by
+  design; their posts would otherwise be a minor snag at every doorway.
+
+## 0.21.0
+
+- **New: One-click glTF/GLB Export** (new **Export** tab). Selects every generated object and
+  exports straight to `.glb`/`.gltf`, aware of the addon's own naming/grouping so you don't have
+  to know which objects to select yourself. Two settings: **Binary (.glb)** (default -- one
+  self-contained file) and **Include Lights** (default on -- exports the real torch-placed Point
+  lights too). glTF only for now, not FBX.
+
+## 0.20.0
+
+- **New: Arched Doors + Entrance/Exit Gates.** Ordinary doorways can now use a Round or Pointed
+  arch instead of a flat lintel (**Style**, Doors tab, plus an **Arch Height** slider). Entrance
+  and Exit always get their own larger, always-arched Gate in the usual green/red, regardless of
+  Style, so they read as landmarks distinct from an ordinary room doorway.
+- **New: Bent Stairwells.** Room-based stairwells can now bend through one flat landing instead
+  of climbing in a single straight line -- a 90-degree L turn or a 180-degree U dog-leg
+  (**Bend Chance** / **Bend Style**, Stairs tab). Off by default; not available with Corridor
+  Stairs, which is too narrow for a landing.
+
 ## 0.19.0
 
 - **New: Trim-sheet-ready UVs.** Every baked mesh (Walls/Doors/Stairs/Ramps/Torches/Decoration)

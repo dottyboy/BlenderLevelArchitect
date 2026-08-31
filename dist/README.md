@@ -1,3 +1,14 @@
+<meta property="og:title" content="Game Level Architect">
+<meta property="og:description" content="Procedural game-level generator for Blender — a WFC-style room/corridor/stair solver with automatic Geometry Nodes + Python mesh generation.">
+<meta property="og:image" content="https://raw.githubusercontent.com/dottyboy/BlenderLevelArchitect/main/screenshot.png">
+<meta property="og:url" content="https://github.com/dottyboy/BlenderLevelArchitect">
+<meta property="og:type" content="website">
+
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Game Level Architect">
+<meta name="twitter:description" content="Procedural game-level generator for Blender — a WFC-style room/corridor/stair solver with automatic Geometry Nodes + Python mesh generation.">
+<meta name="twitter:image" content="https://raw.githubusercontent.com/dottyboy/BlenderLevelArchitect/main/screenshot.png">
+
 # Game Level Architect
 
 [![License: GPL v3](https://img.shields.io/github/license/dottyboy/BlenderLevelArchitect)](../LICENSE)
@@ -71,8 +82,13 @@ five steps build on each other's output in order:
    "Per Floor" grouping splits walls into one object per floor.
 3. **Step 3: Generate Stairs** — builds stair geometry (stepped stairs or a smooth ramp).
    "Per Floor" or "Per Stair" grouping controls how many separate objects you get.
-4. **Step 4: Generate Doors** — walk-through door frames at every point a corridor enters a
-   room or two rooms meet directly (no panel, just a frame — nothing to open/close yet).
+4. **Step 4: Generate Doors** — door frames at every point a corridor enters a room or two rooms
+   meet directly, each with a real swinging panel object hinged on one edge ("Generate Door
+   Panels", on by default). On UPBGE specifically, an experimental "UPBGE Hinge Physics" toggle
+   (off by default) can also set each panel up with a rigid body + hinge constraint so it can
+   swing during play — not yet confirmed to actually animate in a running game, only that the
+   constraint is created correctly, so treat it as experimental until you've verified it yourself
+   in a live UPBGE session.
 5. **Step 5: Generate Props** — wall-mounted torches (each with a real light, not just a mesh)
    and scattered crate/barrel/cone decoration placeholders, organized into their own
    "Procedural Level Props" collection so they can be hidden or deleted independently of the
