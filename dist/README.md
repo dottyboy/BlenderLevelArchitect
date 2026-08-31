@@ -70,10 +70,12 @@ hand, move `Textures/` along with it.
 
 ## Basic workflow
 
-The panel is organized into tabs (Setup / Walls / Stairs / Doors / Props, icon row at the top) —
-each tab holds that step's settings and its own Generate button, so only one step's settings show
-at a time. A persistent Debug section stays at the bottom regardless of which tab is open. The
-five steps build on each other's output in order:
+The panel is organized into tabs (Setup / Walls / Stairs / Doors / Props / Export, icon row at
+the top) — each tab holds that step's settings and its own Generate button, so only one step's
+settings show at a time. A persistent Debug section stays at the bottom regardless of which tab
+is open. **Presets** (Isometric / FPS-Immersive-Sim / Compact Roguelike / Megadungeon), above the
+tab row, one-click set a bundle of settings tuned for a target camera/genre — Step 1 still has to
+be pressed afterward, same as any other setting. The steps build on each other's output in order:
 
 1. **Step 1: Generate Blueprint** — builds the room/corridor/stair layout and the floor mesh
    (via a Geometry Nodes modifier). Optional continuous room elevation and Corridor Stairs are
@@ -93,6 +95,16 @@ five steps build on each other's output in order:
    and scattered crate/barrel/cone decoration placeholders, organized into their own
    "Procedural Level Props" collection so they can be hidden or deleted independently of the
    structural geometry.
+6. **Export** — one-click glTF/GLB export of everything generated (Binary .glb or plain .gltf,
+   optionally including the real torch lights), plus a separate **Export Collision Mesh** button
+   that exports just Floor + Walls + Stairs — no Doors, Torches, Decoration, or Lights — suitable
+   to assign directly as a level's collision geometry in a game engine.
+
+**Round rooms have a real shape**, not a blocky per-tile approximation — every Round room's floor
+is a merged n-gon disc (**Room Shape Sides**, Setup tab, 3 = triangle up to a smooth circle), its
+guard-rail wall hugs that same curve with a real opening wherever a corridor connects, and its
+doorway frames (including the arch, with Round/Pointed Door Style) are oriented along the wall's
+own curve at that exact spot instead of standing at a straight, mismatched angle against it.
 
 **Add Ceiling** (under Scale & Style) closes every room's ceiling instead of leaving it open —
 turn this on for an FPS-style playtest so rooms don't open onto empty space overhead. It's a live
@@ -108,7 +120,7 @@ to Mesh, actually breaks per-room coloring on the result — Blender's own Conve
 material list for this kind of setup, so let this button do that step instead).
 
 Regenerating Step 1 rebuilds the whole layout from scratch (new seed unless "Random Seed" is
-turned off); Steps 2-5 can each be re-run independently after tweaking their own settings without
+turned off); Steps 2-6 can each be re-run independently after tweaking their own settings without
 regenerating the blueprint.
 
 ## Reporting issues
