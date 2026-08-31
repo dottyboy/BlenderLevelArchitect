@@ -29,6 +29,10 @@ __pycache__/
 # leak risk for what it saves; the whole folder is local-only now.
 /.claude/
 
+# Bug-report screenshots -- internal communication only, never meant for
+# the public repo
+/screenshots/
+
 # OS cruft
 .DS_Store
 Thumbs.db

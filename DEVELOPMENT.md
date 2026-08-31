@@ -4,7 +4,7 @@ Internal dev-facing doc: what's built, what's known-broken, what's next. Not for
 (see `dist/README.md` for that). Source of truth for the addon's actual behavior is always
 `levelArchitect_v2.py` — this file can drift out of date; the code can't.
 
-Current version: **0.25.0** (see `bl_info` in the source file).
+Current version: **0.25.1** (see `bl_info` in the source file).
 
 §2 (Development tree) was condensed 2026-08-21 — dropped the blow-by-blow investigation
 narrative and per-run stress-test numbers from older, fully-resolved entries, kept every
@@ -752,6 +752,55 @@ GN complexity there specifically.
       render (not one of the regular `generate_test_blends.py` scenarios, whose top-down framing is
       too zoomed-out to show doorway-level detail) confirmed the frame visibly follows the wall's
       curve right at the opening, not standing at a mismatched straight angle against it.
+
+- [x] **Round rooms could clip stairs, or wall off a corridor that should be walkable (0.25.1).**
+      User-reported, reproduced from a pasted debug-snapshot dict (Round room shape, multiple
+      Sub-Levels per Floor): stairs sometimes visibly clipped through a nearby Round room's own
+      wall ring, and some corridors dead-ended at a low wall (0.61m — jumpable) instead of a real
+      opening. **Confirmed via a real Blender repro of the exact snapshot before touching any
+      code** (this project's own established discipline) — a stair tread box genuinely overlapped
+      a `WALLS_ROUND` box. Three separate, real bugs, all in the 0.23.0/0.24.0 Round-room wall
+      ring/floor disc/door-frame machinery:
+
+      1. **Placement never reserved a Round room's full rectangle.** `_carve_room`'s docstring
+         already claimed `_room_fits` "reserves the FULL bounding box... same as a rect one" — but
+         `_room_fits` only ever checked the GRID (`TILE_AIR`), and a Round room only carves cells
+         inside its inscribed ellipse (`<= 0.8` threshold), leaving its own bounding-box corners
+         genuinely `TILE_AIR`. A new stairwell (or any room) could get placed straight into that
+         "empty" corner — which the wall ring, an ellipse spanning the room's FULL rectangle, still
+         cuts straight through. Fixed: `_room_fits` now also rejects any candidate overlapping an
+         existing ROUND room's full rectangle, not just its carved cells (covers every caller —
+         room scattering AND stairwell placement — since both funnel through the one function).
+      2. **A corridor can still legitimately reach that same dead corner.** `_carve_corridor` is a
+         straight Manhattan line with no alternate routing "used in places where connectivity must
+         not be allowed to fail" (its own docstring) — it can't be made to skip a cell there without
+         risking a genuinely disconnected floor, so placement-blocking alone (bug 1's fix) isn't
+         enough. Fixed at the RENDERING end instead: `_build_round_room_walls_mesh` and
+         `_build_round_room_doors_mesh` now also scan the room's full rectangle for any walkable
+         cell that ISN'T the room's own floor, and force that ring edge open — covering both a
+         cell fully inside one polygon sector (checked via all 4 grid-corners' angle bucket) and
+         the reverse case on a minimum-size 3×3 Round room, where a whole rim edge can land inside
+         ONE grid cell without touching any of ITS corners either (checked via whether either of
+         the edge's own two rim vertices falls inside the cell's rectangle).
+      3. **The actual root cause of the real clipping (bugs 1+2 alone weren't enough — a multi-seed
+         regression test still caught one residual case):** all three Round-room mesh builders
+         computed a room's WORLD-SPACE ellipse center as `(x + rw/2.0) * tile_size` — ported
+         verbatim from the sibling project, which uses a CORNER-based grid convention (`_build_
+         walls_mesh` there: `cx0 = x*tile_size, cx1 = (x+rw)*tile_size`). This project's own grid
+         is CENTERED instead (`_build_wall_mesh` here: `left = (x-0.5)*tile_size`), matching
+         `_carve_room`'s own grid-space ellipse test (`cx = x + (rw-1)/2.0`) — so the ported
+         formula was half a tile off in both X and Y here specifically. Confirmed by hand before
+         fixing: a genuinely-carved corner cell fell just OUTSIDE the old formula's disc on one
+         side, while the ring overreached a whole half-tile into empty space on the opposite side
+         — which is exactly what let an otherwise-correctly-placed stairwell still get clipped.
+         Fixed to `(x + (rw-1)/2.0) * tile_size`, matching the ellipse test exactly. BrickSpitter
+         itself needed no equivalent fix — its own formula is correct for its own (corner-based)
+         convention.
+
+      Added a new dedicated regression test (Round rooms + multi-Sub-Level Stairs together, 5
+      seeds): the existing Round rooms test pins `wfc_height=1` so Stairs never even runs there,
+      and the suite's `MIXED`-shape baseline only randomly rolls Round per room — this exact
+      combination had no guaranteed coverage before, which is how this shipped unnoticed.
 
 ---
 

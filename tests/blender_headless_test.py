@@ -1937,8 +1937,8 @@ if round_doors_obj is not None:
         wx, wy = v.co.x, v.co.y
         deviations = []
         for r in round_rooms_check:
-            cx = (r['x'] + r['w'] / 2.0) * scene.wfc_tile_size
-            cy = (r['y'] + r['l'] / 2.0) * scene.wfc_tile_size
+            cx = (r['x'] + (r['w'] - 1) / 2.0) * scene.wfc_tile_size
+            cy = (r['y'] + (r['l'] - 1) / 2.0) * scene.wfc_tile_size
             rx = (r['w'] / 2.0) * scene.wfc_tile_size
             ry = (r['l'] / 2.0) * scene.wfc_tile_size
             deviations.append(abs(math.hypot((wx - cx) / rx, (wy - cy) / ry) - 1.0))
@@ -1979,6 +1979,110 @@ check(
     and any(o.name.startswith(addon.WALLS_ROUND_OBJECT_NAME) for o in export_targets)
     and any(o.name.startswith(addon.DOORS_ROUND_OBJECT_NAME) for o in export_targets),
     str([o.name for o in export_targets]),
+)
+
+# ==============================================================================
+# Round rooms + multi-floor Stairs: real user bug repro (debug snapshot
+# with wfc_room_shape='ROUND', wfc_height=3, wfc_sub_levels_per_floor=4).
+# The "Round rooms" section above pins wfc_height=1, so Stairs never runs
+# there at all -- and the suite's MIXED-shape baseline only randomly rolls
+# ROUND per room, so this exact combination (a Round room's own wall RING
+# actually colliding with something) had no guaranteed coverage. Root
+# cause: a Round room only carves cells inside its inscribed ellipse (see
+# _carve_room), leaving its own bounding-box corners TILE_AIR -- both
+# _room_fits (room/stairwell placement) and _carve_corridor read that as
+# genuinely free space, but the wall ring is a real ellipse spanning the
+# room's FULL rectangle, cutting straight through those "empty" corners.
+# Two symptoms: a new stairwell placed into that dead corner physically
+# clips through the ring (fixed in _room_fits), and a corridor carved
+# into it get sealed behind a low wall a player would have to jump rather
+# than walk through (fixed in _build_round_room_walls_mesh/
+# _build_round_room_doors_mesh's open-edge detection).
+# ==============================================================================
+scene.wfc_width = 10
+scene.wfc_length = 10
+scene.wfc_height = 3
+scene.wfc_rooms_min = 10
+scene.wfc_rooms_max = 30
+scene.wfc_room_size_min = 2
+scene.wfc_room_size_max = 4
+scene.wfc_room_shape = 'ROUND'
+scene.wfc_room_shape_sides = 16
+scene.wfc_sub_levels_per_floor = 4
+scene.wfc_split_level_chance = 0.3
+scene.wfc_elevation_chance = 0.0
+scene.wfc_elevation_range = 0.0
+scene.wfc_organic_amount = 0.0
+scene.wfc_level_height = 16.0
+scene.wfc_wall_height = 0.61
+scene.wfc_wall_thickness = 0.02
+scene.wfc_stairs_per_level = 3
+scene.wfc_stair_mesh_style = 'RAMP'
+scene.wfc_random_seed = False
+
+round_stair_overlap_total = 0
+round_stair_overlap_bad = 0
+round_dead_corner_total = 0
+round_dead_corner_bad = 0
+for repro_seed in (405634, 111111, 222222, 333333, 444444):
+    scene.wfc_seed = repro_seed
+    result = bpy.ops.object.generate_game_blueprint()
+    check(f"Round+Stairs repro (seed {repro_seed}): Blueprint FINISHED", result == {'FINISHED'}, str(result))
+    result = bpy.ops.object.generate_level_walls()
+    check(f"Round+Stairs repro (seed {repro_seed}): Walls FINISHED", result == {'FINISHED'}, str(result))
+    result = bpy.ops.object.generate_level_stairs()
+    check(
+        f"Round+Stairs repro (seed {repro_seed}): Stairs FINISHED or CANCELLED",
+        result in ({'FINISHED'}, {'CANCELLED'}), str(result),
+    )
+
+    repro_stair_objs = [o for o in bpy.data.objects if o.name.startswith(addon.STAIRS_OBJECT_NAME)]
+    repro_round_walls_objs = [o for o in bpy.data.objects if o.name.startswith(addon.WALLS_ROUND_OBJECT_NAME)]
+    repro_wall_aabbs = []
+    for o in repro_round_walls_objs:
+        repro_wall_aabbs.extend(per_box_aabbs(o, 8))
+    for stair_obj in repro_stair_objs:
+        for stair_box in per_box_aabbs(stair_obj, 8):
+            round_stair_overlap_total += 1
+            if any(aabb_overlap(stair_box, wb, eps=0.02) for wb in repro_wall_aabbs):
+                round_stair_overlap_bad += 1
+
+    repro_blueprint_obj = bpy.data.objects.get(addon.BLUEPRINT_OBJECT_NAME)
+    repro_tile_size = scene.wfc_tile_size
+    repro_fine_height = addon._fine_level_height(scene)
+    repro_walkable, repro_extra = addon._read_blueprint_points(
+        repro_blueprint_obj, repro_tile_size, repro_fine_height, ("room_id",),
+    )
+    repro_room_ids = repro_extra["room_id"]
+    repro_room_meta = json.loads(repro_blueprint_obj.get("gla_room_meta", "[]"))
+    for room_id, room in enumerate(repro_room_meta):
+        if room['shape'] != 'ROUND':
+            continue
+        rx0, ry0, rw, rl, rz = room['x'], room['y'], room['w'], room['l'], room['z']
+        for cellx in range(rx0, rx0 + rw):
+            for celly in range(ry0, ry0 + rl):
+                cell = (cellx, celly, rz)
+                if cell not in repro_walkable or repro_room_ids.get(cell) == room_id:
+                    continue
+                round_dead_corner_total += 1
+                cell_box = (
+                    cellx * repro_tile_size, (cellx + 1) * repro_tile_size,
+                    celly * repro_tile_size, (celly + 1) * repro_tile_size,
+                    rz * repro_fine_height, rz * repro_fine_height + 3.0,
+                )
+                if any(aabb_overlap(cell_box, wb, eps=0.3) for wb in repro_wall_aabbs):
+                    round_dead_corner_bad += 1
+
+check(
+    "Round+Stairs repro: no stair tread box overlaps a Round room's wall ring",
+    round_stair_overlap_bad == 0,
+    f"{round_stair_overlap_bad}/{round_stair_overlap_total} stair boxes overlap a round wall",
+)
+check(
+    "Round+Stairs repro: no corridor cell carved into a Round room's dead corner is sealed by its ring",
+    round_dead_corner_bad == 0,
+    f"{round_dead_corner_bad}/{round_dead_corner_total} dead-corner cells still walled in "
+    f"(dead_corner_total should be > 0 across 5 seeds, confirming this actually exercises the bug)",
 )
 
 # ==============================================================================

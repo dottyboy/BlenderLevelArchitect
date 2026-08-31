@@ -32,7 +32,7 @@ from bpy_extras.io_utils import ExportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 25, 0),
+    "version": (0, 25, 1),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -421,13 +421,33 @@ class WFC_Level_Solver:
     def _room_fits(self, x, y, rw, rl, z, margin=1):
         """A room fits if its footprint plus a 1-cell buffer (so rooms never
         touch and always get a wall between them) is entirely empty and in
-        bounds."""
+        bounds.
+
+        A Round room only carves cells inside its inscribed ellipse (see
+        _carve_room), so its own bounding-box corners are never marked
+        TILE_FLOOR and read as plain empty TILE_AIR above -- but its wall
+        RING (_build_round_room_walls_mesh) is still a real ellipse spanning
+        the room's FULL rectangle, cutting diagonally straight through those
+        "empty" corners. Without this second check, a new room or stairwell
+        could get placed into that dead corner (the grid genuinely has no
+        floor there) and later physically collide with the round wall ring
+        once it's built -- confirmed via a real user repro (stairs clipping
+        into a Round room's wall). So this also rejects any candidate whose
+        footprint overlaps an existing ROUND room's full reserved rectangle
+        at the same z, not just its actually-carved cells."""
         for xi in range(x - margin, x + rw + margin):
             for yi in range(y - margin, y + rl + margin):
                 if not self.in_bounds(xi, yi, z):
                     return False
                 if self.grid[xi][yi][z] != TILE_AIR:
                     return False
+        for room_index, room in enumerate(self.rooms):
+            if room['z'] != z or self.room_shapes.get(room_index) != 'ROUND':
+                continue
+            rx0, ry0 = room['x'], room['y']
+            rx1, ry1 = rx0 + room['w'], ry0 + room['l']
+            if x < rx1 and x + rw > rx0 and y < ry1 and y + rl > ry0:
+                return False
         return True
 
     def _room_size_for_floor(self, logical_floor):
@@ -4006,8 +4026,21 @@ def _build_round_room_floor_mesh(solver, tile_size, fine_level_height, room_shap
         world_z = room['z'] * fine_level_height + z_offset + epsilon
 
         x, y, rw, rl = room['x'], room['y'], room['w'], room['l']
-        cx = (x + rw / 2.0) * tile_size
-        cy = (y + rl / 2.0) * tile_size
+        # A grid cell xi is world-positioned/centered at xi*tile_size (see
+        # _build_wall_mesh's left/right = (x -+ 0.5)*tile_size), so the rw
+        # cells x..x+rw-1 have their TRUE world-space center at
+        # (x + (rw-1)/2.0)*tile_size -- matching _carve_room's own
+        # grid-space ellipse-membership test exactly (its cx is the same
+        # (rw-1)/2.0 average). The previous +rw/2.0 (no -1) put the world
+        # center half a tile off in both X and Y, which is small enough to
+        # go unnoticed most of the time but is a real, confirmed bug: it
+        # can leave a genuinely-carved corner cell just outside the disc's
+        # rim on one side while the ring/disc overreaches empty space by a
+        # whole half-tile on the opposite side -- the latter is what let a
+        # legitimately-placed stairwell (that never violates the room's
+        # own reserved rectangle) still get clipped by the ring.
+        cx = (x + (rw - 1) / 2.0) * tile_size
+        cy = (y + (rl - 1) / 2.0) * tile_size
         rx = (rw / 2.0) * tile_size
         ry = (rl / 2.0) * tile_size
 
@@ -4077,7 +4110,13 @@ def _build_round_room_walls_mesh(
         if room['shape'] != 'ROUND':
             continue
         x, y, rw, rl, z = room['x'], room['y'], room['w'], room['l'], room['z']
-        cx, cy = (x + rw / 2.0) * tile_size, (y + rl / 2.0) * tile_size
+        # See _build_round_room_floor_mesh's matching comment: a grid cell
+        # xi is world-centered at xi*tile_size, so the room's true
+        # world-space center uses (rw-1)/2.0, matching _carve_room's own
+        # grid-space ellipse test -- not +rw/2.0 (no -1), which is half a
+        # tile off and was letting the ring clip things just outside the
+        # room's actual reserved rectangle.
+        cx, cy = (x + (rw - 1) / 2.0) * tile_size, (y + (rl - 1) / 2.0) * tile_size
         rx, ry = (rw / 2.0) * tile_size, (rl / 2.0) * tile_size
 
         room_cells_here = [c for c, rid in room_id_grid.items() if rid == room_id and c[2] == z]
@@ -4107,6 +4146,52 @@ def _build_round_room_walls_mesh(
             py = (celly + 0.5) * tile_size
             angle = math.atan2((py - cy) / ry, (px - cx) / rx) % (2.0 * math.pi)
             open_edges.add(int(angle / (2.0 * math.pi / room_shape_sides)) % room_shape_sides)
+
+        # A Round room only carves cells inside its inscribed ellipse (see
+        # _carve_room), leaving its own bounding-box corners TILE_AIR --
+        # _room_fits now blocks a NEW room/stairwell from being placed
+        # there, but a straight-line corridor (_carve_corridor, no
+        # alternate routing, must never fail to connect) can still carve
+        # through that "empty" corner on its way somewhere else. The loop
+        # above never sees that cell (it's not one of this room's own
+        # carved cells), so without this second pass the ring would seal
+        # a real, walkable corridor behind a low wall the player would
+        # have to jump rather than walk through. Any walkable cell
+        # anywhere in the room's full rectangle that ISN'T this room's own
+        # floor forces its ring edge open, regardless of 4-connected
+        # adjacency to the carved ellipse.
+        dead_corner_positions = _room_shape_sides_wall_positions(cx, cy, rx, ry, room_shape_sides)
+        for cellx in range(x, x + rw):
+            for celly in range(y, y + rl):
+                cell = (cellx, celly, z)
+                if room_id_grid.get(cell) == room_id or cell not in walkable:
+                    continue
+                px0, py0 = cellx * tile_size, celly * tile_size
+                px1, py1 = px0 + tile_size, py0 + tile_size
+                # A tile-sized cell can be wide relative to the room's own
+                # radius (a small Round room's corner cell can span a large
+                # angular slice) -- sampling only the cell's center angle
+                # can land in a DIFFERENT bucket than the one its footprint
+                # actually crosses, leaving a neighboring closed edge still
+                # cutting through it (confirmed via a real repro). Sampling
+                # all 4 corners and opening every bucket any of them falls
+                # in is a safe over-approximation -- occasionally opens one
+                # extra edge, never leaves a real collision.
+                for px, py in ((px0, py0), (px1, py0), (px1, py1), (px0, py1)):
+                    angle = math.atan2((py - cy) / ry, (px - cx) / rx) % (2.0 * math.pi)
+                    open_edges.add(int(angle / (2.0 * math.pi / room_shape_sides)) % room_shape_sides)
+                # The reverse size mismatch: on a MINIMUM-size (3x3) Round
+                # room the radius can be small enough that a whole polygon
+                # edge -- both its rim vertices -- lies entirely INSIDE one
+                # grid cell's footprint, touching none of that cell's own
+                # corners either (confirmed via the same real repro). Catch
+                # that by opening both edges touching any rim vertex that
+                # falls inside this cell's rectangle.
+                for s in range(room_shape_sides):
+                    vx, vy = dead_corner_positions[s]
+                    if px0 <= vx <= px1 and py0 <= vy <= py1:
+                        open_edges.add(s)
+                        open_edges.add((s - 1) % room_shape_sides)
 
         z0 = z * fine_level_height + z_offsets.get(nearest_cell, 0.0)
         z1 = z0 + wall_height
@@ -4972,7 +5057,13 @@ def _build_round_room_doors_mesh(
         if room['shape'] != 'ROUND':
             continue
         x, y, rw, rl, z = room['x'], room['y'], room['w'], room['l'], room['z']
-        cx, cy = (x + rw / 2.0) * tile_size, (y + rl / 2.0) * tile_size
+        # See _build_round_room_floor_mesh's matching comment: a grid cell
+        # xi is world-centered at xi*tile_size, so the room's true
+        # world-space center uses (rw-1)/2.0, matching _carve_room's own
+        # grid-space ellipse test -- not +rw/2.0 (no -1), which is half a
+        # tile off and was letting the ring clip things just outside the
+        # room's actual reserved rectangle.
+        cx, cy = (x + (rw - 1) / 2.0) * tile_size, (y + (rl - 1) / 2.0) * tile_size
         rx, ry = (rw / 2.0) * tile_size, (rl / 2.0) * tile_size
 
         room_cells_here = [c for c, rid in room_id_grid.items() if rid == room_id and c[2] == z]
@@ -4998,6 +5089,45 @@ def _build_round_room_doors_mesh(
             py = (celly + 0.5) * tile_size
             angle = math.atan2((py - cy) / ry, (px - cx) / rx) % (2.0 * math.pi)
             open_edges.add(int(angle / (2.0 * math.pi / room_shape_sides)) % room_shape_sides)
+
+        # Same dead-corner fix as _build_round_room_walls_mesh -- a
+        # corridor that got carved into this room's own uncarved
+        # bounding-box corner (see _room_fits's docstring) is invisible to
+        # the loop above (it's not one of this room's own carved cells),
+        # so without this a doorway could be missing exactly where the
+        # wall ring now opens for that corridor.
+        dead_corner_positions = _room_shape_sides_wall_positions(cx, cy, rx, ry, room_shape_sides)
+        for cellx in range(x, x + rw):
+            for celly in range(y, y + rl):
+                cell = (cellx, celly, z)
+                if room_id_grid.get(cell) == room_id or cell not in walkable:
+                    continue
+                px0, py0 = cellx * tile_size, celly * tile_size
+                px1, py1 = px0 + tile_size, py0 + tile_size
+                # A tile-sized cell can be wide relative to the room's own
+                # radius (a small Round room's corner cell can span a large
+                # angular slice) -- sampling only the cell's center angle
+                # can land in a DIFFERENT bucket than the one its footprint
+                # actually crosses, leaving a neighboring closed edge still
+                # cutting through it (confirmed via a real repro). Sampling
+                # all 4 corners and opening every bucket any of them falls
+                # in is a safe over-approximation -- occasionally opens one
+                # extra edge, never leaves a real collision.
+                for px, py in ((px0, py0), (px1, py0), (px1, py1), (px0, py1)):
+                    angle = math.atan2((py - cy) / ry, (px - cx) / rx) % (2.0 * math.pi)
+                    open_edges.add(int(angle / (2.0 * math.pi / room_shape_sides)) % room_shape_sides)
+                # The reverse size mismatch: on a MINIMUM-size (3x3) Round
+                # room the radius can be small enough that a whole polygon
+                # edge -- both its rim vertices -- lies entirely INSIDE one
+                # grid cell's footprint, touching none of that cell's own
+                # corners either (confirmed via the same real repro). Catch
+                # that by opening both edges touching any rim vertex that
+                # falls inside this cell's rectangle.
+                for s in range(room_shape_sides):
+                    vx, vy = dead_corner_positions[s]
+                    if px0 <= vx <= px1 and py0 <= vy <= py1:
+                        open_edges.add(s)
+                        open_edges.add((s - 1) % room_shape_sides)
 
         z0 = z * level_height + z_offsets.get(nearest_cell, 0.0)
         z1 = z0 + door_height

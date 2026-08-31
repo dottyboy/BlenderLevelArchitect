@@ -3,6 +3,29 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.25.1
+
+- **Fixed: Round rooms could clip stairs, or wall off a corridor that should be walkable.** User
+  repro (a Round-room level with multiple Sub-Levels per Floor): stairs sometimes visibly clipped
+  through a nearby Round room's wall, and some corridors dead-ended at a low wall a player would
+  have to jump rather than walk through. Three real, independent bugs, all in the Round room wall
+  ring/floor disc/door frame machinery added in 0.23.0/0.24.0:
+  - A Round room only carves cells inside its inscribed ellipse, leaving its own bounding-box
+    corners empty -- room/stairwell placement treated that as free space (it genuinely has no
+    floor there), but the wall ring is a real ellipse spanning the room's FULL rectangle, cutting
+    straight through those corners. Room/stairwell placement now also reserves a Round room's full
+    rectangle, not just its carved cells.
+  - A corridor can still legitimately route through that same "empty" corner (corridors can't be
+    allowed to fail mid-carve) -- the wall ring and door-frame builders now also open wherever that
+    happens, instead of silently sealing a real, walkable corridor.
+  - The deeper root cause behind the actual clipping: the ring/disc/door builders computed a Round
+    room's world-space center half a tile off from where its cells are actually carved (an
+    off-by-one ported in from the sibling project, which uses a different grid convention) -- fixed
+    to match the grid-space ellipse test exactly.
+  - Added a dedicated multi-seed regression test (Round rooms + multi-floor Stairs together) --
+    the existing Round rooms test pins Height=1 (no stairs ever run), so this exact combination had
+    no guaranteed coverage before.
+
 ## 0.25.0
 
 - **New: Door panels + experimental UPBGE hinge physics.** Every ordinary doorway now gets a real
