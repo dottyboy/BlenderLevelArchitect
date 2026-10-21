@@ -4,7 +4,7 @@ Internal dev-facing doc: what's built, what's known-broken, what's next. Not for
 (see `dist/README.md` for that). Source of truth for the addon's actual behavior is always
 `levelArchitect_v2.py` — this file can drift out of date; the code can't.
 
-Current version: **0.33.0** (see `bl_info` in the source file).
+Current version: **0.34.0** (see `bl_info` in the source file).
 
 §2 (Development tree) was condensed 2026-08-21 — dropped the blow-by-blow investigation
 narrative and per-run stress-test numbers from older, fully-resolved entries, kept every
@@ -752,6 +752,17 @@ GN complexity there specifically.
       render (not one of the regular `generate_test_blends.py` scenarios, whose top-down framing is
       too zoomed-out to show doorway-level detail) confirmed the frame visibly follows the wall's
       curve right at the opening, not standing at a mismatched straight angle against it.
+
+- [x] **Castle package + story hooks (0.34.0).** `_castle_walk_cells` samples a 0.5 m grid against the same footprints
+      `_build_castle_mesh` uses (curtain-wall inset, tower circles + margin, keep box + margin, gate corridor |x| <= 1.1,
+      apron |x| <= 6); the keep/tower constants are duplicated from the mesh builder on purpose (change both).
+      Vampire side: `Dungeon.inject` adds a door prop to a STORY location at build time from the dungeon json's
+      `entrance_from`, so world.json and the story validator never see it (the validator rejects unknown `go`
+      targets); `links.exit_to` for the level's exit tile; walking back onto the entrance tile after leaving a 4 m
+      radius returns to the story location. Verified in the engine: `--dungeonlinktest` (chapel_crypt -> dungeon_crypt
+      -> back), `--dungeontest` on the castle (7 goals) and all story/arc replays still pass.
+      Open: castle interior (keep), tower floors in the walk data, several floors, props as Vampire assets, doors that
+      open, a story reason for each generated place.
 
 - [x] **Game package export + Vampire loader (0.33.0).** `_merge_cells_to_rects` (rows of runs, equal runs on
       consecutive rows stacked; exact), `_build_game_package` (pure data; engine axes via `_to_engine`),

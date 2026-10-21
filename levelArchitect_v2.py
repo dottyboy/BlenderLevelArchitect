@@ -32,7 +32,7 @@ from bpy_extras.io_utils import ExportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 33, 0),
+    "version": (0, 34, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -8601,6 +8601,124 @@ class OBJECT_OT_ExportGamePackage(bpy.types.Operator, ExportHelper):
         return {'FINISHED'}
 
 
+def _castle_walk_cells(width, depth, wall_t, tower_r, gate, keep, step=0.5, apron=8.0, tower_wall=0.55):
+    """Walkable ground of a castle (see _build_castle_mesh), in castle-local
+    Blender XY, as grid cells of `step` metres centred on multiples of step:
+    the courtyard inside the curtain walls minus the corner towers and the
+    keep, the gate passage, and an apron of open ground in front of the
+    gate. Every cell keeps >= 0.45 m clear of masonry. Returns a set of (i, j)."""
+    hx, hy = width / 2.0, depth / 2.0
+    m = 0.45
+    ks = max(6.0, min(width, depth) * 0.38)
+    kt = max(wall_t, 1.0)
+    kcx, kcy = 0.0, depth * 0.12
+    kb = ks / 2.0 + kt / 2.0 + 0.5
+    towers = [(-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)]
+    cells = set()
+    nx, ny = int(math.ceil((hx + apron) / step)) + 1, int(math.ceil((hy + apron) / step)) + 1
+    for i in range(-nx, nx + 1):
+        for j in range(-ny, ny + 1):
+            x, y = i * step, j * step
+            inside = abs(x) <= hx - wall_t / 2.0 - m and abs(y) <= hy - wall_t / 2.0 - m
+            if inside:
+                if any(math.hypot(x - tx, y - ty) < tower_r + m for tx, ty in towers):
+                    inside = False
+                if keep and abs(x - kcx) <= kb and abs(y - kcy) <= kb:
+                    inside = False
+            passage = gate and abs(x) <= 1.1 and -hy - apron <= y <= -hy + wall_t / 2.0 + m
+            outside_apron = gate and abs(x) <= 6.0 and -hy - apron <= y <= -hy - wall_t / 2.0 - m
+            if inside or passage or outside_apron:
+                cells.add((i, j))
+    return cells
+
+
+def _castle_package_lights(scene, loc):
+    """Torches beside the gate and in the courtyard corners (the glTF itself carries no lights)."""
+    hx, hy = scene.wfc_castle_width / 2.0, scene.wfc_castle_depth / 2.0
+    spots = [(-2.2, -hy - 0.9), (2.2, -hy - 0.9)]
+    spots += [(sx * (hx - 5.0), sy * (hy - 4.5)) for sx in (-1, 1) for sy in (-1, 1)]
+    return [{"pos": _to_engine(loc.x + x, loc.y + y, loc.z + 2.6), "color": [1.0, 0.55, 0.24], "energy_w": 80.0, "radius": 0.25}
+            for x, y in spots]
+
+
+def _build_castle_package(scene, castle_obj, glb_name=""):
+    """gla-export/1 description of a castle: walkable rectangles of its
+    ground (see _castle_walk_cells), an entrance at the far end of the apron
+    (or inside the courtyard when there is no gate), no lights. Positions
+    include the object's location, like the exported glTF."""
+    step = 0.5
+    loc = castle_obj.location
+    cells = _castle_walk_cells(
+        scene.wfc_castle_width, scene.wfc_castle_depth, scene.wfc_castle_wall_thickness,
+        scene.wfc_castle_tower_radius, scene.wfc_castle_gate, scene.wfc_castle_keep, step)
+    # the exported cell grid is in the glTF's world space: shift by the object's location (a multiple of step)
+    ox, oy = round(loc.x / step), round(loc.y / step)
+    cells = {(i + ox, j + oy) for i, j in cells}
+    rects = []
+    for x0, y0, x1, y1 in _merge_cells_to_rects(cells):
+        ex0, ex1 = (x0 - 0.5) * step, (x1 + 0.5) * step
+        ey0, ey1 = (y0 - 0.5) * step, (y1 + 0.5) * step
+        rects.append([round(ex0, 4), round(-ey1, 4), round(ex1, 4), round(-ey0, 4)])
+    hy = scene.wfc_castle_depth / 2.0
+    if scene.wfc_castle_gate:
+        entrance = (loc.x, loc.y - hy - 7.0)
+        exit_pt = (loc.x, loc.y - hy - 7.5)
+    else:
+        entrance = (loc.x, loc.y - hy / 2.0)
+        exit_pt = (loc.x, loc.y - hy / 2.0 - 0.5)
+    snap = lambda v: round(v / step) * step
+    return {
+        "format": GAME_PACKAGE_FORMAT,
+        "generator": "Game Level Architect " + ".".join(str(v) for v in bl_info["version"]),
+        "kind": "castle",
+        "seed": scene.wfc_seed,
+        "glb": glb_name,
+        "tile_size": step,
+        "interior": False,
+        "coordinates": "engine: x right, y up, z = -blender_y",
+        "floors": [{"z": 0, "y": round(loc.z, 4), "cells": len(cells), "walk_rects": rects}],
+        "entrance": {"floor": 0, "pos": _to_engine(snap(entrance[0]), snap(entrance[1]), loc.z)},
+        "exit": {"floor": 0, "pos": _to_engine(snap(exit_pt[0]), snap(exit_pt[1]), loc.z)},
+        "stairs": [], "rooms": [], "lights": _castle_package_lights(scene, loc),
+        "castle": {"width": scene.wfc_castle_width, "depth": scene.wfc_castle_depth,
+                   "ruin": scene.wfc_castle_ruin, "gate": scene.wfc_castle_gate, "keep": scene.wfc_castle_keep},
+    }
+
+
+class OBJECT_OT_ExportCastlePackage(bpy.types.Operator, ExportHelper):
+    """Exports the generated castle as glTF plus its JSON description (walkable
+    courtyard, gate passage and apron), the same "gla-export/1" format as a
+    level package."""
+    bl_idname = "object.export_castle_package"
+    bl_label = "Export Castle Package (glb + json)"
+    bl_options = {'REGISTER'}
+
+    filename_ext = ".glb"
+    filter_glob: StringProperty(default="*.glb", options={'HIDDEN'})
+
+    def execute(self, context):
+        scene = context.scene
+        castle = bpy.data.objects.get(CASTLE_OBJECT_NAME)
+        if castle is None:
+            self.report({'ERROR'}, "Generate a Castle first.")
+            return {'CANCELLED'}
+        if not hasattr(bpy.ops.export_scene, "gltf"):
+            self.report({'ERROR'}, "glTF exporter isn't available -- enable Import-Export: glTF 2.0.")
+            return {'CANCELLED'}
+        stem = os.path.splitext(self.filepath)[0]
+        previous = scene.wfc_export_binary
+        scene.wfc_export_binary = True
+        try:
+            _run_gltf_export(context, stem + ".glb", [castle], False)
+        finally:
+            scene.wfc_export_binary = previous
+        package = _build_castle_package(scene, castle, os.path.basename(stem) + ".glb")
+        with open(stem + ".json", "w", encoding="utf-8") as fh:
+            json.dump(package, fh, indent=1)
+        self.report({'INFO'}, f"Exported '{stem}.glb' and '{stem}.json' ({len(package['floors'][0]['walk_rects'])} walk rectangles).")
+        return {'FINISHED'}
+
+
 def _section(layout, idname, title, icon, default_closed=False):
     """A collapsible section with a native disclosure triangle (Blender's
     UILayout.panel(), added in 4.1) that remembers open/closed state on its
@@ -9108,6 +9226,9 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
         layout.label(text="Built at the 3D cursor.")
         layout.separator()
         _step_button(layout, "object.generate_level_castle", "Generate Castle", 'HOME', 'COLLECTION_COLOR_05')
+        pkg_row = layout.row(align=True)
+        pkg_row.operator("object.export_castle_package", text="Export Castle Package (glb + json)", icon='PACKAGE')
+        pkg_row.enabled = bpy.data.objects.get(CASTLE_OBJECT_NAME) is not None
 
     def _draw_tower_tab(self, context, layout):
         scene = context.scene
@@ -9204,6 +9325,7 @@ classes = (
     OBJECT_OT_GenerateLevelTower,
     OBJECT_OT_GenerateLevelCastle,
     OBJECT_OT_ExportGamePackage,
+    OBJECT_OT_ExportCastlePackage,
     OBJECT_OT_ExportLevelGLTF,
     OBJECT_OT_ExportLevelCollisionGLTF,
     OBJECT_OT_CopyLevelArchitectParams,

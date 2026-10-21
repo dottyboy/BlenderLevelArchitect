@@ -3,6 +3,18 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.34.0
+
+- **New: Export Castle Package (glb + json)** (Castle tab). The same "gla-export/1" format as a level
+  package, for the castle: walkable courtyard (minus the keep and the tower bases), the gate passage and an
+  open apron in front of the gate on a 0.5 m grid, an entrance at the far end of the apron, six torch lights
+  (both sides of the gate, courtyard corners). `kind: "castle"`, `interior: false` tell a loader to use a sky.
+  Every cell keeps 0.45 m clear of masonry.
+- Tests: format/kind, cell/rectangle consistency, and a ray from every walkable cell to each walkable
+  neighbour proving no wall stands between them (>500 pairs), no cell inside masonry, gate on/off entrance,
+  operator writing both files.
+- Used by Vampire Adventure as a playable location (`dungeon_castle`) -- see that project's README.
+
 ## 0.33.0
 
 - **New: Export Game Package (glb + json)** (Export tab). Besides the glTF it writes a JSON file

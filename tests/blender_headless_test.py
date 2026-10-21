@@ -2661,6 +2661,57 @@ with tempfile.TemporaryDirectory() as tmp_p:
         loaded_p = json.load(fh_p)
     check("Game package: json round-trips and references the glb by name", loaded_p["glb"] == "dungeon_test.glb" and loaded_p["floors"][0]["walk_rects"] == fl["walk_rects"])
 
+# Castle package: walkable courtyard + gate passage + apron, no cell touches masonry.
+scene.cursor.location = (0.0, 80.0, 0.0)
+scene.wfc_castle_width, scene.wfc_castle_depth, scene.wfc_castle_wall_thickness = 26.0, 20.0, 1.5
+scene.wfc_castle_tower_radius, scene.wfc_castle_gate, scene.wfc_castle_keep, scene.wfc_castle_ruin = 3.2, True, True, 0.0
+bpy.ops.object.generate_level_castle()
+cas = bpy.data.objects[addon.CASTLE_OBJECT_NAME]
+cpkg = addon._build_castle_package(scene, cas, "castle.glb")
+check("Castle package: format, kind, outdoor", cpkg["format"] == "gla-export/1" and cpkg["kind"] == "castle" and cpkg["interior"] is False)
+crects = cpkg["floors"][0]["walk_rects"]
+check("Castle package: has walk rectangles and an entrance in front of the gate", len(crects) >= 3 and cpkg["entrance"]["pos"][2] > -cas.location.y + 10.0 + 6.0)
+ccells = set()
+for r in crects:
+    for ix in range(int(round(r[0] / 0.5 + 0.5)), int(round(r[2] / 0.5 - 0.5)) + 1):
+        for iz in range(int(round(r[1] / 0.5 + 0.5)), int(round(r[3] / 0.5 - 0.5)) + 1):
+            ccells.add((ix, iz))
+check("Castle package: rectangles reproduce the cells exactly (count)", len(ccells) == cpkg["floors"][0]["cells"], f"{len(ccells)} vs {cpkg['floors'][0]['cells']}")
+# every pair of adjacent walkable cells must be connected without a wall in between, 1 m above the ground
+blocked = pairs = 0
+for (ix, iz) in ccells:
+    for dix, diz in ((1, 0), (0, 1)):
+        if (ix + dix, iz + diz) not in ccells:
+            continue
+        pairs += 1
+        # engine (x, z) -> blender local (x, -z) minus the object's location
+        o = Vector((ix * 0.5 - cas.location.x, -iz * 0.5 - cas.location.y, 1.0))
+        d = Vector((dix, -diz, 0.0))
+        if cas.ray_cast(o, d, distance=0.5 * 0.98)[0]:
+            blocked += 1
+check("Castle package: no wall between any two adjacent walkable cells", pairs > 500 and blocked == 0, f"{blocked}/{pairs}")
+# no cell inside masonry: ray down from above must hit the courtyard/apron? courtyard slab only; apron has no mesh -> just no wall at 1 m
+inside_wall = 0
+for (ix, iz) in list(ccells)[::7]:
+    o = Vector((ix * 0.5 - cas.location.x - 0.4, -iz * 0.5 - cas.location.y, 1.0))
+    # a point is inside a wall when a ray in +x and -x both hit within 0.3 m with opposing normals; cheaper: sample the 4 directions at 0.4 m
+    for ddx, ddy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        o = Vector((ix * 0.5 - cas.location.x, -iz * 0.5 - cas.location.y, 1.0))
+        h = cas.ray_cast(o, Vector((ddx, ddy, 0)), distance=0.4)
+        if h[0] and h[2].dot(Vector((ddx, ddy, 0))) > 0:  # we are behind a face: inside a solid
+            inside_wall += 1
+check("Castle package: no walkable cell lies inside masonry", inside_wall == 0, str(inside_wall))
+cpkg2_cells = {}
+scene.wfc_castle_gate = False
+cas2_pkg = addon._build_castle_package(scene, cas, "x.glb")
+check("Castle package: Gate off puts the entrance inside the courtyard", abs(cas2_pkg["entrance"]["pos"][2] + cas.location.y) < 10.0)
+scene.wfc_castle_gate = True
+with tempfile.TemporaryDirectory() as tmp_c:
+    out_c = os.path.join(tmp_c, "castle_test.glb")
+    result = bpy.ops.object.export_castle_package(filepath=out_c)
+    check("Castle package: export operator FINISHED and both files exist",
+          result == {'FINISHED'} and os.path.getsize(out_c) > 10_000 and os.path.exists(os.path.join(tmp_c, "castle_test.json")), str(result))
+
 # glTF round trip embeds the packed textures.
 with tempfile.TemporaryDirectory() as tmp:
     path = os.path.join(tmp, "tower.glb")
