@@ -4,7 +4,7 @@ Internal dev-facing doc: what's built, what's known-broken, what's next. Not for
 (see `dist/README.md` for that). Source of truth for the addon's actual behavior is always
 `levelArchitect_v2.py` — this file can drift out of date; the code can't.
 
-Current version: **0.34.0** (see `bl_info` in the source file).
+Current version: **0.35.0** (see `bl_info` in the source file).
 
 §2 (Development tree) was condensed 2026-08-21 — dropped the blow-by-blow investigation
 narrative and per-run stress-test numbers from older, fully-resolved entries, kept every
@@ -753,6 +753,10 @@ GN complexity there specifically.
       too zoomed-out to show doorway-level detail) confirmed the frame visibly follows the wall's
       curve right at the opening, not standing at a mismatched straight angle against it.
 
+- [x] **Props in the package (0.35.0).** Props op stores `gla_props` on the decoration object; the package turns it into
+      `props` (engine axes). Architect props face +X; Vampire models face +Z, so a loader rotates by yaw + 90 deg.
+      Vampire blockers only for the big ones (a table, coffin, tomb...), none for chairs/candelabra, and `--dungeontest`
+      still reaches every room centre.
 - [x] **Castle package + story hooks (0.34.0).** `_castle_walk_cells` samples a 0.5 m grid against the same footprints
       `_build_castle_mesh` uses (curtain-wall inset, tower circles + margin, keep box + margin, gate corridor |x| <= 1.1,
       apron |x| <= 6); the keep/tower constants are duplicated from the mesh builder on purpose (change both).

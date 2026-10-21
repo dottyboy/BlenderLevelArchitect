@@ -3,6 +3,14 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.35.0
+
+- **Game package lists the decoration placements.** The JSON now has `props` (kind, engine position, yaw) and
+  `wall_height`, taken from a `gla_props` custom property the Props step stores on the decoration object. The glb
+  still contains the baked prop mesh; an engine that has its own models can ignore the mesh and place those
+  instead (Vampire Adventure does: crates, columns, coffins, tombs, tables, chairs, beds, shelves, chests,
+  barrels, candelabra).
+
 ## 0.34.0
 
 - **New: Export Castle Package (glb + json)** (Castle tab). The same "gla-export/1" format as a level

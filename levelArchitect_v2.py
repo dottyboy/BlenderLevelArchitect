@@ -32,7 +32,7 @@ from bpy_extras.io_utils import ExportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 34, 0),
+    "version": (0, 35, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -7096,6 +7096,8 @@ class OBJECT_OT_GenerateLevelProps(bpy.types.Operator):
                 decorations, tile_size, PROPS_DECORATION_OBJECT_NAME, uv_tile_size=scene.wfc_uv_tile_size,
             )
             decoration_obj = bpy.data.objects.new(PROPS_DECORATION_OBJECT_NAME, decoration_mesh)
+            # the placement list itself, so an engine can swap in its own models (see _build_game_package)
+            decoration_obj["gla_props"] = json.dumps([[round(c, 4) for c in d[:3]] + [d[3], round(d[4], 4)] for d in decorations])
             decoration_collection.objects.link(decoration_obj)
             decoration_mesh.materials.append(get_or_create_prop_material())
             _add_viewport_color_attribute(decoration_mesh)
@@ -8541,6 +8543,11 @@ def _build_game_package(scene, blueprint_obj, glb_name=""):
         loc = obj.matrix_world.translation
         lights.append({"pos": _to_engine(loc.x, loc.y, loc.z), "color": [round(c, 4) for c in obj.data.color],
                        "energy_w": round(obj.data.energy, 3), "radius": round(obj.data.shadow_soft_size, 3)})
+    props = []
+    deco = bpy.data.objects.get(PROPS_DECORATION_OBJECT_NAME)
+    if deco is not None and deco.get("gla_props"):
+        for x, y, z, kind, rot in json.loads(deco["gla_props"]):
+            props.append({"kind": kind, "pos": _to_engine(x, y, z), "yaw": rot})
     return {
         "format": GAME_PACKAGE_FORMAT,
         "generator": "Game Level Architect " + ".".join(str(v) for v in bl_info["version"]),
@@ -8548,6 +8555,8 @@ def _build_game_package(scene, blueprint_obj, glb_name=""):
         "glb": glb_name,
         "tile_size": ts,
         "level_height": fine_h,
+        "wall_height": scene.wfc_wall_height,
+        "props": props,
         "coordinates": "engine: x right, y up, z = -blender_y",
         "floors": floors,
         "entrance": marker(TILE_ENTRANCE),

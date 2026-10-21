@@ -2650,6 +2650,11 @@ if pkg["lights"]:
     ref = L0[0].matrix_world.translation
     check("Game package: light positions use engine axes (x, z-up -> y, -y -> z)",
           any(abs(l["pos"][0] - ref.x) < 1e-3 and abs(l["pos"][1] - ref.z) < 1e-3 and abs(l["pos"][2] + ref.y) < 1e-3 for l in pkg["lights"]))
+dec_obj_p = bpy.data.objects.get(addon.PROPS_DECORATION_OBJECT_NAME)
+check("Game package: decoration placements are listed (kind, engine position, yaw) and match the generated pieces",
+      dec_obj_p is not None and len(pkg["props"]) == len(json.loads(dec_obj_p["gla_props"])) > 0
+      and all(set(p_) == {"kind", "pos", "yaw"} for p_ in pkg["props"]), str(len(pkg["props"])))
+check("Game package: wall height is carried", abs(pkg["wall_height"] - scene.wfc_wall_height) < 1e-6)
 check("Game package: rooms are listed with engine-space rectangles", len(pkg["rooms"]) >= 3 and all(r["rect"][2] > r["rect"][0] and r["rect"][3] > r["rect"][1] for r in pkg["rooms"]))
 with tempfile.TemporaryDirectory() as tmp_p:
     out_p = os.path.join(tmp_p, "dungeon_test.glb")
