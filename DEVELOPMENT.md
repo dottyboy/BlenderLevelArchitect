@@ -4,7 +4,7 @@ Internal dev-facing doc: what's built, what's known-broken, what's next. Not for
 (see `dist/README.md` for that). Source of truth for the addon's actual behavior is always
 `levelArchitect_v2.py` — this file can drift out of date; the code can't.
 
-Current version: **0.26.0** (see `bl_info` in the source file).
+Current version: **0.27.0** (see `bl_info` in the source file).
 
 §2 (Development tree) was condensed 2026-08-21 — dropped the blow-by-blow investigation
 narrative and per-run stress-test numbers from older, fully-resolved entries, kept every
@@ -752,6 +752,25 @@ GN complexity there specifically.
       render (not one of the regular `generate_test_blends.py` scenarios, whose top-down framing is
       too zoomed-out to show doorway-level detail) confirmed the frame visibly follows the wall's
       curve right at the opening, not standing at a mismatched straight angle against it.
+
+- [x] **Round Tower (0.27.0).** Replaces the "brick-by-brick + modifier" idea after a prototype showed
+      it costs ~8 400 vertices for one 9 m tower. Section 7 of `levelArchitect_v2.py`: `_TowerBuilder`
+      builds a smooth shell (outer/inner skins in cylindrical UVs, one tall quad per plain column,
+      finer columns only over openings, vertical rings only where an opening needs them -- T-junctions
+      are collinear so they don't crack) with a numpy-generated brick albedo+normal image
+      (`_tower_brick_images`, 1024 px tile, rows tile horizontally, packed into the .blend). Openings are
+      cut by arch-shaped column boundaries (round arch = half ellipse; slit = rect) with reveal quads;
+      frames/voussoirs/plinth/cornice/merlons are wedge solids in cylindrical coordinates. Faces are
+      oriented by construction (`_TowerMesh.poly` flips a face to point at a given direction), so the
+      outward-normal check in the headless suite passes without per-builder winding tables.
+      Gotchas found: (1) changing `colorspace_settings` AFTER writing a generated image's pixels
+      regenerates it to blank black -- set it first; (2) `image.pixels` is linear, so the display-space
+      palette is raised to 2.2 for the sRGB image; (3) `bpy.ops` raises RuntimeError (not CANCELLED) when
+      an operator reports an ERROR. Verified by ray casts through the door, outward/inward normals,
+      vertex budgets per detail level, and a glb round-trip. Open: interior floors + spiral stairs,
+      tower as a room type inside a generated level (needs room reservation like Round rooms),
+      taper, per-detail LOD measured in an engine rather than in vertices, an actual dedicated
+      brick texture shipped in Textures/ instead of the generated one.
 
 - [x] **Windows + themed props (0.26.0).** Cross-pollination from the Vampire Adventure project.
       Windows: see §4 entry. Props: `_composite_prop_parts` defines each new kind as box/cylinder

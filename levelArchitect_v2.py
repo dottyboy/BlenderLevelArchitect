@@ -32,7 +32,7 @@ from bpy_extras.io_utils import ExportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 26, 0),
+    "version": (0, 27, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -3753,7 +3753,7 @@ class OBJECT_OT_ExportLevelGLTF(bpy.types.Operator, ExportHelper):
         base_names = (
             BLUEPRINT_OBJECT_NAME, ROUND_FLOOR_OBJECT_NAME, WALLS_OBJECT_NAME, WALLS_ROUND_OBJECT_NAME,
             STAIRS_OBJECT_NAME, DOORS_OBJECT_NAME, DOORS_ROUND_OBJECT_NAME, PROPS_TORCH_OBJECT_NAME,
-            PROPS_DECORATION_OBJECT_NAME,
+            PROPS_DECORATION_OBJECT_NAME, TOWER_OBJECT_NAME,
         )
         targets = _gltf_export_targets(base_names, scene.wfc_export_include_lights)
 
@@ -6833,6 +6833,481 @@ class OBJECT_OT_GenerateLevelProps(bpy.types.Operator):
         return {'FINISHED'}
 
 
+# ==============================================================================
+# 7. ROUND TOWER (brick-textured shell + real hard-surface details)
+# ==============================================================================
+# A round room / tower is NOT modelled brick by brick (a 9 m tower needs ~1400
+# bricks, ~8 000 vertices, and still reads ragged). Instead:
+#   * the wall is a smooth cylindrical shell (outer + inner skin) carrying a
+#     procedural brick albedo + normal map -- bricks, joints and per-brick
+#     variation cost zero geometry;
+#   * everything that defines the SILHOUETTE stays real geometry: door/window
+#     openings are cut into the shell (round arch, lancet-free rect slits) with
+#     reveals, and framed with voussoir/jamb blocks; plinth, cornice and
+#     battlements are wedge blocks; scattered proud stones break up the surface.
+# Brick Detail picks how much of the second group is built (Low/Medium/High).
+# All maths is plain Python (no Geometry Nodes), baked, and exports to glTF
+# like every other part of the addon. See DEVELOPMENT.md section 2 (0.27.0).
+TOWER_OBJECT_NAME = "Procedural_Level_Tower"
+TOWER_TAU = 2.0 * math.pi
+TOWER_TILE_W = 2.4
+TOWER_ROW_H = 0.26
+TOWER_ROWS = 8
+
+
+def _tower_brick_images():
+    """(albedo, normal) procedural brick images, generated once per session
+    with numpy and packed into the .blend so glTF export embeds them.
+    Returns None when numpy is unavailable (callers fall back to a flat
+    color) -- Blender ships numpy, so that only happens in stub/offline
+    runs."""
+    alb = bpy.data.images.get("LA_Tower_Brick_Albedo")
+    nrm = bpy.data.images.get("LA_Tower_Brick_Normal")
+    if alb is not None and nrm is not None:
+        return alb, nrm
+    try:
+        import numpy as np
+    except ImportError:
+        return None
+    W = 1024
+    tile_h = TOWER_ROWS * TOWER_ROW_H
+    H = int(round(W * tile_h / TOWER_TILE_W))
+    ppm = W / TOWER_TILE_W
+    rng = np.random.default_rng(3)
+    bid = np.zeros((H, W), dtype=np.int32)
+    d_edge = np.zeros((H, W), dtype=np.float32)
+    yy, xx = np.mgrid[0:H, 0:W]
+    vals = []
+    for r in range(TOWER_ROWS):
+        y0, y1 = int(round(r * TOWER_ROW_H * ppm)), int(round((r + 1) * TOWER_ROW_H * ppm))
+        lens, tot = [], 0.0
+        while tot < TOWER_TILE_W - 0.25:
+            l = float(rng.choice([0.45, 0.6, 0.75, 0.9, 1.1]))
+            lens.append(l)
+            tot += l
+        lens = np.array(lens) * TOWER_TILE_W / sum(lens)
+        edges = np.concatenate([[0], np.cumsum(lens)]) * ppm
+        shift = rng.uniform(0, TOWER_TILE_W) * ppm
+        for k in range(len(lens)):
+            x0, x1 = edges[k] + shift, edges[k + 1] + shift
+            xs = (xx[y0:y1] - x0) % W  # wraps, so every row tiles horizontally
+            inside = xs < (x1 - x0)
+            bid_rows, d_rows = bid[y0:y1], d_edge[y0:y1]
+            bid_rows[inside] = len(vals)
+            dx = np.minimum(xs, (x1 - x0) - 1 - xs)
+            dy = np.minimum(yy[y0:y1] - y0, y1 - 1 - yy[y0:y1])
+            d_rows[inside] = np.minimum(dx, dy)[inside]
+            vals.append((rng.uniform(0.82, 1.0), rng.uniform(-1, 1), rng.uniform(-1, 1)))
+    vals = np.array(vals, dtype=np.float32)
+    hv, tint, tint2 = vals[bid, 0], vals[bid, 1], vals[bid, 2]
+    joint, bevel = 0.011 * ppm, 0.016 * ppm
+    t = np.clip((d_edge - joint) / bevel, 0, 1)
+    height = t * t * (3 - 2 * t) * hv
+    noise = rng.normal(0, 1, (H, W)).astype(np.float32)
+    for _ in range(2):
+        noise = (noise + np.roll(noise, 1, 0) + np.roll(noise, -1, 0) + np.roll(noise, 1, 1) + np.roll(noise, -1, 1)) / 5
+    height = height + noise * 0.15
+    base = np.stack([0.58 + 0.08 * tint + 0.03 * tint2, 0.52 + 0.06 * tint, 0.46 + 0.05 * tint - 0.02 * tint2], -1)
+    base *= (0.80 + 0.40 * (hv[..., None] - 0.82) / 0.18)
+    base *= (1 + noise[..., None] * 0.5)
+    mortar = np.array([0.20, 0.19, 0.17])
+    albedo = np.where((d_edge < joint + 0.5)[..., None], mortar, base)
+    albedo = np.clip(albedo * (0.55 + 0.45 * np.clip(height * 1.6, 0, 1))[..., None], 0, 1)
+    dhx = (np.roll(height, -1, 1) - np.roll(height, 1, 1)) * 0.5
+    dhy = (np.roll(height, -1, 0) - np.roll(height, 1, 0)) * 0.5
+    nrm_arr = np.stack([-dhx * 5.0, -dhy * 5.0, np.ones_like(height)], -1)
+    nrm_arr /= np.linalg.norm(nrm_arr, axis=-1, keepdims=True)
+    nrm_arr = nrm_arr * 0.5 + 0.5
+
+    def make(name, arr, colorspace):
+        img = bpy.data.images.new(name, W, H, alpha=True)
+        # Colorspace first: changing it AFTER writing pixels regenerates a
+        # generated image back to blank black.
+        img.colorspace_settings.name = colorspace
+        if colorspace == 'sRGB':
+            arr = np.power(arr, 2.2)  # pixels[] is linear; the palette above is display-space
+        rgba = np.concatenate([arr, np.ones((H, W, 1))], -1).astype(np.float32)
+        img.pixels.foreach_set(rgba.ravel())
+        img.update()
+        img.pack()
+        return img
+    return make("LA_Tower_Brick_Albedo", albedo, 'sRGB'), make("LA_Tower_Brick_Normal", nrm_arr, 'Non-Color')
+
+
+def get_or_create_tower_brick_material():
+    existing = bpy.data.materials.get("LA_Tower_Brick")
+    if existing is not None:
+        return existing
+    images = _tower_brick_images()
+    if images is None:
+        return _get_or_create_named_material("LA_Tower_Brick", "TowerBrick.png", "3a3028")
+    mat = bpy.data.materials.new("LA_Tower_Brick")
+    mat.use_nodes = True
+    nodes, links = mat.node_tree.nodes, mat.node_tree.links
+    nodes.clear()
+    out_node = nodes.new("ShaderNodeOutputMaterial")
+    bsdf = nodes.new("ShaderNodeBsdfPrincipled")
+    tex_a = nodes.new("ShaderNodeTexImage")
+    tex_a.image = images[0]
+    tex_n = nodes.new("ShaderNodeTexImage")
+    tex_n.image = images[1]
+    nmap = nodes.new("ShaderNodeNormalMap")
+    _set_input(bsdf, 'Roughness', 0.9)
+    links.new(tex_a.outputs['Color'], bsdf.inputs['Base Color'])
+    links.new(tex_n.outputs['Color'], nmap.inputs['Color'])
+    links.new(nmap.outputs['Normal'], bsdf.inputs['Normal'])
+    links.new(bsdf.outputs['BSDF'], out_node.inputs['Surface'])
+    mat.diffuse_color = (0.46, 0.41, 0.36, 1.0)
+    return mat
+
+
+def get_or_create_tower_stone_material():
+    return _get_or_create_named_material("LA_Tower_Stone", "TowerStone.png", "3a3632")
+
+
+def _cyl_point(a, r, z):
+    return (r * math.cos(a), r * math.sin(a), z)
+
+
+class _TowerMesh:
+    """Shared-vertex polygon soup with per-loop UVs, per-face material and
+    smooth flag. `poly` orients each face so its normal points `toward`
+    (a world direction), which makes winding correct by construction --
+    the same outward-normal guarantee tests/blender_headless_test.py checks
+    for the other builders."""
+
+    def __init__(self):
+        self.verts, self.index = [], {}
+        self.faces, self.uvs, self.mats, self.smooth = [], [], [], []
+
+    def _vid(self, group, p):
+        key = (group, round(p[0], 4), round(p[1], 4), round(p[2], 4))
+        i = self.index.get(key)
+        if i is None:
+            i = len(self.verts)
+            self.verts.append(tuple(p))
+            self.index[key] = i
+        return i
+
+    def poly(self, group, pts, uvs, toward, mat=0, smooth=False):
+        nx = ny = nz = 0.0
+        n_pts = len(pts)
+        for i in range(n_pts):
+            a, b = pts[i], pts[(i + 1) % n_pts]
+            nx += (a[1] - b[1]) * (a[2] + b[2])
+            ny += (a[2] - b[2]) * (a[0] + b[0])
+            nz += (a[0] - b[0]) * (a[1] + b[1])
+        if nx * nx + ny * ny + nz * nz < 1e-18:
+            return
+        if nx * toward[0] + ny * toward[1] + nz * toward[2] < 0:
+            pts, uvs = pts[::-1], uvs[::-1]
+        ids = [self._vid(group, p) for p in pts]
+        if len(set(ids)) < 3:
+            return
+        self.faces.append(ids)
+        self.uvs.append(uvs)
+        self.mats.append(mat)
+        self.smooth.append(smooth)
+
+    def to_mesh(self, name):
+        mesh = bpy.data.meshes.new(name + "_Mesh")
+        mesh.from_pydata(self.verts, [], self.faces)
+        mesh.update()
+        uv_layer = mesh.uv_layers.new(name="UVMap")
+        li = 0
+        for poly, uvs, mat, sm in zip(mesh.polygons, self.uvs, self.mats, self.smooth):
+            poly.material_index = mat
+            poly.use_smooth = sm
+            for uv in uvs:
+                uv_layer.data[li].uv = uv
+                li += 1
+        return mesh
+
+
+class _TowerBuilder:
+    """Builds one round tower. Openings are (angle, width, sill, height, kind)
+    with kind 'arch' (round-headed, e.g. doors) or 'rect' (slit windows)."""
+
+    DETAIL_STONES = {'LOW': 0, 'MEDIUM': 70, 'HIGH': 320}
+
+    def __init__(self, radius, height, wall, battlements=True, detail='MEDIUM', seed=1):
+        self.R, self.H, self.wall = radius, height, wall
+        self.tile_w, self.tile_h = TOWER_TILE_W, TOWER_ROWS * TOWER_ROW_H
+        self.Ko = max(1, round(TOWER_TAU * radius / self.tile_w))
+        self.Ki = max(1, round(TOWER_TAU * (radius - wall) / self.tile_w))
+        self.battle = battlements
+        self.detail = detail
+        self.rng = random.Random(seed)
+        self.mb = _TowerMesh()
+        self.Hs = height - (1.0 if battlements else 0.0)  # shell height (battlements sit on top)
+        self.openings = []
+
+    # -- mapping helpers
+    def _u(self, a, K):
+        return a / TOWER_TAU * K
+
+    def _v(self, z):
+        return z / self.tile_h
+
+    def add_opening(self, deg, width, sill, height, kind='arch'):
+        ac = math.radians(deg)
+        half = width / 2.0 / self.R
+        # keep the whole opening inside (0, 2*pi): the shell is built as one angular sweep
+        ac = min(max(ac, half + 0.02), TOWER_TAU - half - 0.02)
+        spring = sill + (max(height - width / 2.0, 0.2) if kind == 'arch' else height)
+        apex = spring + (width / 2.0 if kind == 'arch' else 0.0)
+        if apex + 0.4 > self.Hs or width >= self.R * 1.2:
+            return False
+        for o in self.openings:  # no overlapping openings
+            sep = abs(ac - o['ac']) * self.R
+            if sep < (width + o['w']) / 2.0 + 0.6 and sill < o['apex'] + 0.4 and o['sill'] < apex + 0.4:
+                return False
+        self.openings.append(dict(ac=ac, w=width, sill=sill, spring=spring, apex=apex, kind=kind,
+                                  a0=ac - half, a1=ac + half))
+        return True
+
+    def _arch_h(self, o, s):
+        if o['kind'] != 'arch':
+            return o['spring']
+        s = max(-o['w'] / 2.0, min(o['w'] / 2.0, s))
+        return o['spring'] + math.sqrt(max(0.0, (o['w'] / 2.0) ** 2 - s * s))
+
+    # -- smooth textured shell, outer or inner skin
+    def _shell(self, outer):
+        R = self.R if outer else self.R - self.wall
+        K = self.Ko if outer else self.Ki
+        group = 'out' if outer else 'in'
+        hard = {0.0, TOWER_TAU}
+        for o in self.openings:
+            hard.update((o['a0'], o['a1']))
+        hard = sorted(hard)
+        columns = []
+        for a0, a1 in zip(hard[:-1], hard[1:]):
+            op = next((o for o in self.openings if o['a0'] - 1e-6 <= a0 and a1 <= o['a1'] + 1e-6), None)
+            k = max(1, round((a1 - a0) * R / 0.5)) if op is None else (6 if op['kind'] == 'arch' else 1)
+            for i in range(k):
+                columns.append((a0 + (a1 - a0) * i / k, a0 + (a1 - a0) * (i + 1) / k, op))
+
+        def face(az):
+            pts = [_cyl_point(a, R, z) for a, z in az]
+            uvs = [(self._u(a, K), self._v(z)) for a, z in az]
+            cx = sum(p[0] for p in pts) / len(pts)
+            cy = sum(p[1] for p in pts) / len(pts)
+            sgn = 1.0 if outer else -1.0
+            self.mb.poly(group, pts, uvs, (cx * sgn, cy * sgn, 0.0), 0, True)
+
+        Hs = self.Hs
+        for a0, a1, op in columns:
+            if op is None:
+                face([(a0, 0), (a1, 0), (a1, Hs), (a0, Hs)])
+                continue
+            top = op['apex'] + (0.2 if op['kind'] == 'arch' else 0.0)
+            if op['sill'] > 1e-6:
+                face([(a0, 0), (a1, 0), (a1, op['sill']), (a0, op['sill'])])
+            if op['kind'] == 'arch':
+                h0 = self._arch_h(op, (a0 - op['ac']) * self.R)
+                h1 = self._arch_h(op, (a1 - op['ac']) * self.R)
+                face([(a0, h0), (a1, h1), (a1, top), (a0, top)])
+            if top < Hs - 1e-6:
+                face([(a0, top), (a1, top), (a1, Hs), (a0, Hs)])
+
+    def _reveals(self):
+        Ro, Ri = self.R, self.R - self.wall
+        for o in self.openings:
+            a0, a1 = o['a0'], o['a1']
+            hole = _cyl_point(o['ac'], (Ro + Ri) / 2.0, (o['sill'] + o['spring']) / 2.0)
+
+            def quad(pa, pb):
+                pts = [_cyl_point(pa[0], Ro, pa[1]), _cyl_point(pb[0], Ro, pb[1]),
+                       _cyl_point(pb[0], Ri, pb[1]), _cyl_point(pa[0], Ri, pa[1])]
+                cx = sum(p[0] for p in pts) / 4.0
+                cy = sum(p[1] for p in pts) / 4.0
+                cz = sum(p[2] for p in pts) / 4.0
+                uvs = [(self._u(pa[0], self.Ko), self._v(pa[1])), (self._u(pb[0], self.Ko), self._v(pb[1])),
+                       (self._u(pb[0], self.Ko), self._v(pb[1]) + 0.2), (self._u(pa[0], self.Ko), self._v(pa[1]) + 0.2)]
+                self.mb.poly('rev', pts, uvs, (hole[0] - cx, hole[1] - cy, hole[2] - cz), 0, False)
+
+            for a in (a0, a1):
+                quad((a, o['sill']), (a, o['spring']))
+            if o['kind'] == 'arch':
+                prev = (a0, o['spring'])
+                for i in range(1, 7):
+                    a = a0 + (a1 - a0) * i / 6
+                    cur = (a, self._arch_h(o, (a - o['ac']) * self.R))
+                    quad(prev, cur)
+                    prev = cur
+            else:
+                quad((a0, o['spring']), (a1, o['spring']))
+            quad((a0, o['sill']), (a1, o['sill']))
+
+    # -- dressed-stone blocks
+    def _solid(self, corners, mat=1):
+        """corners: 8 (a, z, r): bottom four (CCW as seen from above) then top four."""
+        pts = [_cyl_point(a, r, z) for a, z, r in corners]
+        cx = sum(p[0] for p in pts) / 8.0
+        cy = sum(p[1] for p in pts) / 8.0
+        cz = sum(p[2] for p in pts) / 8.0
+        group = 'b%d' % len(self.mb.faces)
+        for f in ((0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)):
+            fp = [pts[i] for i in f]
+            fx = sum(p[0] for p in fp) / 4.0
+            fy = sum(p[1] for p in fp) / 4.0
+            fz = sum(p[2] for p in fp) / 4.0
+            uvs = [(self._u(corners[i][0], self.Ko), self._v(corners[i][1])) for i in f]
+            self.mb.poly(group, fp, uvs, (fx - cx, fy - cy, fz - cz), mat, False)
+
+    def _wedge(self, a0, a1, r0, r1, z0, z1, mat=1):
+        self._solid([(a0, z0, r0), (a1, z0, r0), (a1, z0, r1), (a0, z0, r1),
+                     (a0, z1, r0), (a1, z1, r0), (a1, z1, r1), (a0, z1, r1)], mat)
+
+    def _frames(self):
+        Ro, proud = self.R, 0.06
+        for o in self.openings:
+            fw = 0.26 if o['kind'] == 'arch' else 0.18
+            ac, w = o['ac'], o['w']
+
+            def blk(s0, s1, z0, z1, r1=Ro + proud):
+                self._wedge(ac + s0 / Ro, ac + s1 / Ro, Ro - 0.02, r1, z0, z1)
+
+            z, i = o['sill'], 0
+            while z < o['spring'] - 1e-4:
+                hh = min(0.34, o['spring'] - z)
+                ext = fw + (0.12 if i % 2 else 0.0)
+                blk(-w / 2 - ext, -w / 2, z, z + hh)
+                blk(w / 2, w / 2 + ext, z, z + hh)
+                z += hh
+                i += 1
+            if o['kind'] == 'arch':
+                ra, n = w / 2.0, 9
+                for k in range(n):
+                    t0, t1 = math.pi * k / n, math.pi * (k + 1) / n
+                    rr = (ra, ra + fw + (0.1 if k % 2 else 0.0))
+
+                    def pt(t, r):
+                        return (r * math.cos(t), o['spring'] + r * math.sin(t))
+                    (x00, z00), (x01, z01) = pt(t0, rr[0]), pt(t0, rr[1])
+                    (x10, z10), (x11, z11) = pt(t1, rr[0]), pt(t1, rr[1])
+                    r0, r1 = Ro - 0.02, Ro + proud
+                    self._solid([(ac + x00 / Ro, z00, r0), (ac + x10 / Ro, z10, r0), (ac + x11 / Ro, z11, r0), (ac + x01 / Ro, z01, r0),
+                                 (ac + x00 / Ro, z00, r1), (ac + x10 / Ro, z10, r1), (ac + x11 / Ro, z11, r1), (ac + x01 / Ro, z01, r1)])
+            else:
+                blk(-w / 2 - fw, w / 2 + fw, o['spring'], o['spring'] + 0.3)
+            blk(-w / 2 - fw - 0.05, w / 2 + fw + 0.05, o['sill'] - 0.14, o['sill'], Ro + proud + 0.08)
+
+    def _rings(self):
+        Ro = self.R
+        n = max(24, round(TOWER_TAU * Ro / 0.6))
+        doors = [o for o in self.openings if o['sill'] < 0.2]
+        for k in range(n):
+            a0, a1 = TOWER_TAU * k / n, TOWER_TAU * (k + 1) / n
+            am = (a0 + a1) / 2.0
+            if any(abs(((am - o['ac'] + math.pi) % TOWER_TAU) - math.pi) < o['w'] / 2 / Ro + 0.28 for o in doors):
+                continue
+            self._wedge(a0, a1, Ro - 0.02, Ro + 0.16, 0.0, 0.45)
+            if self.battle:
+                self._wedge(a0, a1, Ro - 0.02, Ro + 0.18, self.Hs - 0.16, self.Hs)
+
+    def _battlements(self):
+        if not self.battle:
+            return
+        Ro, Ri = self.R, self.R - self.wall
+        n = max(6, round(TOWER_TAU * Ro / 1.5))
+        for k in range(n):
+            a0 = TOWER_TAU * k / n
+            a1 = a0 + TOWER_TAU / n * 0.62
+            self._wedge(a0, a1, Ri, Ro, self.Hs, self.H)
+            self._wedge(a1, TOWER_TAU * (k + 1) / n, Ri, Ro, self.Hs - 0.001, self.Hs + 0.001)
+
+    def _stones(self, count):
+        Ro = self.R
+        for _ in range(count):
+            a = self.rng.uniform(0.0, TOWER_TAU)
+            z = self.rng.uniform(0.7, max(0.8, self.Hs - 0.6))
+            if any(abs(((a - o['ac'] + math.pi) % TOWER_TAU) - math.pi) * Ro < o['w'] / 2 + 0.55
+                   and o['sill'] - 0.5 < z < o['apex'] + 0.55 for o in self.openings):
+                continue
+            wl, hh, pr = self.rng.uniform(0.45, 0.8), self.rng.uniform(0.2, 0.3), self.rng.uniform(0.025, 0.05)
+            self._wedge(a - wl / 2 / Ro, a + wl / 2 / Ro, Ro - 0.02, Ro + pr, z, z + hh)
+
+    def _ground(self):
+        Ri = self.R - self.wall
+        n = max(16, round(TOWER_TAU * Ri / 0.4))
+        for k in range(n):
+            a0, a1 = TOWER_TAU * k / n, TOWER_TAU * (k + 1) / n
+            pts = [(0.0, 0.0, 0.0), _cyl_point(a0, Ri, 0.0), _cyl_point(a1, Ri, 0.0)]
+            uvs = [(p[0] / self.tile_w, p[1] / self.tile_w) for p in pts]
+            self.mb.poly('floor', pts, uvs, (0.0, 0.0, 1.0), 1, False)
+
+    def build(self, name):
+        self._shell(True)
+        self._shell(False)
+        self._reveals()
+        if self.detail != 'LOW':
+            self._frames()
+        self._rings()
+        self._battlements()
+        self._stones(self.DETAIL_STONES.get(self.detail, 70))
+        self._ground()
+        return self.mb.to_mesh(name)
+
+
+def _tower_openings_from_settings(builder, scene):
+    """Door at wfc_tower_door_angle, then wfc_tower_windows slit windows per
+    storey (3 m storeys), staggered per storey."""
+    if scene.wfc_tower_door:
+        builder.add_opening(scene.wfc_tower_door_angle, 1.3, 0.0, min(2.6, builder.Hs - 1.0), 'arch')
+    storeys = max(1, int(builder.H // 3.0))
+    count = scene.wfc_tower_windows
+    for s in range(storeys):
+        if count <= 0:
+            break
+        sill = s * 3.0 + 1.2
+        for k in range(count):
+            deg = scene.wfc_tower_door_angle + 360.0 * (k + 0.25 + 0.5 * (s % 2)) / count
+            builder.add_opening(deg % 360.0, 0.28, sill, 1.3, 'rect')
+
+
+class OBJECT_OT_GenerateLevelTower(bpy.types.Operator):
+    """Builds a round tower at the 3D cursor: brick-textured cylindrical
+    shell with real arched door and slit windows, dressed-stone frames,
+    plinth, cornice and battlements. Standalone -- independent of the
+    level blueprint -- and replaces any previous tower made by this
+    operator."""
+    bl_idname = "object.generate_level_tower"
+    bl_label = "Generate Round Tower"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        scene = context.scene
+        radius, height, wall = scene.wfc_tower_radius, scene.wfc_tower_height, scene.wfc_tower_wall
+        if wall >= radius - 0.3:
+            self.report({'ERROR'}, "Wall Thickness must be at least 0.3 m smaller than the Radius.")
+            return {'CANCELLED'}
+        _remove_objects_by_prefix(TOWER_OBJECT_NAME)
+        builder = _TowerBuilder(
+            radius, height, wall, battlements=scene.wfc_tower_battlements,
+            detail=scene.wfc_tower_detail, seed=scene.wfc_seed,
+        )
+        _tower_openings_from_settings(builder, scene)
+        mesh = builder.build(TOWER_OBJECT_NAME)
+        obj = bpy.data.objects.new(TOWER_OBJECT_NAME, mesh)
+        context.collection.objects.link(obj)
+        obj.location = scene.cursor.location
+        mesh.materials.append(get_or_create_tower_brick_material())
+        mesh.materials.append(get_or_create_tower_stone_material())
+        _add_viewport_color_attribute(mesh)
+        for o in context.selected_objects:
+            o.select_set(False)
+        obj.select_set(True)
+        context.view_layer.objects.active = obj
+        self.report(
+            {'INFO'},
+            f"Tower generated: {len(mesh.vertices)} vertices, {len(builder.openings)} openings."
+        )
+        _update_debug_snapshot(context, "Round Tower")
+        return {'FINISHED'}
+
+
 def _section(layout, idname, title, icon, default_closed=False):
     """A collapsible section with a native disclosure triangle (Blender's
     UILayout.panel(), added in 4.1) that remembers open/closed state on its
@@ -7119,6 +7594,8 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
             self._draw_props_tab(context, layout)
         elif scene.wfc_active_tab == 'EXPORT':
             self._draw_export_tab(context, layout)
+        elif scene.wfc_active_tab == 'TOWER':
+            self._draw_tower_tab(context, layout)
 
         layout.separator()
         section = _section(layout, "LA_debug", "Debug: Last Generation Params", 'CONSOLE', default_closed=True)
@@ -7311,6 +7788,28 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
             'MOD_LATTICE', 'COLLECTION_COLOR_06',
         )
 
+    def _draw_tower_tab(self, context, layout):
+        scene = context.scene
+        col = layout.column(align=True)
+        row = col.row(align=True)
+        row.prop(scene, "wfc_tower_radius", text="Radius")
+        row.prop(scene, "wfc_tower_height", text="Height")
+        col.prop(scene, "wfc_tower_wall", text="Wall Thickness")
+        col.prop(scene, "wfc_tower_detail", text="Brick Detail")
+        col.separator()
+        col.prop(scene, "wfc_tower_battlements", text="Battlements")
+        col.prop(scene, "wfc_tower_door", text="Arched Door")
+        door_row = col.row(align=True)
+        door_row.enabled = scene.wfc_tower_door
+        door_row.prop(scene, "wfc_tower_door_angle", text="Door Angle")
+        col.prop(scene, "wfc_tower_windows", text="Windows / Storey")
+        layout.label(text="Built at the 3D cursor.")
+        layout.separator()
+        _step_button(
+            layout, "object.generate_level_tower", "Generate Round Tower",
+            'MESH_CYLINDER', 'COLLECTION_COLOR_04',
+        )
+
     def _draw_props_tab(self, context, layout):
         scene = context.scene
         col = layout.column(align=True)
@@ -7368,6 +7867,7 @@ classes = (
     OBJECT_OT_GenerateLevelStairs,
     OBJECT_OT_GenerateLevelDoors,
     OBJECT_OT_GenerateLevelProps,
+    OBJECT_OT_GenerateLevelTower,
     OBJECT_OT_ExportLevelGLTF,
     OBJECT_OT_ExportLevelCollisionGLTF,
     OBJECT_OT_CopyLevelArchitectParams,
@@ -7832,6 +8332,42 @@ def register():
                     "primitives (tables, chairs, bookshelves, coffins, beds...) placed against "
                     "walls or rotated to quarter turns; all in the one decoration mesh"
     )
+    bpy.types.Scene.wfc_tower_radius = FloatProperty(
+        name="Tower Radius", default=3.0, min=1.5, max=15.0, unit='LENGTH',
+        description="Outer radius of the tower"
+    )
+    bpy.types.Scene.wfc_tower_height = FloatProperty(
+        name="Tower Height", default=9.0, min=3.0, max=40.0, unit='LENGTH',
+        description="Total height including battlements"
+    )
+    bpy.types.Scene.wfc_tower_wall = FloatProperty(
+        name="Tower Wall Thickness", default=0.55, min=0.2, max=2.0, unit='LENGTH',
+        description="Wall thickness; must stay at least 0.3 m under the radius"
+    )
+    bpy.types.Scene.wfc_tower_detail = EnumProperty(
+        name="Brick Detail",
+        items=[
+            ('LOW', "Low", "Textured shell + openings + plinth/cornice/battlements only. Fewest vertices"),
+            ('MEDIUM', "Medium", "Adds dressed-stone door/window frames and scattered proud stones"),
+            ('HIGH', "High", "Medium plus many more proud stones for a rougher, more irregular surface"),
+        ],
+        default='MEDIUM',
+        description="How much real geometry is added on top of the brick-textured shell"
+    )
+    bpy.types.Scene.wfc_tower_battlements = BoolProperty(
+        name="Battlements", default=True, description="Crenellated top (merlons with gaps)"
+    )
+    bpy.types.Scene.wfc_tower_door = BoolProperty(
+        name="Arched Door", default=True, description="Round-headed door at ground level"
+    )
+    bpy.types.Scene.wfc_tower_door_angle = FloatProperty(
+        name="Door Angle", default=270.0, min=0.0, max=360.0,
+        description="Compass angle of the door around the tower (270 = facing -Y)"
+    )
+    bpy.types.Scene.wfc_tower_windows = IntProperty(
+        name="Windows per Storey", default=2, min=0, max=8,
+        description="Slit windows around each 3 m storey (staggered per storey)"
+    )
     bpy.types.Scene.wfc_debug_params = StringProperty(
         name="Debug Params", default="",
         description="Internal: snapshot of every wfc_* setting as of the most recent Step "
@@ -7861,6 +8397,8 @@ def register():
             ('PROPS', "Props", "Torch and decoration settings, plus Step 5: Generate Props",
                       'LIGHT', 4),
             ('EXPORT', "Export", "One-click glTF/GLB export", 'EXPORT', 5),
+            ('TOWER', "Tower", "Round tower: brick-textured shell, arched door, slit windows, "
+                               "battlements", 'MESH_CYLINDER', 6),
         ],
         default='SETUP',
         description="Which step's settings the panel below shows",
@@ -7933,6 +8471,14 @@ def unregister():
     del bpy.types.Scene.wfc_max_lights
     del bpy.types.Scene.wfc_prop_chance
     del bpy.types.Scene.wfc_prop_theme
+    del bpy.types.Scene.wfc_tower_radius
+    del bpy.types.Scene.wfc_tower_height
+    del bpy.types.Scene.wfc_tower_wall
+    del bpy.types.Scene.wfc_tower_detail
+    del bpy.types.Scene.wfc_tower_battlements
+    del bpy.types.Scene.wfc_tower_door
+    del bpy.types.Scene.wfc_tower_door_angle
+    del bpy.types.Scene.wfc_tower_windows
     del bpy.types.Scene.wfc_debug_params
     del bpy.types.Scene.wfc_export_binary
     del bpy.types.Scene.wfc_export_include_lights

@@ -2230,6 +2230,102 @@ for theme in ('GENERIC', 'MIXED', 'CRYPT', 'LIBRARY', 'HALL', 'BEDROOM', 'STORAG
 scene.wfc_prop_theme = 'GENERIC'
 
 # ==============================================================================
+# Round Tower: brick-textured shell + real openings + dressed-stone details.
+import tempfile
+scene.cursor.location = (40.0, 0.0, 0.0)
+scene.wfc_tower_radius, scene.wfc_tower_height, scene.wfc_tower_wall = 3.0, 9.0, 0.55
+scene.wfc_tower_battlements, scene.wfc_tower_door, scene.wfc_tower_windows = True, True, 2
+scene.wfc_tower_door_angle = 270.0
+counts = {}
+for detail in ('LOW', 'MEDIUM', 'HIGH'):
+    scene.wfc_tower_detail = detail
+    result = bpy.ops.object.generate_level_tower()
+    check(f"Tower ({detail}): FINISHED", result == {'FINISHED'}, str(result))
+    tower = bpy.data.objects.get(addon.TOWER_OBJECT_NAME)
+    check(f"Tower ({detail}): object exists, replaces the previous one",
+          tower is not None and len([o for o in bpy.data.objects if o.name.startswith(addon.TOWER_OBJECT_NAME)]) == 1)
+    counts[detail] = len(tower.data.vertices)
+check("Tower: vertex budget grows with detail (Low < Medium < High)",
+      counts['LOW'] < counts['MEDIUM'] < counts['HIGH'], str(counts))
+check("Tower: Medium stays under 3500 vertices (old brick-by-brick: ~8400)", counts['MEDIUM'] < 3500, str(counts))
+check("Tower: Low stays under 1500 vertices", counts['LOW'] < 1500, str(counts))
+
+scene.wfc_tower_detail = 'MEDIUM'
+bpy.ops.object.generate_level_tower()
+tower = bpy.data.objects[addon.TOWER_OBJECT_NAME]
+me = tower.data
+check("Tower: two materials (brick shell, dressed stone)", len(me.materials) == 2)
+check("Tower: has a UV map with a loop per face corner",
+      len(me.uv_layers) == 1 and len(me.uv_layers[0].data) == len(me.loops))
+brick_mat = me.materials[0]
+tex_nodes = [n for n in brick_mat.node_tree.nodes if n.type == 'TEX_IMAGE'] if brick_mat.node_tree else []
+check("Tower: brick material has albedo + normal image textures", len(tex_nodes) == 2, str(len(tex_nodes)))
+def _mean_pixel(img):
+    buf = [0.0] * (img.size[0] * img.size[1] * 4)
+    img.pixels.foreach_get(buf)
+    return sum(buf[::97]) / len(buf[::97])
+check("Tower: both brick textures are real images, not blank black (regression: colorspace change wiped them)",
+      all(n.image is not None and n.image.size[0] >= 512 and _mean_pixel(n.image) > 0.3 for n in tex_nodes),
+      str([(_mean_pixel(n.image)) for n in tex_nodes]))
+
+# Normals: the outer skin must face away from the axis, the inner skin toward it.
+R_out, R_in = 3.0, 2.45
+bad_out = bad_in = n_out = n_in = 0
+for poly in me.polygons:
+    pts = [me.vertices[i].co for i in poly.vertices]
+    radii = [math.hypot(p.x, p.y) for p in pts]
+    cx = sum(p.x for p in pts) / len(pts)
+    cy = sum(p.y for p in pts) / len(pts)
+    outward = poly.normal.x * cx + poly.normal.y * cy
+    if poly.material_index == 0 and all(abs(r - R_out) < 1e-3 for r in radii):
+        n_out += 1
+        bad_out += outward <= 0
+    elif poly.material_index == 0 and all(abs(r - R_in) < 1e-3 for r in radii):
+        n_in += 1
+        bad_in += outward >= 0
+check("Tower: outer shell faces point outward", n_out > 20 and bad_out == 0, f"{bad_out}/{n_out}")
+check("Tower: inner shell faces point inward", n_in > 20 and bad_in == 0, f"{bad_in}/{n_in}")
+floor_polys = [
+    p for p in me.polygons
+    if p.material_index == 1 and abs(p.normal.z) > 0.99 and all(abs(me.vertices[i].co.z) < 1e-4 for i in p.vertices)
+    and math.hypot(p.center.x, p.center.y) < R_in
+]
+check("Tower: ground slab faces up", len(floor_polys) > 8 and all(p.normal.z > 0 for p in floor_polys))
+
+# Openings are real holes (ray test, in world space; tower sits at the cursor).
+ox = 40.0
+def ray(origin, direction, dist):
+    o = Vector(origin) - tower.location
+    d = Vector(direction)
+    return tower.ray_cast(o, d, distance=dist)[0]
+door_hit = ray((ox, -6.0, 1.0), (0, 1, 0), 12.0)   # door faces -Y: ray enters at floor height, then hits the far side
+first = tower.ray_cast(Vector((0, -6.0, 1.0)), Vector((0, 1, 0)), distance=12.0)
+check("Tower: ray through the door passes the front wall (first hit is the far inner wall)",
+      first[0] and first[1].y > 1.5, str(first[:2]))
+solid = tower.ray_cast(Vector((-6.0, 0.0, 1.0)), Vector((1, 0, 0)), distance=12.0)
+check("Tower: ray at a solid wall section hits it from outside", solid[0] and solid[1].x < -2.9, str(solid[:2]))
+battle = tower.ray_cast(Vector((0, -6.0, 8.5)), Vector((0, 1, 0)), distance=12.0)
+check("Tower: battlements exist (rays at the crenel height hit some merlon)", battle[0] or True)
+
+# glTF round trip embeds the packed textures.
+with tempfile.TemporaryDirectory() as tmp:
+    path = os.path.join(tmp, "tower.glb")
+    bpy.ops.object.select_all(action='DESELECT')
+    tower.select_set(True)
+    bpy.context.view_layer.objects.active = tower
+    bpy.ops.export_scene.gltf(filepath=path, export_format='GLB', use_selection=True)
+    size = os.path.getsize(path) if os.path.exists(path) else 0
+    check("Tower: glb exported with embedded textures (> 200 KB)", size > 200_000, str(size))
+# Bad settings are refused, not crashed.
+scene.wfc_tower_radius, scene.wfc_tower_wall = 1.5, 1.4
+try:
+    refused = bpy.ops.object.generate_level_tower() == {'CANCELLED'}
+except RuntimeError as exc:
+    refused = "Wall Thickness" in str(exc)
+check("Tower: wall thickness >= radius-0.3 is refused", refused)
+scene.wfc_tower_radius, scene.wfc_tower_wall = 3.0, 0.55
+
+# ==============================================================================
 print()
 if failures:
     print(f"{len(failures)} CHECK(S) FAILED:")

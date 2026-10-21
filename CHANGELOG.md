@@ -3,6 +3,20 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.27.0
+
+- **New: Round Tower** (new Tower tab, built at the 3D cursor). Instead of modelling every brick
+  (a 9 m tower needed ~1400 bricks and ~8 400 vertices, and still looked ragged), the wall is a
+  smooth cylindrical shell (outer + inner skin) carrying a procedural brick albedo + normal map,
+  generated once per session and embedded in glTF exports. Everything that gives the silhouette is
+  real geometry: an arched door and slit windows cut through the wall (with reveals), dressed-stone
+  jamb/voussoir frames, plinth, cornice, battlements and a ground slab.
+- **Brick Detail** picks the geometry budget: Low (~900 vertices: textured shell, openings, plinth,
+  cornice, battlements), Medium (~1 900: adds stone frames and scattered proud stones, default),
+  High (~3 700: many more proud stones). Radius, height, wall thickness, door angle, battlements and
+  windows per storey are adjustable. The Export tab includes the tower.
+- Not yet: interior floors/stairs, towers as rooms inside a generated level, tapered towers.
+
 ## 0.26.0
 
 - **New: windows.** Walls tab, "Window Chance" (0 = off, default). Exposed edges of ordinary
