@@ -32,7 +32,7 @@ from bpy_extras.io_utils import ExportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 35, 0),
+    "version": (0, 36, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -8641,6 +8641,29 @@ def _castle_walk_cells(width, depth, wall_t, tower_r, gate, keep, step=0.5, apro
     return cells
 
 
+def _castle_package_rooms(scene, cells, step, ox, oy):
+    """Named open areas a loader can anchor story props to: the yard inside the gate, the ground in front of the keep,
+    the west and east yards (snapped to walkable cells; towers and the keep interior are not reachable)."""
+    W, D = scene.wfc_castle_width, scene.wfc_castle_depth
+    ks = max(6.0, min(W, D) * 0.38)
+    kt = max(scene.wfc_castle_wall_thickness, 1.0)
+    kcy = D * 0.12
+    spots = [("COURTYARD", 0.0, -D / 2.0 + 4.5), ("KEEP_FRONT", 0.0, kcy - ks / 2.0 - kt / 2.0 - 1.1),
+             ("WEST_YARD", -W * 0.3, D * 0.12), ("EAST_YARD", W * 0.3, D * 0.12)]
+    if not scene.wfc_castle_keep:
+        spots[1] = ("KEEP_FRONT", 0.0, 0.0)
+    rooms = []
+    for i, (name, x, y) in enumerate(spots):
+        # cells here are already shifted by (ox, oy); snap in that frame
+        gx, gy = round(x / step) + ox, round(y / step) + oy
+        near = min(cells, key=lambda c: (c[0] - gx) ** 2 + (c[1] - gy) ** 2)
+        cx, cy = near[0] * step, near[1] * step
+        rooms.append({"id": i, "shape": name, "floor": 0,
+                      "rect": [round(cx - 1.5, 4), round(-cy - 1.5, 4), round(cx + 1.5, 4), round(-cy + 1.5, 4)],
+                      "center": [round(cx, 4), round(-cy, 4)]})
+    return rooms
+
+
 def _castle_package_lights(scene, loc):
     """Torches beside the gate and in the courtyard corners (the glTF itself carries no lights)."""
     hx, hy = scene.wfc_castle_width / 2.0, scene.wfc_castle_depth / 2.0
@@ -8688,7 +8711,7 @@ def _build_castle_package(scene, castle_obj, glb_name=""):
         "floors": [{"z": 0, "y": round(loc.z, 4), "cells": len(cells), "walk_rects": rects}],
         "entrance": {"floor": 0, "pos": _to_engine(snap(entrance[0]), snap(entrance[1]), loc.z)},
         "exit": {"floor": 0, "pos": _to_engine(snap(exit_pt[0]), snap(exit_pt[1]), loc.z)},
-        "stairs": [], "rooms": [], "lights": _castle_package_lights(scene, loc),
+        "stairs": [], "rooms": _castle_package_rooms(scene, cells, step, ox, oy), "lights": _castle_package_lights(scene, loc),
         "castle": {"width": scene.wfc_castle_width, "depth": scene.wfc_castle_depth,
                    "ruin": scene.wfc_castle_ruin, "gate": scene.wfc_castle_gate, "keep": scene.wfc_castle_keep},
     }

@@ -4,7 +4,7 @@ Internal dev-facing doc: what's built, what's known-broken, what's next. Not for
 (see `dist/README.md` for that). Source of truth for the addon's actual behavior is always
 `levelArchitect_v2.py` — this file can drift out of date; the code can't.
 
-Current version: **0.35.0** (see `bl_info` in the source file).
+Current version: **0.36.0** (see `bl_info` in the source file).
 
 §2 (Development tree) was condensed 2026-08-21 — dropped the blow-by-blow investigation
 narrative and per-run stress-test numbers from older, fully-resolved entries, kept every
@@ -753,6 +753,11 @@ GN complexity there specifically.
       too zoomed-out to show doorway-level detail) confirmed the frame visibly follows the wall's
       curve right at the opening, not standing at a mismatched straight angle against it.
 
+- [x] **Castle areas (0.36.0).** `_castle_package_rooms`: four anchor points computed from the same keep geometry as
+      the mesh builder, snapped to the nearest walkable cell. Lesson from the Vampire side: a story prop standing in
+      the one-cell-wide strip in front of the keep wall blocked the only route between the yards (A* ignores
+      blockers, the actor then steers into them) -- props that belong to a wall must be 0.25 m radius (no blocker)
+      and pushed into the wall, not left on the walkable cell.
 - [x] **Props in the package (0.35.0).** Props op stores `gla_props` on the decoration object; the package turns it into
       `props` (engine axes). Architect props face +X; Vampire models face +Z, so a loader rotates by yaw + 90 deg.
       Vampire blockers only for the big ones (a table, coffin, tomb...), none for chairs/candelabra, and `--dungeontest`

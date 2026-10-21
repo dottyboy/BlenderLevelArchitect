@@ -3,6 +3,12 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.36.0
+
+- **Castle package lists named areas** (`rooms`): COURTYARD (inside the gate), KEEP_FRONT, WEST_YARD and EAST_YARD,
+  each snapped to a walkable cell, so a loader can anchor story props to them. Tests: four areas, each on a
+  walkable cell.
+
 ## 0.35.0
 
 - **Game package lists the decoration placements.** The JSON now has `props` (kind, engine position, yaw) and

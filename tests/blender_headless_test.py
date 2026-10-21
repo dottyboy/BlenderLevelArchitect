@@ -2681,6 +2681,10 @@ for r in crects:
     for ix in range(int(round(r[0] / 0.5 + 0.5)), int(round(r[2] / 0.5 - 0.5)) + 1):
         for iz in range(int(round(r[1] / 0.5 + 0.5)), int(round(r[3] / 0.5 - 0.5)) + 1):
             ccells.add((ix, iz))
+check("Castle package: four named areas, each on a walkable cell",
+      len(cpkg["rooms"]) == 4 and all(
+          (int(round(r["center"][0] / 0.5)), int(round(r["center"][1] / 0.5))) in ccells for r in cpkg["rooms"]),
+      str([r["shape"] for r in cpkg["rooms"]]))
 check("Castle package: rectangles reproduce the cells exactly (count)", len(ccells) == cpkg["floors"][0]["cells"], f"{len(ccells)} vs {cpkg['floors'][0]['cells']}")
 # every pair of adjacent walkable cells must be connected without a wall in between, 1 m above the ground
 blocked = pairs = 0
