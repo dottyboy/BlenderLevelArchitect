@@ -2149,6 +2149,44 @@ check("Masonry rooms: stairs never intersect a ring (both the 0.61 m repro confi
 scene.wfc_door_style = 'FLAT'
 scene.wfc_round_wall_ruin = 0.0
 
+# Torches and props in Masonry Round rooms hang on / stay inside the ring instead of floating.
+scene.wfc_wall_height, scene.wfc_wall_thickness = 3.0, 0.25
+scene.wfc_torch_chance, scene.wfc_prop_chance, scene.wfc_prop_theme = 0.7, 0.5, 'LIBRARY'
+torch_checked = torch_bad = prop_checked = prop_bad = 0
+for seed_t in (405634, 111111, 333333):
+    scene.wfc_seed = seed_t
+    bpy.ops.object.generate_game_blueprint()
+    bpy.ops.object.generate_level_walls()
+    check(f"Ring props (seed {seed_t}): Props FINISHED", bpy.ops.object.generate_level_props() == {'FINISHED'})
+    bp_t = bpy.data.objects[addon.BLUEPRINT_OBJECT_NAME]
+    meta_t = json.loads(bp_t.get("gla_room_meta", "[]"))
+    fh_t = addon._fine_level_height(scene)
+    ts_t = scene.wfc_tile_size
+    walk_t2, ex_t2 = addon._read_blueprint_points(bp_t, ts_t, fh_t, ("room_id",))
+    geo_by_room = {i: addon._round_ring_inner_ellipse(r, ts_t, scene.wfc_wall_thickness)
+                   for i, r in enumerate(meta_t) if r['shape'] == 'ROUND'}
+    torch_obj = bpy.data.objects.get(addon.PROPS_TORCH_OBJECT_NAME)
+    dec_obj = bpy.data.objects.get(addon.PROPS_DECORATION_OBJECT_NAME)
+    for obj, kind in ((torch_obj, 'torch'), (dec_obj, 'prop')):
+        if obj is None:
+            continue
+        for v in obj.data.vertices:
+            cell = (round(v.co.x / ts_t), round(v.co.y / ts_t), int((v.co.z + 0.3) // fh_t))
+            rid = ex_t2["room_id"].get(cell, -1)
+            geo = geo_by_room.get(rid)
+            if geo is None:
+                continue
+            rho = math.hypot((v.co.x - geo[0]) / geo[2], (v.co.y - geo[1]) / geo[3])
+            if kind == 'torch':
+                torch_checked += 1
+                torch_bad += rho > 1.03   # a torch may touch the ring, never sink into / through it
+            else:
+                prop_checked += 1
+                prop_bad += rho > 1.0
+check("Ring props: torches in Round rooms never poke through the masonry ring", torch_checked > 0 and torch_bad == 0, f"{torch_bad}/{torch_checked}")
+check("Ring props: decoration in Round rooms stays inside the masonry ring", prop_checked > 0 and prop_bad == 0, f"{prop_bad}/{prop_checked}")
+scene.wfc_prop_theme = 'GENERIC'
+
 # ==============================================================================
 # Presets -- Isometric / FPS-Immersive-Sim / Compact Roguelike / Megadungeon.
 # Each should apply cleanly and run the full pipeline without error.
@@ -2470,7 +2508,7 @@ tower = bpy.data.objects[addon.TOWER_OBJECT_NAME]
 # Castle: towers + curtain walls + gate + keep + courtyard, intact and ruined.
 scene.cursor.location = (0.0, 80.0, 0.0)
 scene.wfc_castle_width, scene.wfc_castle_depth = 26.0, 20.0
-scene.wfc_castle_wall_height, scene.wfc_castle_wall_thickness = 7.0, 1.1
+scene.wfc_castle_wall_height, scene.wfc_castle_wall_thickness = 7.0, 1.5
 scene.wfc_castle_tower_radius, scene.wfc_castle_tower_height = 3.2, 12.0
 scene.wfc_castle_gate, scene.wfc_castle_keep, scene.wfc_castle_ruin = True, True, 0.0
 scene.wfc_tower_detail = 'MEDIUM'
@@ -2481,7 +2519,7 @@ check("Castle: one object, two materials, a UV map",
       castle is not None and len([o for o in bpy.data.objects if o.name.startswith(addon.CASTLE_OBJECT_NAME)]) == 1
       and len(castle.data.materials) == 2 and len(castle.data.uv_layers) == 1)
 check("Castle: vertex budget under 30000 (8 meshed objects' worth)", 0 < len(castle.data.vertices) < 30000, str(len(castle.data.vertices)))
-W_, D_, T_ = 26.0, 20.0, 1.1
+W_, D_, T_ = 26.0, 20.0, 1.5
 wall_hit = castle.ray_cast(Vector((W_ / 4, -D_ / 2 - 6.0, 1.0)), Vector((0, 1, 0)), distance=12.0)
 check("Castle: the south wall is solid from outside and its outer face points out",
       wall_hit[0] and abs(wall_hit[1].y - (-D_ / 2 - T_ / 2)) < 0.25 and wall_hit[2].y < -0.5, str(wall_hit[:3]))
@@ -2496,6 +2534,21 @@ for dx in (-0.6, 0.0, 0.6):
 check("Castle: no hole where the curtain walls meet the towers", joint_misses == 0, str(joint_misses))
 tower_top = castle.ray_cast(Vector((-W_ / 2, -D_ / 2 + 2.9, 30.0)), Vector((0, 0, -1)), distance=40.0)
 check("Castle: corner towers stand higher than the curtain walls", tower_top[0] and tower_top[1].z > 8.0, str(tower_top[:2]))
+# The wall walk: walkable top behind a parapet, reachable from the tower's wall-level floor.
+walk_hit = castle.ray_cast(Vector((5.0, -D_ / 2 + 0.25, 30.0)), Vector((0, 0, -1)), distance=40.0)
+check("Castle: the wall walk is a flat, upward-facing walkway at wall-top height (6 m)",
+      walk_hit[0] and abs(walk_hit[1].z - 6.0) < 0.01 and walk_hit[2].z > 0.9, str(walk_hit[:3]))
+parapet_tops = []
+for k in range(30):
+    ph = castle.ray_cast(Vector((-4.0 + k * 0.17, -D_ / 2 - 0.5, 30.0)), Vector((0, 0, -1)), distance=40.0)
+    parapet_tops.append(ph[1].z if ph[0] else 0.0)
+check("Castle: the parapet stands on the outer edge, above the walkway (merlons and crenels)",
+      max(parapet_tops) > 6.9 and min(parapet_tops) < 6.2, f"{min(parapet_tops):.2f}..{max(parapet_tops):.2f}")
+door_path = castle.ray_cast(Vector((-W_ / 2 + 1.2, -D_ / 2 + 0.25, 6.6)), Vector((1, 0, 0)), distance=9.0)
+check("Castle: from the corner tower's wall-level floor a person can walk out along the wall (door + walkway clear for 9 m)",
+      not door_path[0], str(door_path[:2]))
+slab_hit = castle.ray_cast(Vector((-W_ / 2 + 1.0, -D_ / 2 + 0.3, 9.0)), Vector((0, 0, -1)), distance=6.0)
+check("Castle: the tower's wall-level floor sits at the wall-walk height", slab_hit[0] and abs(slab_hit[1].z - 6.0) < 0.01, str(slab_hit[:2]))
 yard_hit = castle.ray_cast(Vector((-8.0, -4.0, 5.0)), Vector((0, 0, -1)), distance=10.0)
 check("Castle: courtyard floor faces up at ground level", yard_hit[0] and abs(yard_hit[1].z) < 0.01 and yard_hit[2].z > 0.9, str(yard_hit[:3]))
 scene.wfc_castle_keep = False

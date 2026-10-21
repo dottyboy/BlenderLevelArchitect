@@ -3,6 +3,26 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.32.0
+
+- **Fixed: torches floated in open air.** The wall-adjacency test for torch placement compared a 2D
+  position against a set of 3D cells, so every direction always counted as "has a wall" and a torch could
+  hang on an open doorway or in the middle of a room. It checks the real neighbouring cell now. This changes
+  where torches land for existing seeds (they now sit on real walls), which is the point.
+- **Round rooms: torches and props follow the curved wall.** With Masonry walls, torches hang on the inner
+  skin of the ring (oriented along the wall's normal, kept out of doorways, none on ruined rings), the
+  real lights move with them, and decoration props stay inside the ring and no longer try to stand against
+  invisible square-cell walls.
+- **Castle is walkable.** The curtain walls have a walkway behind a parapet (merlons only on the outer
+  half, wall thickness default 1.5 m), and each corner tower has a floor exactly at the wall-walk height
+  with doors out onto both walls, so ground door -> spiral stairs -> wall-level floor -> door -> walkway
+  is one continuous path. Tower floors can now be placed at explicit heights (`floor_levels`).
+- **Better stone.** Stone blocks, caps, merlons, plinth and floor slabs use a textured limestone
+  (large dressed blocks, normal map) instead of flat grey; bricks are less orange, and both have soft
+  weathering blotches.
+- Tests: ring torches/props geometry, wall-walk height, parapet, walking out of the tower door onto the walk.
+- Known: a tower's windows can still end up behind a spiral step; tower interiors have no props or lights.
+
 ## 0.31.0
 
 - **New: Castle** (new Castle tab, built at the 3D cursor). A walled castle assembled from masonry parts:

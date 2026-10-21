@@ -4,7 +4,7 @@ Internal dev-facing doc: what's built, what's known-broken, what's next. Not for
 (see `dist/README.md` for that). Source of truth for the addon's actual behavior is always
 `levelArchitect_v2.py` — this file can drift out of date; the code can't.
 
-Current version: **0.31.0** (see `bl_info` in the source file).
+Current version: **0.32.0** (see `bl_info` in the source file).
 
 §2 (Development tree) was condensed 2026-08-21 — dropped the blow-by-blow investigation
 narrative and per-run stress-test numbers from older, fully-resolved entries, kept every
@@ -752,6 +752,21 @@ GN complexity there specifically.
       render (not one of the regular `generate_test_blends.py` scenarios, whose top-down framing is
       too zoomed-out to show doorway-level detail) confirmed the frame visibly follows the wall's
       curve right at the opening, not standing at a mismatched straight angle against it.
+
+- [x] **Polish pass (0.32.0).** (1) Torch bug: `wall_adjacent` tested `(x+dx, y+dy)` against a set of `(x, y, z)` cells, so
+      every direction passed; fixed with the z component. (2) `_round_ring_inner_ellipse`,
+      `_ring_torch_mount`, `_prop_inside_ring`: torches hang on the masonry ring's inner skin (7-tuple torch
+      entries, `_build_torch_mesh.add_oriented`), props are tested against the inner ellipse and lose their
+      wall kinds in ring rooms. (3) `_TowerBuilder.floor_levels` replaces the even storey split; `seam` now
+      applies to `add_opening` and the stair start (world angles), so a castle tower can rotate its seam away
+      from its doors. The wall-walk doors sit on the wall axes (corner diagonals are exactly 45 deg
+      multiples, NOT the direction to the courtyard centre, which differs on non-square courtyards -- the
+      first version was off by 7 deg and the doors opened onto the parapet), the ground door sits ~170 deg
+      into the climb (steps well above head height) and the upper slab's open stretch stays clear of the
+      wall-walk doors. (4) `_masonry_images` is the one texture generator (brick, stone): tileable weathering
+      blotches from a coarse grid blurred with wrap-around. Open: tower windows vs steps, interior
+      props/lights, stair railing, keep interior, ordinary level walls as wall runs, collision export
+      for castles/towers.
 
 - [x] **Castle + straight masonry walls (0.31.0).** `_WallRunBuilder` mirrors `_TowerBuilder` in a flat frame (x along
       the run, outer face at y = -t/2): columns carrying every opening that contains them, the same ruin

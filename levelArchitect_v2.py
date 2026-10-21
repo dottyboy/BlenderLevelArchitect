@@ -32,7 +32,7 @@ from bpy_extras.io_utils import ExportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 31, 0),
+    "version": (0, 32, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -4142,6 +4142,46 @@ def _round_room_opening_ranges(room, room_id, room_id_grid, walkable, tile_size,
     return [(a, b) for a, b in merged]
 
 
+def _round_ring_inner_ellipse(room, tile_size, wall_thickness):
+    """(cx, cy, rx, ry) of the INNER skin of a Round room's masonry ring --
+    exactly the ellipse _build_round_room_masonry_mesh builds, so torches and
+    props can sit against the wall instead of floating in the room."""
+    x, y, rw, rl = room['x'], room['y'], room['w'], room['l']
+    cx, cy = (x + (rw - 1) / 2.0) * tile_size, (y + (rl - 1) / 2.0) * tile_size
+    rx, ry = (rw / 2.0) * tile_size - ROUND_RING_INSET, (rl / 2.0) * tile_size - ROUND_RING_INSET
+    R = max(rx, ry)
+    wall_c = min(wall_thickness, R * 0.4)
+    return cx, cy, rx / R * (R - wall_c), ry / R * (R - wall_c)
+
+
+def _ring_torch_mount(cell, geo, ranges, tile_size):
+    """Where a torch for `cell` hangs on a Round room's ring: (wall_x, wall_y,
+    dir_x, dir_y) with dir pointing from the room toward the wall, or None when
+    that stretch of wall is a doorway."""
+    cx, cy, rx, ry = geo
+    px, py = cell[0] * tile_size, cell[1] * tile_size
+    t = math.atan2((py - cy) / ry, (px - cx) / rx)
+    for t0, t1 in ranges:
+        if ((t - t0 + 0.14) % TOWER_TAU) <= (t1 - t0) + 0.28:
+            return None
+    nx, ny = math.cos(t) / rx, math.sin(t) / ry
+    ln = math.hypot(nx, ny)
+    return cx + rx * math.cos(t), cy + ry * math.sin(t), nx / ln, ny / ln
+
+
+def _prop_inside_ring(kind, rot, px, py, geo, tile_size, margin=0.97):
+    """True when a prop's rotated footprint stays inside a Round room's inner ellipse."""
+    cx, cy, rx, ry = geo
+    xmin, xmax, ymin, ymax = _prop_local_bounds(kind, tile_size)
+    c, s_ = math.cos(rot), math.sin(rot)
+    for lx in (xmin, xmax):
+        for ly in (ymin, ymax):
+            wx, wy = px + lx * c - ly * s_, py + lx * s_ + ly * c
+            if ((wx - cx) / rx) ** 2 + ((wy - cy) / ry) ** 2 > margin * margin:
+                return False
+    return True
+
+
 def _build_round_room_masonry_mesh(
     room_meta, room_id_grid, walkable_cells, tile_size, fine_level_height, wall_height,
     wall_thickness, z_offsets, door_style, door_height, cap_top, seed, name, ruin=0.0,
@@ -6001,9 +6041,35 @@ def _build_torch_mesh(torches, tile_size, torch_height, name, uv_tile_size=1.0):
         faces.append((i + 4, i + 7, i + 3, i + 0))
         material_indices.extend([mat_idx] * 6)
 
-    for x, y, z0, dx, dy in torches:
+    def add_oriented(x0, y0, x1, y1, half_w, z0, z1, mat_idx):
+        # same face layout as add_box, along an arbitrary horizontal direction
+        dx_, dy_ = x1 - x0, y1 - y0
+        ln = math.hypot(dx_, dy_)
+        px_, py_ = -dy_ / ln * half_w, dx_ / ln * half_w
+        i = len(verts)
+        c4 = [(x0 - px_, y0 - py_), (x1 - px_, y1 - py_), (x1 + px_, y1 + py_), (x0 + px_, y0 + py_)]
+        verts.extend((cx_, cy_, z0) for cx_, cy_ in c4)
+        verts.extend((cx_, cy_, z1) for cx_, cy_ in c4)
+        faces.append((i + 3, i + 2, i + 1, i + 0))
+        faces.append((i + 4, i + 5, i + 6, i + 7))
+        faces.append((i + 5, i + 4, i + 0, i + 1))
+        faces.append((i + 6, i + 5, i + 1, i + 2))
+        faces.append((i + 7, i + 6, i + 2, i + 3))
+        faces.append((i + 4, i + 7, i + 3, i + 0))
+        material_indices.extend([mat_idx] * 6)
+
+    for torch in torches:
+        x, y, z0, dx, dy = torch[:5]
         top_z = z0 + torch_height
         haft_z0 = top_z - haft_half_w * 2.0
+        if len(torch) == 7:
+            # mounted on a curved ring: (dx, dy) points toward the wall, (wx, wy) is where it touches
+            wx, wy = torch[5], torch[6]
+            ox, oy = wx - dx * haft_len, wy - dy * haft_len
+            add_oriented(wx, wy, ox, oy, haft_half_w, haft_z0, top_z, 0)
+            add_box(ox - flame_half, oy - flame_half, ox + flame_half, oy + flame_half,
+                    top_z - flame_half, top_z + flame_half, 1)
+            continue
         if dx != 0:
             wall_x = (x + 0.5 * dx) * tile_size
             outer_x = wall_x - dx * haft_len  # protrudes opposite the wall direction
@@ -6809,7 +6875,7 @@ class OBJECT_OT_GenerateLevelProps(bpy.types.Operator):
             x, y, z = cell
             options = [
                 (dx, dy) for dx, dy in HORIZONTAL_NEIGHBORS
-                if (x + dx, y + dy) not in walkable_cells
+                if (x + dx, y + dy, z) not in walkable_cells
             ]
             if options:
                 wall_adjacent[cell] = options
@@ -6822,16 +6888,44 @@ class OBJECT_OT_GenerateLevelProps(bpy.types.Operator):
         # need lights" is re-applied at the LIGHT stage below, not just
         # the mesh stage -- a room whose only torch loses its Torch Light
         # Chance roll would otherwise go dark despite having a torch mesh.
-        torches = []  # (x, y, z0, dx, dy)
+        torches = []  # (x, y, z0, dx, dy) or, mounted on a Round room's masonry ring, (x, y, z0, dx, dy, wall_x, wall_y)
         torch_room_id = []  # parallel: this torch's room_id, -1 for corridor
         rooms_with_mesh = set()
+
+        # Round rooms with Masonry walls: the ring is a curve well inside/outside the cells' square
+        # edges, so a torch hung on a cell edge would float in the room. Mount those on the ring.
+        ring_geo = {}     # room_id -> inner ellipse (props keep inside it)
+        ring_ranges = {}  # room_id -> doorway parameter ranges (torches keep out of them)
+        if scene.wfc_round_wall_style == 'MASONRY':
+            meta_for_ring = json.loads(blueprint_obj.get("gla_room_meta", "[]"))
+            walk_for_ring = set(walkable_cells)
+            for rid_r, room_r in enumerate(meta_for_ring):
+                if room_r['shape'] == 'ROUND':
+                    ring_geo[rid_r] = _round_ring_inner_ellipse(room_r, tile_size, scene.wfc_wall_thickness)
+                    ring_ranges[rid_r] = _round_room_opening_ranges(room_r, rid_r, room_ids, walk_for_ring, tile_size)
+        ring_torches_ok = scene.wfc_round_wall_ruin <= 0.0  # a broken wall has nowhere to hang a torch
+
+        def make_torch(cell, options):
+            x, y, z = cell
+            rid = room_ids.get(cell, -1)
+            if rid in ring_geo:
+                if not ring_torches_ok:
+                    return None
+                mount = _ring_torch_mount(cell, ring_geo[rid], ring_ranges[rid], tile_size)
+                if mount is None:
+                    return None
+                return (x, y, cell_z0(cell), mount[2], mount[3], mount[0], mount[1])
+            dx, dy = random.choice(options)
+            return (x, y, cell_z0(cell), dx, dy)
+
         for cell, options in wall_adjacent.items():
             if random.random() >= scene.wfc_torch_chance:
                 continue
-            dx, dy = random.choice(options)
-            x, y, z = cell
             rid = room_ids.get(cell, -1)
-            torches.append((x, y, cell_z0(cell), dx, dy))
+            torch = make_torch(cell, options)
+            if torch is None:
+                continue
+            torches.append(torch)
             torch_room_id.append(rid)
             if rid >= 0:
                 rooms_with_mesh.add(rid)
@@ -6846,12 +6940,15 @@ class OBJECT_OT_GenerateLevelProps(bpy.types.Operator):
         for rid, cells in cells_by_room.items():
             if rid in rooms_with_mesh:
                 continue
-            cell = random.choice(cells)
-            x, y, z = cell
-            dx, dy = random.choice(wall_adjacent[cell])
-            torches.append((x, y, cell_z0(cell), dx, dy))
-            torch_room_id.append(rid)
-            rooms_with_mesh.add(rid)
+            candidates_t = list(cells)
+            random.shuffle(candidates_t)
+            for cell in candidates_t:
+                torch = make_torch(cell, wall_adjacent[cell])
+                if torch is not None:
+                    torches.append(torch)
+                    torch_room_id.append(rid)
+                    rooms_with_mesh.add(rid)
+                    break
 
         # Lights: one guaranteed-lit torch per room (any of that room's
         # torches -- the mesh guarantee above already ensures every room
@@ -6904,11 +7001,14 @@ class OBJECT_OT_GenerateLevelProps(bpy.types.Operator):
             if not candidates:
                 continue
             prop_count = min(len(candidates), round(len(candidates) * scene.wfc_prop_chance))
+            geo_here = ring_geo.get(rid)
             if theme_setting == 'GENERIC':
                 for cell in random.sample(candidates, prop_count):
                     x, y, z = cell
                     kind = random.choice(prop_kinds)
                     rot = random.uniform(0.0, 2.0 * math.pi)
+                    if geo_here is not None and not _prop_inside_ring(kind, rot, x * tile_size, y * tile_size, geo_here, tile_size):
+                        continue
                     decorations.append((x * tile_size, y * tile_size, cell_z0(cell), kind, rot))
                 continue
 
@@ -6922,6 +7022,8 @@ class OBJECT_OT_GenerateLevelProps(bpy.types.Operator):
                 wall_dirs = [
                     (dx, dy) for dx, dy in HORIZONTAL_NEIGHBORS if (x + dx, y + dy, z) not in walkable_cells
                 ]
+                if geo_here is not None:
+                    wall_dirs = []  # the curved ring is the wall; square-cell wall props would float or clip
                 if wall_dirs and theme_rng.random() < 0.7:
                     dx, dy = theme_rng.choice(wall_dirs)
                     kind = theme_rng.choice(wall_kinds)
@@ -6947,6 +7049,8 @@ class OBJECT_OT_GenerateLevelProps(bpy.types.Operator):
                     if rot is None:
                         continue
                     cx, cy = x * tile_size, y * tile_size
+                if geo_here is not None and not _prop_inside_ring(kind, rot, cx, cy, geo_here, tile_size):
+                    continue
                 decorations.append((cx, cy, cell_z0(cell), kind, rot))
 
         created = []
@@ -6965,9 +7069,12 @@ class OBJECT_OT_GenerateLevelProps(bpy.types.Operator):
 
             flame_color = tuple(scene.wfc_torch_light_color)
             for idx in lit_indices:
-                x, y, z0, dx, dy = torches[idx]
+                x, y, z0, dx, dy = torches[idx][:5]
                 top_z = z0 + scene.wfc_torch_height
-                if dx != 0:
+                if len(torches[idx]) == 7:
+                    flame_x = torches[idx][5] - dx * 0.3
+                    flame_y = torches[idx][6] - dy * 0.3
+                elif dx != 0:
                     wall_x = (x + 0.5 * dx) * tile_size
                     flame_x = wall_x - dx * 0.3
                     flame_y = y * tile_size
@@ -7033,14 +7140,15 @@ TOWER_ROW_H = 0.26
 TOWER_ROWS = 8
 
 
-def _tower_brick_images():
-    """(albedo, normal) procedural brick images, generated once per session
-    with numpy and packed into the .blend so glTF export embeds them.
-    Returns None when numpy is unavailable (callers fall back to a flat
-    color) -- Blender ships numpy, so that only happens in stub/offline
-    runs."""
-    alb = bpy.data.images.get("LA_Tower_Brick_Albedo")
-    nrm = bpy.data.images.get("LA_Tower_Brick_Normal")
+def _masonry_images(prefix, rows, row_h, lens_choices, palette, seed, joint_m=0.011, bevel_m=0.016, wear=0.12):
+    """(albedo, normal) procedural masonry images, generated once per session
+    with numpy and packed into the .blend so glTF export embeds them. rows *
+    row_h must equal the brick tile height so every material shares one UV
+    scale. `palette(np, tint, tint2, hv)` returns the (H, W, 3) display-space
+    base colour. Returns None when numpy is unavailable (callers fall back to
+    a flat colour) -- Blender ships numpy, so that only happens offline."""
+    alb = bpy.data.images.get(prefix + "_Albedo")
+    nrm = bpy.data.images.get(prefix + "_Normal")
     if alb is not None and nrm is not None:
         return alb, nrm
     try:
@@ -7048,19 +7156,19 @@ def _tower_brick_images():
     except ImportError:
         return None
     W = 1024
-    tile_h = TOWER_ROWS * TOWER_ROW_H
+    tile_h = rows * row_h
     H = int(round(W * tile_h / TOWER_TILE_W))
     ppm = W / TOWER_TILE_W
-    rng = np.random.default_rng(3)
+    rng = np.random.default_rng(seed)
     bid = np.zeros((H, W), dtype=np.int32)
     d_edge = np.zeros((H, W), dtype=np.float32)
     yy, xx = np.mgrid[0:H, 0:W]
     vals = []
-    for r in range(TOWER_ROWS):
-        y0, y1 = int(round(r * TOWER_ROW_H * ppm)), int(round((r + 1) * TOWER_ROW_H * ppm))
+    for r in range(rows):
+        y0, y1 = int(round(r * row_h * ppm)), int(round((r + 1) * row_h * ppm))
         lens, tot = [], 0.0
         while tot < TOWER_TILE_W - 0.25:
-            l = float(rng.choice([0.45, 0.6, 0.75, 0.9, 1.1]))
+            l = float(rng.choice(lens_choices))
             lens.append(l)
             tot += l
         lens = np.array(lens) * TOWER_TILE_W / sum(lens)
@@ -7078,16 +7186,22 @@ def _tower_brick_images():
             vals.append((rng.uniform(0.82, 1.0), rng.uniform(-1, 1), rng.uniform(-1, 1)))
     vals = np.array(vals, dtype=np.float32)
     hv, tint, tint2 = vals[bid, 0], vals[bid, 1], vals[bid, 2]
-    joint, bevel = 0.011 * ppm, 0.016 * ppm
+    joint, bevel = joint_m * ppm, bevel_m * ppm
     t = np.clip((d_edge - joint) / bevel, 0, 1)
     height = t * t * (3 - 2 * t) * hv
-    noise = rng.normal(0, 1, (H, W)).astype(np.float32)
-    for _ in range(2):
-        noise = (noise + np.roll(noise, 1, 0) + np.roll(noise, -1, 0) + np.roll(noise, 1, 1) + np.roll(noise, -1, 1)) / 5
+
+    def blur(a, n):
+        for _ in range(n):
+            a = (a + np.roll(a, 1, 0) + np.roll(a, -1, 0) + np.roll(a, 1, 1) + np.roll(a, -1, 1)) / 5
+        return a
+    noise = blur(rng.normal(0, 1, (H, W)).astype(np.float32), 2)
     height = height + noise * 0.15
-    base = np.stack([0.58 + 0.08 * tint + 0.03 * tint2, 0.52 + 0.06 * tint, 0.46 + 0.05 * tint - 0.02 * tint2], -1)
-    base *= (0.80 + 0.40 * (hv[..., None] - 0.82) / 0.18)
-    base *= (1 + noise[..., None] * 0.5)
+    # large soft weathering blotches (tileable: a coarse random grid, blurred with wrap-around)
+    coarse = np.kron(rng.random((9, 8)).astype(np.float32), np.ones((H // 9 + 1, W // 8 + 1), dtype=np.float32))[:H, :W]
+    blotch = blur(coarse, 40) - 0.5
+    base = palette(np, tint, tint2, hv)
+    base = base * (0.80 + 0.40 * (hv[..., None] - 0.82) / 0.18) * (1 + noise[..., None] * 0.5)
+    base = base * (1.0 + blotch[..., None] * wear * 4.0)
     mortar = np.array([0.20, 0.19, 0.17])
     albedo = np.where((d_edge < joint + 0.5)[..., None], mortar, base)
     albedo = np.clip(albedo * (0.55 + 0.45 * np.clip(height * 1.6, 0, 1))[..., None], 0, 1)
@@ -7103,23 +7217,42 @@ def _tower_brick_images():
         # generated image back to blank black.
         img.colorspace_settings.name = colorspace
         if colorspace == 'sRGB':
-            arr = np.power(arr, 2.2)  # pixels[] is linear; the palette above is display-space
+            arr = np.power(arr, 2.2)  # pixels[] is linear; the palette is display-space
         rgba = np.concatenate([arr, np.ones((H, W, 1))], -1).astype(np.float32)
         img.pixels.foreach_set(rgba.ravel())
         img.update()
         img.pack()
         return img
-    return make("LA_Tower_Brick_Albedo", albedo, 'sRGB'), make("LA_Tower_Brick_Normal", nrm_arr, 'Non-Color')
+    return make(prefix + "_Albedo", albedo, 'sRGB'), make(prefix + "_Normal", nrm_arr, 'Non-Color')
 
 
-def get_or_create_tower_brick_material():
-    existing = bpy.data.materials.get("LA_Tower_Brick")
+def _brick_palette(np, tint, tint2, hv):
+    # muted fired-clay reds and browns, much less saturated than the first version
+    return np.stack([0.50 + 0.07 * tint + 0.03 * tint2, 0.42 + 0.05 * tint, 0.37 + 0.045 * tint - 0.02 * tint2], -1)
+
+
+def _stone_palette(np, tint, tint2, hv):
+    # warm grey limestone with the odd cooler or yellower block
+    return np.stack([0.56 + 0.05 * tint + 0.02 * tint2, 0.54 + 0.045 * tint, 0.50 + 0.04 * tint - 0.03 * tint2], -1)
+
+
+def _tower_brick_images():
+    return _masonry_images("LA_Tower_Brick", TOWER_ROWS, TOWER_ROW_H, [0.45, 0.6, 0.75, 0.9, 1.1], _brick_palette, 3)
+
+
+def _tower_stone_images():
+    # 4 rows of 0.52 m: the same 2.08 m tile as the bricks, but large dressed blocks
+    return _masonry_images("LA_Tower_Stone", TOWER_ROWS // 2, TOWER_ROW_H * 2, [0.7, 0.9, 1.1, 1.4], _stone_palette, 7,
+                           joint_m=0.014, bevel_m=0.02, wear=0.10)
+
+
+def _masonry_material(name, images, fallback_file, fallback_hex, roughness=0.9):
+    existing = bpy.data.materials.get(name)
     if existing is not None:
         return existing
-    images = _tower_brick_images()
     if images is None:
-        return _get_or_create_named_material("LA_Tower_Brick", "TowerBrick.png", "3a3028")
-    mat = bpy.data.materials.new("LA_Tower_Brick")
+        return _get_or_create_named_material(name, fallback_file, fallback_hex)
+    mat = bpy.data.materials.new(name)
     mat.use_nodes = True
     nodes, links = mat.node_tree.nodes, mat.node_tree.links
     nodes.clear()
@@ -7130,17 +7263,23 @@ def get_or_create_tower_brick_material():
     tex_n = nodes.new("ShaderNodeTexImage")
     tex_n.image = images[1]
     nmap = nodes.new("ShaderNodeNormalMap")
-    _set_input(bsdf, 'Roughness', 0.9)
+    _set_input(bsdf, 'Roughness', roughness)
     links.new(tex_a.outputs['Color'], bsdf.inputs['Base Color'])
     links.new(tex_n.outputs['Color'], nmap.inputs['Color'])
     links.new(nmap.outputs['Normal'], bsdf.inputs['Normal'])
     links.new(bsdf.outputs['BSDF'], out_node.inputs['Surface'])
-    mat.diffuse_color = (0.46, 0.41, 0.36, 1.0)
+    mat.diffuse_color = _hex_to_rgba(fallback_hex)
     return mat
 
 
+def get_or_create_tower_brick_material():
+    return _masonry_material("LA_Tower_Brick", _tower_brick_images() if bpy.data.materials.get("LA_Tower_Brick") is None else None,
+                             "TowerBrick.png", "3a3028")
+
+
 def get_or_create_tower_stone_material():
-    return _get_or_create_named_material("LA_Tower_Stone", "TowerStone.png", "3a3632")
+    return _masonry_material("LA_Tower_Stone", _tower_stone_images() if bpy.data.materials.get("LA_Tower_Stone") is None else None,
+                             "TowerStone.png", "3a3632", roughness=0.85)
 
 
 def _cyl_point(a, r, z):
@@ -7446,11 +7585,12 @@ class _WallRunBuilder:
         if self.battle:
             pitch = 1.5
             m = max(1, int(self.L / pitch))
+            # parapet on the outer half only; the rest of the wall top is a walkway
+            pt = min(0.5, self.t * 0.45)
             for k in range(m):
                 a = self.L * k / m
                 w = self.L / m * 0.62
-                self._block(a, a + w, -hy, hy, self.Hs, self.H)
-                self._block(a + w, self.L * (k + 1) / m, -hy, hy, self.Hs - 0.001, self.Hs + 0.001)
+                self._block(a, a + w, -hy, -hy + pt, self.Hs, self.H)
             self._block(0.0, self.L, -hy - 0.12, -hy + 0.02, self.Hs - 0.16, self.Hs)
 
     def _caps_and_steps(self):
@@ -7557,7 +7697,7 @@ class _TowerBuilder:
     def __init__(self, radius, height, wall, battlements=True, detail='MEDIUM', seed=1,
                  interior=False, stair_width=1.0, stair_start_deg=0.0,
                  plinth=True, cap_top=False, brick_cols=None, stones=None, seam=0.0,
-                 ruin=0.0, rubble_outside=True):
+                 ruin=0.0, rubble_outside=True, floor_levels=None):
         self.R, self.H, self.wall = radius, height, wall
         self.ruin = max(0.0, min(1.0, ruin))
         self.rubble_outside = rubble_outside
@@ -7575,7 +7715,8 @@ class _TowerBuilder:
         self.interior = interior
         self.stair_w = stair_width
         # snapped to the 64-segment slab grid so the slab hole ends exactly where a stair arrives
-        self.stair_a0 = round(math.radians(stair_start_deg) / (TOWER_TAU / 64.0)) * (TOWER_TAU / 64.0)
+        self.stair_a0 = (round(((math.radians(stair_start_deg) - seam) % TOWER_TAU) / (TOWER_TAU / 64.0))
+                         * (TOWER_TAU / 64.0))
         self.tile_w, self.tile_h = TOWER_TILE_W, TOWER_ROWS * TOWER_ROW_H
         self.Ko = brick_cols or max(1, round(TOWER_TAU * radius / self.tile_w))
         self.Ki = max(1, round(self.Ko * (radius - wall) / radius))
@@ -7588,6 +7729,13 @@ class _TowerBuilder:
         # storey's slab is the roof platform right behind the battlements.
         self.n_storeys = max(1, int(self.Hs // 3.0))
         self.sh = self.Hs / self.n_storeys
+        # slab heights bottom to top; explicit floor_levels (e.g. a castle putting a floor exactly at
+        # the wall-walk height) replace the even split
+        if floor_levels:
+            self.levels = [0.0] + sorted(floor_levels)
+            self.n_storeys = len(self.levels) - 1
+        else:
+            self.levels = [k * self.sh for k in range(self.n_storeys + 1)]
         self.openings = []
 
     # -- mapping helpers
@@ -7598,7 +7746,8 @@ class _TowerBuilder:
         return z / self.tile_h
 
     def add_opening(self, deg, width, sill, height, kind='arch'):
-        ac = math.radians(deg)
+        """deg is a WORLD angle; the shell sweep starts at self.seam, so convert."""
+        ac = (math.radians(deg) - self.seam) % TOWER_TAU
         half = width / 2.0 / self.R
         # keep the whole opening inside (0, 2*pi): the shell is built as one angular sweep
         ac = min(max(ac, half + 0.02), TOWER_TAU - half - 0.02)
@@ -8050,26 +8199,28 @@ class _TowerBuilder:
     def _stairs(self):
         r0 = max(0.3, self.R - self.wall - self.stair_w)
         r1 = self.R - self.wall + 0.02
-        steps = max(12, round(self.sh / 0.18))
-        rise = self.sh / steps
         n = self.SLAB_SEGS
         seg = TOWER_TAU / n
-        # the slab above is open over every step whose top is within 2.2 m of it
-        j_hole = next(j for j in range(steps) if (j + 1) * rise > self.sh - 2.2)
-        hole_segs = max(1, int(math.ceil((steps - j_hole) / steps * n)))
         a0_seg = int(round(self.stair_a0 / seg)) % n
-        hole = ((a0_seg - hole_segs) % n, (a0_seg - 1) % n)
-        self.stair_hole = hole
         tmin = min((c['top'] for c in self.columns if c['gap'] is None), default=self.Hs)
         for k in range(self.n_storeys):
-            if self.ruin > 0.0 and (k + 1) * self.sh > tmin + 0.3:
+            z_lo, z_hi = self.levels[k], self.levels[k + 1]
+            if self.ruin > 0.0 and z_hi > tmin + 0.3:
                 break  # floors above the lowest broken wall top have collapsed
+            h = z_hi - z_lo
+            steps = max(12, round(h / 0.18))
+            rise = h / steps
+            # the slab above is open over every step whose top is within 2.2 m of it
+            j_hole = next(j for j in range(steps) if (j + 1) * rise > h - 2.2)
+            hole_segs = max(1, int(math.ceil((steps - j_hole) / steps * n)))
+            hole = ((a0_seg - hole_segs) % n, (a0_seg - 1) % n)
+            self.stair_hole = hole
             for j in range(steps):
                 a = self.stair_a0 + TOWER_TAU * j / steps
                 b = self.stair_a0 + TOWER_TAU * (j + 1) / steps
-                top = k * self.sh + (j + 1) * rise
+                top = z_lo + (j + 1) * rise
                 self._wedge(a, b, r0, r1, 0.0 if k == 0 and j < 2 else top - 0.30, top)
-            self._slab((k + 1) * self.sh, hole)
+            self._slab(z_hi, hole)
 
     def geometry(self, ground=True):
         self._build_columns()
@@ -8104,7 +8255,7 @@ def _tower_openings_from_settings(builder, scene):
     for k in range(builder.n_storeys):
         if count <= 0:
             break
-        sill = k * builder.sh + 1.2
+        sill = builder.levels[k] + 1.2
         for i in range(count):
             deg = scene.wfc_tower_door_angle + 360.0 * (i + 0.25 + 0.5 * (k % 2)) / count
             builder.add_opening(deg % 360.0, 0.28, sill, 1.3, 'rect')
@@ -8185,25 +8336,31 @@ def _build_castle_mesh(width, depth, wall_h, wall_t, tower_r, tower_h, gate, kee
     big = _TowerMesh()
     W, D = width, depth
     stones_scale = {'LOW': 0.0, 'MEDIUM': 1.0, 'HIGH': 3.0}.get(detail, 1.0)
-    tower_h = max(tower_h, wall_h + 2.0)
+    tower_h = max(tower_h, wall_h + 3.0)
     hy = wall_t / 2.0
     # -- courtyard
     for pts in ([(-W / 2, -D / 2, 0.0), (W / 2, -D / 2, 0.0), (W / 2, D / 2, 0.0), (-W / 2, D / 2, 0.0)],):
         big.poly('yard', pts, [(p[0] / TOWER_TILE_W, p[1] / TOWER_TILE_W) for p in pts], (0.0, 0.0, 1.0), 1)
-    # -- corner towers
+    # -- corner towers: a floor exactly at the wall-walk height, doors out onto both walls
+    hs_wall = wall_h - 1.0
     corners = [(-W / 2, -D / 2), (W / 2, -D / 2), (W / 2, D / 2), (-W / 2, D / 2)]
     for i, (cx, cy) in enumerate(corners):
-        door_deg = math.degrees(math.atan2(-cy, -cx)) % 360.0
+        m = math.degrees(math.atan2(-math.copysign(1.0, cy), -math.copysign(1.0, cx))) % 360.0   # the courtyard diagonal (wall doors then sit exactly on the wall axes)
+        levels = [hs_wall, tower_h - 1.0]
+        # stairs arrive at m + 190 deg: the ground door (at m) then sits ~170 deg into the climb, well
+        # above head height, and the open stretch of the upper slab stays clear of the wall-walk doors
         tb = _TowerBuilder(
             tower_r, tower_h, tower_wall, battlements=True, detail=detail, seed=seed + 11 * i,
             interior=interior and tower_r - tower_wall >= 1.6, stair_width=1.0,
-            stair_start_deg=door_deg + 60.0, ruin=ruin,
+            stair_start_deg=m + 190.0, ruin=ruin, floor_levels=levels, seam=math.radians(m + 180.0),
         )
-        tb.add_opening(door_deg, 1.3, 0.0, min(2.6, tb.Hs - 1.0), 'arch')
+        tb.add_opening(m, 1.3, 0.0, min(2.6, tb.Hs - 1.0), 'arch')
+        for ang in (m - 45.0, m + 45.0):
+            tb.add_opening(ang % 360.0, 1.3, hs_wall, 2.2, 'arch')
         for k in range(tb.n_storeys):
-            tb.add_opening((door_deg + 180.0 + (40.0 if k % 2 else -40.0)) % 360.0, 0.28, k * tb.sh + 1.2, 1.3, 'rect')
+            tb.add_opening((m + 180.0 + (40.0 if k % 2 else -40.0)) % 360.0, 0.28, tb.levels[k] + 1.2, 1.3, 'rect')
         tb.geometry(ground=True)
-        big.append(tb.mb, offset=(cx, cy, 0.0))
+        big.append(tb.mb, rot=tb.seam, offset=(cx, cy, 0.0))
     # -- curtain walls
     xe = math.sqrt(max((tower_r - tower_wall / 2.0) ** 2 - hy * hy, 0.1))
     sides = [
@@ -9405,8 +9562,8 @@ def register():
         description="Curtain wall height including battlements"
     )
     bpy.types.Scene.wfc_castle_wall_thickness = FloatProperty(
-        name="Castle Wall Thickness", default=1.1, min=0.5, max=2.5, unit='LENGTH',
-        description="Curtain wall thickness"
+        name="Castle Wall Thickness", default=1.5, min=0.8, max=2.5, unit='LENGTH',
+        description="Curtain wall thickness: the outer 0.5 m is the parapet, the rest is the walkway"
     )
     bpy.types.Scene.wfc_castle_tower_radius = FloatProperty(
         name="Castle Tower Radius", default=3.2, min=2.0, max=8.0, unit='LENGTH',
@@ -9414,7 +9571,7 @@ def register():
     )
     bpy.types.Scene.wfc_castle_tower_height = FloatProperty(
         name="Castle Tower Height", default=12.0, min=5.0, max=40.0, unit='LENGTH',
-        description="Corner tower height (kept at least 2 m above the curtain walls)"
+        description="Corner tower height (kept at least 3 m above the curtain walls)"
     )
     bpy.types.Scene.wfc_castle_gate = BoolProperty(
         name="Gate", default=True, description="A large arched gate in the middle of the south wall"
