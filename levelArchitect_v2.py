@@ -32,7 +32,7 @@ from bpy_extras.io_utils import ExportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 25, 1),
+    "version": (0, 26, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -60,6 +60,7 @@ BLUEPRINT_OBJECT_NAME = "Procedural_Level_Blueprint"
 ROUND_FLOOR_OBJECT_NAME = "Procedural_Level_RoundFloors"
 WALLS_OBJECT_NAME = "Procedural_Level_Walls"
 WALLS_ROUND_OBJECT_NAME = "Procedural_Level_RoundWalls"
+WINDOWS_OBJECT_NAME = "Procedural_Level_Windows"
 STAIRS_OBJECT_NAME = "Procedural_Level_Stairs"
 DOORS_OBJECT_NAME = "Procedural_Level_Doors"
 DOORS_ROUND_OBJECT_NAME = "Procedural_Level_RoundDoors"
@@ -4214,6 +4215,7 @@ def _build_round_room_walls_mesh(
 def _build_wall_mesh(
     walkable_cells, tile_size, level_height, wall_height, wall_thickness, cap_top, name,
     organic_amount=0.0, z_offsets=None, forced_wall_edges=None, uv_tile_size=1.0, skip_cells=None,
+    window_edges=None, window_width=1.0, window_sill=1.0, window_height=1.0,
 ):
     """Fully-baked wall geometry, computed in plain Python rather than a
     Geometry Nodes region-extrude (whose exact Selection/mode defaults proved
@@ -4263,6 +4265,16 @@ def _build_wall_mesh(
     perimeter ring instead (see _build_round_room_walls_mesh) -- their
     per-cell blocky wall would otherwise still render underneath it.
 
+    window_edges (optional {((x,y,z), (ddx,ddy)), ...}, see
+    _pick_window_edges) -- exposed edges that get a real rectangular
+    opening (window_width wide, centered on the tile edge, sill at
+    window_sill and window_height tall) instead of a solid box: two
+    full-height piers plus a sill box below and a lintel box above, so the
+    hole is genuine geometry (visible through, walkable-collision-correct).
+    A window edge never takes part in a merged run, so runs split around
+    it. Opening is clamped so a pier of at least 0.1 m and a lintel of at
+    least 0.1 m always remain.
+
     Polycount: with Organic Irregularity off, every box along a straight
     run has identical thickness/height, so adjacent per-tile boxes are
     already perfectly flush/coplanar at their shared seam -- merging them
@@ -4279,6 +4291,10 @@ def _build_wall_mesh(
     z_offsets = z_offsets or {}
     forced_wall_edges = forced_wall_edges or set()
     skip_cells = skip_cells or set()
+    window_edges = window_edges or set()
+    win_w = min(window_width, tile_size - 0.2)
+    win_sill = max(0.0, min(window_sill, wall_height - 0.2))
+    win_top = min(win_sill + window_height, wall_height - 0.1)
 
     def is_exposed(x, y, z, ddx, ddy):
         return (x + ddx, y + ddy, z) not in walkable or ((x, y, z), (ddx, ddy)) in forced_wall_edges
@@ -4289,7 +4305,9 @@ def _build_wall_mesh(
     def jitter(amount):
         return random.uniform(-amount, amount) if amount > 0 else 0.0
 
-    def add_box(cx0, cy0, cx1, cy1, z0, z1):
+    def add_box(cx0, cy0, cx1, cy1, z0, z1, top=None, bottom=False):
+        # top/bottom override the default face culling: a window sill needs
+        # its top face and a lintel its underside, both genuinely visible.
         # Winding: vertex order reversed from the "obvious" per-corner
         # sweep -- verified against a real evaluated mesh in Blender
         # (tests/blender_headless_test.py) that the naive order pointed
@@ -4310,12 +4328,32 @@ def _build_wall_mesh(
             (cx0, cy0, z0), (cx1, cy0, z0), (cx1, cy1, z0), (cx0, cy1, z0),
             (cx0, cy0, z1), (cx1, cy0, z1), (cx1, cy1, z1), (cx0, cy1, z1),
         ])
-        if cap_top:
+        if cap_top if top is None else top:
             faces.append((i + 4, i + 5, i + 6, i + 7))  # top
+        if bottom:
+            faces.append((i + 3, i + 2, i + 1, i + 0))  # bottom
         faces.append((i + 5, i + 4, i + 0, i + 1))  # -Y side
         faces.append((i + 6, i + 5, i + 1, i + 2))  # +X side
         faces.append((i + 7, i + 6, i + 2, i + 3))  # +Y side
         faces.append((i + 4, i + 7, i + 3, i + 0))  # -X side
+
+    def add_window_wall(axis, fixed, lo, hi, z0, ht, wall_top):
+        """One tile-wide wall segment with a window opening. axis 'x' means
+        the wall extends along X at Y=fixed; 'y' along Y at X=fixed."""
+        mid = (lo + hi) / 2.0
+        w0, w1 = mid - win_w / 2.0, mid + win_w / 2.0
+
+        def box(a0, a1, zz0, zz1, **kw):
+            if axis == 'x':
+                add_box(a0, fixed - ht, a1, fixed + ht, zz0, zz1, **kw)
+            else:
+                add_box(fixed - ht, a0, fixed + ht, a1, zz0, zz1, **kw)
+
+        box(lo, w0, z0, wall_top)
+        box(w1, hi, z0, wall_top)
+        if win_sill > 0.0:
+            box(w0, w1, z0, z0 + win_sill, top=True)
+        box(w0, w1, z0 + win_top, wall_top, bottom=True)
 
     if organic_amount > 0:
         for x, y, z in walkable_cells:
@@ -4329,16 +4367,32 @@ def _build_wall_mesh(
 
             if is_exposed(x, y, z, -1, 0):
                 ht = max(0.02, half_thick + jitter(organic_amount * 0.3))
-                add_box(left - ht, bottom, left + ht, top, z0, z0 + wall_height + jitter(organic_amount))
+                wt = z0 + wall_height + jitter(organic_amount)
+                if ((x, y, z), (-1, 0)) in window_edges:
+                    add_window_wall('y', left, bottom, top, z0, ht, wt)
+                else:
+                    add_box(left - ht, bottom, left + ht, top, z0, wt)
             if is_exposed(x, y, z, 1, 0):
                 ht = max(0.02, half_thick + jitter(organic_amount * 0.3))
-                add_box(right - ht, bottom, right + ht, top, z0, z0 + wall_height + jitter(organic_amount))
+                wt = z0 + wall_height + jitter(organic_amount)
+                if ((x, y, z), (1, 0)) in window_edges:
+                    add_window_wall('y', right, bottom, top, z0, ht, wt)
+                else:
+                    add_box(right - ht, bottom, right + ht, top, z0, wt)
             if is_exposed(x, y, z, 0, -1):
                 ht = max(0.02, half_thick + jitter(organic_amount * 0.3))
-                add_box(left, bottom - ht, right, bottom + ht, z0, z0 + wall_height + jitter(organic_amount))
+                wt = z0 + wall_height + jitter(organic_amount)
+                if ((x, y, z), (0, -1)) in window_edges:
+                    add_window_wall('x', bottom, left, right, z0, ht, wt)
+                else:
+                    add_box(left, bottom - ht, right, bottom + ht, z0, wt)
             if is_exposed(x, y, z, 0, 1):
                 ht = max(0.02, half_thick + jitter(organic_amount * 0.3))
-                add_box(left, top - ht, right, top + ht, z0, z0 + wall_height + jitter(organic_amount))
+                wt = z0 + wall_height + jitter(organic_amount)
+                if ((x, y, z), (0, 1)) in window_edges:
+                    add_window_wall('x', top, left, right, z0, ht, wt)
+                else:
+                    add_box(left, top - ht, right, top + ht, z0, wt)
     else:
         z1_top = wall_height  # relative rise, added to each run's own z0 below
 
@@ -4352,6 +4406,13 @@ def _build_wall_mesh(
                 if (x, y, z) in skip_cells:
                     continue
                 if is_exposed(x, y, z, dx, 0):
+                    if ((x, y, z), (dx, 0)) in window_edges:
+                        z0w = z * level_height + z_offsets.get((x, y, z), 0.0)
+                        add_window_wall(
+                            'y', (x + 0.5 * dx) * tile_size, (y - 0.5) * tile_size,
+                            (y + 0.5) * tile_size, z0w, half_thick, z0w + z1_top,
+                        )
+                        continue
                     lines.setdefault((x, z), []).append((y, z_offsets.get((x, y, z), 0.0)))
             for (x, z), items in lines.items():
                 items.sort()
@@ -4376,6 +4437,13 @@ def _build_wall_mesh(
                 if (x, y, z) in skip_cells:
                     continue
                 if is_exposed(x, y, z, 0, dy):
+                    if ((x, y, z), (0, dy)) in window_edges:
+                        z0w = z * level_height + z_offsets.get((x, y, z), 0.0)
+                        add_window_wall(
+                            'x', (y + 0.5 * dy) * tile_size, (x - 0.5) * tile_size,
+                            (x + 0.5) * tile_size, z0w, half_thick, z0w + z1_top,
+                        )
+                        continue
                     lines.setdefault((y, z), []).append((x, z_offsets.get((x, y, z), 0.0)))
             for (y, z), items in lines.items():
                 items.sort()
@@ -4399,6 +4467,120 @@ def _build_wall_mesh(
     mesh.update()
     _add_planar_uv_map(mesh, uv_tile_size)
     return mesh
+
+
+def _pick_window_edges(
+    walkable_cells, room_ids, tile_size, wall_height, window_sill, window_height,
+    chance, seed, skip_cells=None, forced_wall_edges=None, min_gap=2,
+):
+    """Deterministically chooses which exposed room-wall edges get a window.
+    Returns {((x,y,z), (dx,dy)), ...}, shared by the wall builder (cuts the
+    opening) and the window builder (fills it) so the two always agree.
+
+    Only edges of ROOM cells qualify (never corridors, so a corridor's
+    solid walls stay solid), never Round rooms (skip_cells -- their ring
+    wall is a different mesh) and never a forced Corridor-Stairs side.
+    Two windows on the same wall line are at least min_gap tiles apart so
+    a long wall reads as rhythm, not a perforated strip. The wall must be
+    tall enough to keep a sill and a lintel, else nothing is picked."""
+    if chance <= 0.0 or tile_size < 0.6 or wall_height < window_sill + 0.3:
+        return set()
+    skip_cells = skip_cells or set()
+    forced_wall_edges = forced_wall_edges or set()
+    walkable = set(walkable_cells)
+    rng = random.Random(seed * 7919 + 31)
+    picked = set()
+    taken = {}  # (axis_kind, line, z) -> [positions]
+    for cell in sorted(walkable):
+        x, y, z = cell
+        if room_ids.get(cell, -1) < 0 or cell in skip_cells:
+            continue
+        for dx, dy in HORIZONTAL_NEIGHBORS:
+            if (x + dx, y + dy, z) in walkable or (cell, (dx, dy)) in forced_wall_edges:
+                continue
+            if rng.random() >= chance:
+                continue
+            key = ('x', x + 0.5 * dx, z) if dx != 0 else ('y', y + 0.5 * dy, z)
+            pos = y if dx != 0 else x
+            if any(abs(pos - other) < min_gap for other in taken.get(key, [])):
+                continue
+            taken.setdefault(key, []).append(pos)
+            picked.add((cell, (dx, dy)))
+    return picked
+
+
+def _build_window_mesh(
+    window_edges, tile_size, level_height, wall_thickness, window_width, window_sill,
+    window_height, wall_height, z_offsets, name, uv_tile_size=1.0,
+):
+    """Frame + mullion cross + a thin glass pane for each window edge picked
+    by _pick_window_edges. Material slot 0 = frame, 1 = glass. The frame
+    bars sit inside the opening cut by _build_wall_mesh (same clamped
+    width/sill/top maths), so nothing overlaps the wall's own faces."""
+    win_w = min(window_width, tile_size - 0.2)
+    sill = max(0.0, min(window_sill, wall_height - 0.2))
+    top = min(sill + window_height, wall_height - 0.1)
+    depth = max(0.04, wall_thickness * 0.5)
+    bar = 0.05
+    verts, faces, mats = [], [], []
+
+    def add_box(x0, y0, x1, y1, z0, z1, mat):
+        i = len(verts)
+        verts.extend([
+            (x0, y0, z0), (x1, y0, z0), (x1, y1, z0), (x0, y1, z0),
+            (x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1),
+        ])
+        for f in ((3, 2, 1, 0), (4, 5, 6, 7), (5, 4, 0, 1), (6, 5, 1, 2), (7, 6, 2, 3), (4, 7, 3, 0)):
+            faces.append(tuple(i + k for k in f))
+            mats.append(mat)
+
+    for (x, y, z), (dx, dy) in sorted(window_edges):
+        z0 = z * level_height + z_offsets.get((x, y, z), 0.0)
+        zb, zt = z0 + sill, z0 + top
+        zm = (zb + zt) / 2.0
+        if dx != 0:
+            fixed, mid = (x + 0.5 * dx) * tile_size, y * tile_size
+
+            def box(a0, a1, b0, b1, mat, thick=depth):
+                add_box(fixed - thick, mid + a0, fixed + thick, mid + a1, b0, b1, mat)
+        else:
+            fixed, mid = (y + 0.5 * dy) * tile_size, x * tile_size
+
+            def box(a0, a1, b0, b1, mat, thick=depth):
+                add_box(mid + a0, fixed - thick, mid + a1, fixed + thick, b0, b1, mat)
+        hw = win_w / 2.0
+        box(-hw, -hw + bar, zb, zt, 0)           # left jamb
+        box(hw - bar, hw, zb, zt, 0)             # right jamb
+        box(-hw, hw, zb, zb + bar, 0)            # bottom rail
+        box(-hw, hw, zt - bar, zt, 0)            # top rail
+        box(-bar / 2.0, bar / 2.0, zb, zt, 0, depth * 0.7)   # vertical mullion
+        box(-hw, hw, zm - bar / 2.0, zm + bar / 2.0, 0, depth * 0.7)  # transom
+        box(-hw + bar, hw - bar, zb + bar, zt - bar, 1, 0.008)  # glass
+
+    mesh = bpy.data.meshes.new(name + "_Mesh")
+    mesh.from_pydata(verts, [], faces)
+    mesh.update()
+    _add_planar_uv_map(mesh, uv_tile_size)
+    for poly, m in zip(mesh.polygons, mats):
+        poly.material_index = m
+    return mesh
+
+
+def get_or_create_window_frame_material():
+    return _get_or_create_named_material("LA_Window_Frame", "WindowFrame.png", "4a3524")
+
+
+def get_or_create_window_glass_material():
+    existing = bpy.data.materials.get("LA_Window_Glass")
+    if existing is not None:
+        return existing
+    mat = _new_textured_material("LA_Window_Glass", "WindowGlass.png", "9fc8e0")
+    # Translucent pane: alpha lives on the Principled node when it exists.
+    bsdf = next((n for n in mat.node_tree.nodes if n.type == 'BSDF_PRINCIPLED'), None)
+    if bsdf is not None:
+        _set_input(bsdf, 'Alpha', 0.35)
+    _set_prop(mat, 'blend_method', 'BLEND')
+    return mat
 
 
 def _cluster_nearby_points(points, merge_distance):
@@ -5692,6 +5874,110 @@ def _build_torch_mesh(torches, tile_size, torch_height, name, uv_tile_size=1.0):
     return mesh
 
 
+# Composite decoration kinds beyond the original CRATE/BARREL/CONE. Each is
+# a short list of box/cylinder parts (see _build_decoration_mesh.add_part)
+# sized in meters for a 2 m tile and scaled by tile_size / 2. Front faces +X
+# in the prop's local frame. The idea for these shapes (and the theme
+# groupings below) comes from the sibling Dracula adventure project's prop
+# library, rebuilt here as plain primitives so the addon stays dependency-
+# free and everything stays in one baked mesh.
+PROP_THEMES = {
+    # theme -> (floor kinds, wall kinds); kinds picked uniformly
+    'CRYPT': (('COFFIN', 'TOMB', 'COLUMN', 'CANDLESTAND', 'CRATE'), ('COLUMN',)),
+    'LIBRARY': (('TABLE', 'CHAIR', 'CANDLESTAND', 'CHEST'), ('BOOKSHELF', 'BOOKSHELF', 'CHEST')),
+    'HALL': (('TABLE', 'CHAIR', 'CHAIR', 'BARREL', 'CANDLESTAND'), ('CHEST', 'BARREL')),
+    'BEDROOM': (('BED', 'CHEST', 'CHAIR', 'CANDLESTAND'), ('BED', 'BOOKSHELF', 'CHEST')),
+    'STORAGE': (('CRATE', 'BARREL', 'BARREL', 'CHEST'), ('CRATE', 'BARREL')),
+}
+
+
+def _composite_prop_parts(kind, k):
+    """Parts list for a composite prop kind; k = tile_size / 2.0. A part's
+    material is not tracked -- decoration shares one slot."""
+    def box(lx, ly, dz, hx, hy, h):
+        return ('box', lx * k, ly * k, dz * k, hx * k, hy * k, h * k)
+
+    def cyl(lx, ly, dz, r, h):
+        return ('cyl', lx * k, ly * k, dz * k, r * k, h * k)
+
+    if kind == 'TABLE':
+        parts = [box(0, 0, 0.7, 0.55, 0.3, 0.06)]
+        parts += [box(sx * 0.48, sy * 0.24, 0, 0.04, 0.04, 0.7) for sx in (-1, 1) for sy in (-1, 1)]
+        return parts
+    if kind == 'CHAIR':
+        parts = [box(0, 0, 0.42, 0.2, 0.2, 0.05), box(-0.18, 0, 0.47, 0.025, 0.2, 0.45)]
+        parts += [box(sx * 0.16, sy * 0.16, 0, 0.025, 0.025, 0.42) for sx in (-1, 1) for sy in (-1, 1)]
+        return parts
+    if kind == 'CHEST':
+        return [box(0, 0, 0, 0.35, 0.22, 0.32), box(0, 0, 0.32, 0.37, 0.24, 0.1),
+                box(0.35, 0, 0.18, 0.02, 0.05, 0.1)]
+    if kind == 'BOOKSHELF':
+        # back at -X, open front at +X; shelves + a few book blocks
+        parts = [box(-0.17, 0, 0, 0.03, 0.45, 2.0),
+                 box(0, -0.43, 0, 0.2, 0.03, 2.0), box(0, 0.43, 0, 0.2, 0.03, 2.0)]
+        parts += [box(0, 0, z, 0.2, 0.43, 0.04) for z in (0.0, 0.5, 1.0, 1.5, 1.96)]
+        for z in (0.04, 0.54, 1.04, 1.54):
+            for i, ly in enumerate((-0.33, -0.2, -0.05, 0.1, 0.26)):
+                parts.append(box(0.0, ly, z, 0.15, 0.05, 0.28 + 0.04 * (i % 3)))
+        return parts
+    if kind == 'COLUMN':
+        return [box(0, 0, 0, 0.26, 0.26, 0.18), cyl(0, 0, 0.18, 0.18, 2.4), box(0, 0, 2.58, 0.27, 0.27, 0.18)]
+    if kind == 'COFFIN':
+        return [box(0, 0, 0.0, 0.85, 0.38, 0.1), box(0, 0, 0.1, 0.8, 0.34, 0.38),
+                box(0.05, 0, 0.48, 0.82, 0.36, 0.06)]
+    if kind == 'TOMB':
+        return [box(0, 0, 0, 0.8, 0.45, 0.5), box(0, 0, 0.5, 0.85, 0.5, 0.1)]
+    if kind == 'BED':
+        # head at -X
+        parts = [box(0, 0, 0.2, 0.8, 0.5, 0.18), box(0.05, 0, 0.38, 0.72, 0.46, 0.14),
+                 box(-0.8, 0, 0.0, 0.05, 0.5, 0.8)]
+        parts += [box(sx * 0.75, sy * 0.46, 0, 0.04, 0.04, 0.2) for sx in (-1, 1) for sy in (-1, 1)]
+        parts.append(box(-0.6, 0, 0.52, 0.15, 0.35, 0.1))
+        return parts
+    if kind == 'CANDLESTAND':
+        return [cyl(0, 0, 0, 0.14, 0.04), cyl(0, 0, 0.04, 0.03, 1.0),
+                cyl(0, 0, 1.04, 0.1, 0.03)] + [cyl(dx * 0.07, dy * 0.07, 1.07, 0.02, 0.18)
+                                                 for dx, dy in ((1, 0), (-1, 0), (0, 1))]
+    return []
+
+
+def _prop_fits(kind, rot, ox, oy, wall_dirs, half_room, tile_size):
+    """True if a prop at offset (ox, oy) from its cell centre, rotated by
+    rot (any angle; extents come from the rotated local bounding box),
+    stays inside half_room on every side that has a wall and inside the
+    cell on every open side (so it never pokes into a distant wall)."""
+    xmin, xmax, ymin, ymax = _prop_local_bounds(kind, tile_size)
+    c, s_ = math.cos(rot), math.sin(rot)
+    pts = [(lx * c - ly * s_, lx * s_ + ly * c) for lx in (xmin, xmax) for ly in (ymin, ymax)]
+    for dx, dy in HORIZONTAL_NEIGHBORS:
+        reach = max(px * dx + py * dy for px, py in pts) + ox * dx + oy * dy
+        limit = half_room if (dx, dy) in wall_dirs else tile_size / 2.0
+        if reach > limit + 1e-6:
+            return False
+    return True
+
+
+def _prop_local_bounds(kind, tile_size):
+    """(xmin, xmax, ymin, ymax) of a prop in its local frame (front = +X),
+    from the same parts _build_decoration_mesh emits -- lets placement keep
+    a prop clear of the wall without hand-tuned depth constants."""
+    if kind == 'CRATE':
+        r = tile_size * 0.22
+        return (-r, r, -r, r)
+    if kind in ('BARREL', 'CONE'):
+        r = tile_size * (0.18 if kind == 'BARREL' else 0.2)
+        return (-r, r, -r, r)
+    xs0, xs1, ys0, ys1 = [], [], [], []
+    for part in _composite_prop_parts(kind, tile_size / 2.0):
+        hx = part[4]
+        hy = part[5] if part[0] == 'box' else part[4]
+        xs0.append(part[1] - hx)
+        xs1.append(part[1] + hx)
+        ys0.append(part[2] - hy)
+        ys1.append(part[2] + hy)
+    return (min(xs0), max(xs1), min(ys0), max(ys1))
+
+
 def _build_decoration_mesh(props, tile_size, name, uv_tile_size=1.0):
     """Fully-baked placeholder decoration -- crates, barrels, and simple
     cone-topped props (chests/furniture/dressing in general), scattered
@@ -5704,11 +5990,12 @@ def _build_decoration_mesh(props, tile_size, name, uv_tile_size=1.0):
     position to place the base of the prop at (z0 already includes any
     continuous-elevation offset), kind is 'CRATE' / 'BARREL' / 'CONE',
     rot is a random Z-rotation in radians (only meaningful for CRATE,
-    since barrel/cone are rotationally symmetric about Z)."""
+    since barrel/cone are rotationally symmetric about Z). Any other kind
+    is a composite from _composite_prop_parts (see PROP_THEMES)."""
     verts = []
     faces = []
 
-    def add_box(cx, cy, z0, half_w, half_d, height, angle):
+    def add_box(cx, cy, z0, half_w, half_d, height, angle, bottom=False):
         # Same winding fix as _build_wall_mesh's add_box -- see its
         # comment. No bottom face: z0 is always the prop's real resting
         # floor level (its own docstring above), so the base is always
@@ -5722,12 +6009,14 @@ def _build_decoration_mesh(props, tile_size, name, uv_tile_size=1.0):
         for lx, ly in local:
             verts.append((cx + lx * c - ly * s, cy + lx * s + ly * c, z0 + height))
         faces.append((i + 4, i + 5, i + 6, i + 7))
+        if bottom:  # raised composite parts (table tops, bed frames) show their underside
+            faces.append((i + 3, i + 2, i + 1, i + 0))
         faces.append((i + 5, i + 4, i + 0, i + 1))
         faces.append((i + 6, i + 5, i + 1, i + 2))
         faces.append((i + 7, i + 6, i + 2, i + 3))
         faces.append((i + 4, i + 7, i + 3, i + 0))
 
-    def add_cylinder(cx, cy, z0, radius, height, sides=10):
+    def add_cylinder(cx, cy, z0, radius, height, sides=10, bottom=False):
         # No bottom cap, same reasoning as add_box above -- a barrel always
         # rests directly on real floor geometry.
         i = len(verts)
@@ -5738,6 +6027,8 @@ def _build_decoration_mesh(props, tile_size, name, uv_tile_size=1.0):
             a = 2.0 * math.pi * k / sides
             verts.append((cx + radius * math.cos(a), cy + radius * math.sin(a), z0 + height))
         faces.append(tuple(range(i + sides, i + 2 * sides)))
+        if bottom:
+            faces.append(tuple(reversed(range(i, i + sides))))
         for k in range(sides):
             a0, a1 = i + k, i + (k + 1) % sides
             b0, b1 = i + sides + k, i + sides + (k + 1) % sides
@@ -5756,13 +6047,32 @@ def _build_decoration_mesh(props, tile_size, name, uv_tile_size=1.0):
             a0, a1 = i + k, i + (k + 1) % sides
             faces.append((a0, a1, apex))
 
+    def add_part(cx, cy, z0, rot, part):
+        # Composite props: ('box', lx, ly, dz, half_x, half_y, h) or
+        # ('cyl', lx, ly, dz, r, h), in the prop's local frame (front = +X),
+        # rotated by rot about the prop origin and lifted dz above z0.
+        # Parts of a composite overlap on purpose (legs into tops, etc.),
+        # so nothing relies on exact face contact and no bottom-face
+        # culling is needed between them; the whole prop still rests on
+        # the floor, so the lowest parts keep the usual hidden base.
+        c, s_ = math.cos(rot), math.sin(rot)
+        lx, ly = part[1], part[2]
+        px, py = cx + lx * c - ly * s_, cy + lx * s_ + ly * c
+        if part[0] == 'box':
+            add_box(px, py, z0 + part[3], part[4], part[5], part[6], rot, bottom=part[3] > 1e-6)
+        else:
+            add_cylinder(px, py, z0 + part[3], part[4], part[5], bottom=part[3] > 1e-6)
+
     for cx, cy, z0, kind, rot in props:
         if kind == 'CRATE':
             add_box(cx, cy, z0, tile_size * 0.22, tile_size * 0.22, tile_size * 0.4, rot)
         elif kind == 'BARREL':
             add_cylinder(cx, cy, z0, tile_size * 0.18, tile_size * 0.45)
-        else:  # 'CONE'
+        elif kind == 'CONE':
             add_cone(cx, cy, z0, tile_size * 0.2, tile_size * 0.5)
+        else:
+            for part in _composite_prop_parts(kind, tile_size / 2.0):
+                add_part(cx, cy, z0, rot, part)
 
     mesh = bpy.data.meshes.new(name + "_Mesh")
     mesh.from_pydata(verts, [], faces)
@@ -5843,6 +6153,17 @@ class OBJECT_OT_GenerateLevelWalls(bpy.types.Operator):
 
         _remove_objects_by_prefix(WALLS_OBJECT_NAME)
         _remove_objects_by_prefix(WALLS_ROUND_OBJECT_NAME)
+        _remove_objects_by_prefix(WINDOWS_OBJECT_NAME)
+
+        window_edges = _pick_window_edges(
+            walkable_cells, room_id_grid, tile_size, scene.wfc_wall_height, scene.wfc_window_sill,
+            scene.wfc_window_height, scene.wfc_window_chance, scene.wfc_seed,
+            skip_cells=skip_cells, forced_wall_edges=forced_wall_edges,
+        )
+        window_kwargs = dict(
+            window_edges=window_edges, window_width=scene.wfc_window_width,
+            window_sill=scene.wfc_window_sill, window_height=scene.wfc_window_height,
+        )
 
         if scene.wfc_simple_materials:
             wall_material = get_or_create_simple_wall_material()
@@ -5891,7 +6212,7 @@ class OBJECT_OT_GenerateLevelWalls(bpy.types.Operator):
                     scene.wfc_wall_height, scene.wfc_wall_thickness, scene.wfc_wall_cap_top,
                     name, organic_amount=organic_amount, z_offsets=z_offsets,
                     forced_wall_edges=forced_wall_edges, uv_tile_size=scene.wfc_uv_tile_size,
-                    skip_cells=skip_cells,
+                    skip_cells=skip_cells, **window_kwargs,
                 )
                 if not wall_mesh_data.vertices:
                     bpy.data.meshes.remove(wall_mesh_data)
@@ -5912,7 +6233,7 @@ class OBJECT_OT_GenerateLevelWalls(bpy.types.Operator):
                 scene.wfc_wall_height, scene.wfc_wall_thickness, scene.wfc_wall_cap_top,
                 WALLS_OBJECT_NAME, organic_amount=organic_amount, z_offsets=z_offsets,
                 forced_wall_edges=forced_wall_edges, uv_tile_size=scene.wfc_uv_tile_size,
-                skip_cells=skip_cells,
+                skip_cells=skip_cells, **window_kwargs,
             )
             obj = bpy.data.objects.new(WALLS_OBJECT_NAME, wall_mesh_data)
             context.collection.objects.link(obj)
@@ -5928,6 +6249,22 @@ class OBJECT_OT_GenerateLevelWalls(bpy.types.Operator):
             for obj in created:
                 _add_corner_rounding_modifier(obj, scene.wfc_wall_corner_radius)
 
+        # Rounding is applied before the window object is added on purpose:
+        # frames/glass are separate geometry and must stay crisp.
+        if window_edges:
+            win_mesh = _build_window_mesh(
+                window_edges, tile_size, level_height, scene.wfc_wall_thickness,
+                scene.wfc_window_width, scene.wfc_window_sill, scene.wfc_window_height,
+                scene.wfc_wall_height, z_offsets, WINDOWS_OBJECT_NAME,
+                uv_tile_size=scene.wfc_uv_tile_size,
+            )
+            win_obj = bpy.data.objects.new(WINDOWS_OBJECT_NAME, win_mesh)
+            context.collection.objects.link(win_obj)
+            win_mesh.materials.append(get_or_create_window_frame_material())
+            win_mesh.materials.append(get_or_create_window_glass_material())
+            _add_viewport_color_attribute(win_mesh)
+            created.append(win_obj)
+
         for obj in created:
             obj.select_set(True)
         if created:
@@ -5935,7 +6272,8 @@ class OBJECT_OT_GenerateLevelWalls(bpy.types.Operator):
 
         self.report(
             {'INFO'},
-            f"Walls generated from {len(walkable_cells)} exposed edges, in {len(created)} object(s)."
+            f"Walls generated from {len(walkable_cells)} exposed edges, in {len(created)} object(s)"
+            f"{f', {len(window_edges)} windows' if window_edges else ''}."
         )
         _update_debug_snapshot(context, "Step 2: Generate Walls")
         return {'FINISHED'}
@@ -6373,6 +6711,9 @@ class OBJECT_OT_GenerateLevelProps(bpy.types.Operator):
 
         decorations = []  # (cx, cy, z0, kind, rot)
         prop_kinds = ('CRATE', 'BARREL', 'CONE')
+        theme_setting = scene.wfc_prop_theme
+        theme_rng = random.Random(scene.wfc_seed * 104729 + 17)
+        theme_names = sorted(PROP_THEMES)
         for rid, cells in cells_by_room_all.items():
             thresholds = set()
             for xi, yi, zi in cells:
@@ -6385,11 +6726,50 @@ class OBJECT_OT_GenerateLevelProps(bpy.types.Operator):
             if not candidates:
                 continue
             prop_count = min(len(candidates), round(len(candidates) * scene.wfc_prop_chance))
-            for cell in random.sample(candidates, prop_count):
+            if theme_setting == 'GENERIC':
+                for cell in random.sample(candidates, prop_count):
+                    x, y, z = cell
+                    kind = random.choice(prop_kinds)
+                    rot = random.uniform(0.0, 2.0 * math.pi)
+                    decorations.append((x * tile_size, y * tile_size, cell_z0(cell), kind, rot))
+                continue
+
+            theme = theme_rng.choice(theme_names) if theme_setting == 'MIXED' else theme_setting
+            floor_kinds, wall_kinds = PROP_THEMES[theme]
+            half_room = tile_size / 2.0 - scene.wfc_wall_thickness / 2.0 - 0.03  # cell centre -> wall's inner face
+            # Wall-adjacent cells mostly take wall kinds pushed back against the wall;
+            # every other placement is a quarter-turn that provably fits the cell's walls.
+            for cell in theme_rng.sample(candidates, prop_count):
                 x, y, z = cell
-                kind = random.choice(prop_kinds)
-                rot = random.uniform(0.0, 2.0 * math.pi)
-                decorations.append((x * tile_size, y * tile_size, cell_z0(cell), kind, rot))
+                wall_dirs = [
+                    (dx, dy) for dx, dy in HORIZONTAL_NEIGHBORS if (x + dx, y + dy, z) not in walkable_cells
+                ]
+                if wall_dirs and theme_rng.random() < 0.7:
+                    dx, dy = theme_rng.choice(wall_dirs)
+                    kind = theme_rng.choice(wall_kinds)
+                    xmin, xmax, ymin, ymax = _prop_local_bounds(kind, tile_size)
+                    rot = math.atan2(-dy, -dx)  # local +X (front) faces into the room
+                    off = half_room - (-xmin)  # back (-X side) touches the wall's inner face
+                    cx, cy = x * tile_size + dx * off, y * tile_size + dy * off
+                    # lateral fit along the wall: a prop wider than the tile just doesn't go here
+                    if max(-ymin, ymax) > tile_size / 2.0:
+                        continue
+                    # if another wall is also close (a corner), make sure it still fits
+                    if not _prop_fits(kind, rot, cx - x * tile_size, cy - y * tile_size, wall_dirs, half_room, tile_size):
+                        continue
+                else:
+                    kind = theme_rng.choice(floor_kinds)
+                    turns = [0, 1, 2, 3]
+                    theme_rng.shuffle(turns)
+                    rot = None
+                    for t in turns:
+                        if _prop_fits(kind, t * math.pi / 2.0, 0.0, 0.0, wall_dirs, half_room, tile_size):
+                            rot = t * math.pi / 2.0
+                            break
+                    if rot is None:
+                        continue
+                    cx, cy = x * tile_size, y * tile_size
+                decorations.append((cx, cy, cell_z0(cell), kind, rot))
 
         created = []
 
@@ -6863,6 +7243,14 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
         radius_row = col.row(align=True)
         radius_row.enabled = scene.wfc_wall_corner_rounding
         radius_row.prop(scene, "wfc_wall_corner_radius", text="Radius")
+        col.separator()
+        col.prop(scene, "wfc_window_chance", text="Window Chance")
+        win_col = col.column(align=True)
+        win_col.enabled = scene.wfc_window_chance > 0.0
+        win_col.prop(scene, "wfc_window_width", text="Window Width")
+        win_row = win_col.row(align=True)
+        win_row.prop(scene, "wfc_window_sill", text="Sill")
+        win_row.prop(scene, "wfc_window_height", text="Height")
         layout.separator()
         _step_button(
             layout, "object.generate_level_walls", "Step 2: Generate Walls",
@@ -6938,6 +7326,7 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
         col.prop(scene, "wfc_torch_light_color", text="Light Color")
         col.separator()
         col.prop(scene, "wfc_prop_chance", text="Prop Chance")
+        col.prop(scene, "wfc_prop_theme", text="Theme")
         layout.separator()
         _step_button(
             layout, "object.generate_level_props", "Step 5: Generate Props",
@@ -7255,6 +7644,25 @@ def register():
         description="Bevel width for Round Corners -- Blender's own Clamp Overlap keeps an "
                     "oversized radius from self-intersecting on a thin wall"
     )
+    bpy.types.Scene.wfc_window_chance = FloatProperty(
+        name="Window Chance", default=0.0, min=0.0, max=1.0, subtype='FACTOR',
+        description="Chance that each exposed room-wall edge gets a real window opening (cut "
+                    "through the wall, with a frame, mullions and a glass pane). Corridors, Round "
+                    "rooms and Corridor-Stairs sides are never windowed; windows on one wall are "
+                    "kept at least 2 tiles apart. 0 = no windows (default)"
+    )
+    bpy.types.Scene.wfc_window_width = FloatProperty(
+        name="Window Width", default=1.0, min=0.3, max=4.0, unit='LENGTH',
+        description="Opening width in meters (clamped to leave 0.1 m of wall each side of a tile)"
+    )
+    bpy.types.Scene.wfc_window_sill = FloatProperty(
+        name="Window Sill", default=1.0, min=0.0, max=5.0, unit='LENGTH',
+        description="Height of the window's bottom edge above the floor"
+    )
+    bpy.types.Scene.wfc_window_height = FloatProperty(
+        name="Window Height", default=1.0, min=0.3, max=5.0, unit='LENGTH',
+        description="Height of the opening (clamped so a lintel always remains under the wall top)"
+    )
     bpy.types.Scene.wfc_organic_amount = FloatProperty(
         name="Organic Irregularity", default=0.0, min=0.0, max=0.3, unit='LENGTH',
         description="Jitters wall height/thickness, stair tread width, and ramp edges for a "
@@ -7408,6 +7816,22 @@ def register():
         description="Chance any given non-doorway floor tile in a room gets a crate/barrel/cone "
                     "decoration prop"
     )
+    bpy.types.Scene.wfc_prop_theme = EnumProperty(
+        name="Prop Theme",
+        items=[
+            ('GENERIC', "Generic", "Crates, barrels and cones (original look)"),
+            ('MIXED', "Mixed Rooms", "Each room randomly gets one of the themes below"),
+            ('CRYPT', "Crypt", "Coffins, tombs, columns, candle stands"),
+            ('LIBRARY', "Library", "Bookshelves along walls, tables, chairs, chests"),
+            ('HALL', "Hall", "Tables, chairs, barrels, chests"),
+            ('BEDROOM', "Bedroom", "Beds, chests, chairs, bookshelves"),
+            ('STORAGE', "Storage", "Crates, barrels, chests"),
+        ],
+        default='GENERIC',
+        description="What kind of furniture decoration props are. Themed props are stacked "
+                    "primitives (tables, chairs, bookshelves, coffins, beds...) placed against "
+                    "walls or rotated to quarter turns; all in the one decoration mesh"
+    )
     bpy.types.Scene.wfc_debug_params = StringProperty(
         name="Debug Params", default="",
         description="Internal: snapshot of every wfc_* setting as of the most recent Step "
@@ -7481,6 +7905,10 @@ def unregister():
     del bpy.types.Scene.wfc_wall_grouping
     del bpy.types.Scene.wfc_wall_corner_rounding
     del bpy.types.Scene.wfc_wall_corner_radius
+    del bpy.types.Scene.wfc_window_chance
+    del bpy.types.Scene.wfc_window_width
+    del bpy.types.Scene.wfc_window_sill
+    del bpy.types.Scene.wfc_window_height
     del bpy.types.Scene.wfc_organic_amount
     del bpy.types.Scene.wfc_uv_tile_size
     del bpy.types.Scene.wfc_stair_mesh_style
@@ -7504,6 +7932,7 @@ def unregister():
     del bpy.types.Scene.wfc_torch_light_chance
     del bpy.types.Scene.wfc_max_lights
     del bpy.types.Scene.wfc_prop_chance
+    del bpy.types.Scene.wfc_prop_theme
     del bpy.types.Scene.wfc_debug_params
     del bpy.types.Scene.wfc_export_binary
     del bpy.types.Scene.wfc_export_include_lights

@@ -4,7 +4,7 @@ Internal dev-facing doc: what's built, what's known-broken, what's next. Not for
 (see `dist/README.md` for that). Source of truth for the addon's actual behavior is always
 `levelArchitect_v2.py` — this file can drift out of date; the code can't.
 
-Current version: **0.25.1** (see `bl_info` in the source file).
+Current version: **0.26.0** (see `bl_info` in the source file).
 
 §2 (Development tree) was condensed 2026-08-21 — dropped the blow-by-blow investigation
 narrative and per-run stress-test numbers from older, fully-resolved entries, kept every
@@ -753,6 +753,17 @@ GN complexity there specifically.
       too zoomed-out to show doorway-level detail) confirmed the frame visibly follows the wall's
       curve right at the opening, not standing at a mismatched straight angle against it.
 
+- [x] **Windows + themed props (0.26.0).** Cross-pollination from the Vampire Adventure project.
+      Windows: see §4 entry. Props: `_composite_prop_parts` defines each new kind as box/cylinder
+      parts in a local frame (front = +X); `_prop_local_bounds`/`_prop_fits` keep a placed prop
+      inside its tile and clear of walls (checked for every wall side and all open sides, so nothing
+      pokes into a distant wall); wall kinds are pushed back against the wall's inner face. Themes
+      live in `PROP_THEMES`; the Generic theme keeps the original code path and RNG use exactly, so
+      existing seeds reproduce. Raised parts (table tops etc.) get bottom faces — the usual
+      hidden-bottom culling only holds for floor-touching boxes. Not done: per-prop materials
+      (still one slot), props on floors above 1 sub-level are placed like any other, windows in Round
+      room rings.
+
 - [x] **Round rooms could clip stairs, or wall off a corridor that should be walkable (0.25.1).**
       User-reported, reproduced from a pasted debug-snapshot dict (Round room shape, multiple
       Sub-Levels per Floor): stairs sometimes visibly clipped through a nearby Round room's own
@@ -939,7 +950,11 @@ Roughly ordered by how directly they build on what already exists:
       - Both are self-contained alternative `room_shape` values (like `'CAVE'` today), not changes
         to the existing modes — same reasoning §4's Cave-mode-is-all-or-nothing note already gives
         for why per-floor mixing is a separate, larger concern than adding the mode itself.
-- [ ] **Windows.** Would reuse most of `_build_door_mesh`'s same-Z boundary-detection logic
+- [x] **Windows — done (0.26.0).** Shipped differently from the sketch below: `_pick_window_edges` chooses
+      exposed room-wall edges (seeded, shared by wall and window builders), `_build_wall_mesh` cuts a real
+      opening (piers + sill + lintel boxes; window edges never join merged runs), `_build_window_mesh`
+      adds frame/mullions/glass as a separate object. Verified by ray-cast through the opening in the
+      headless suite. Original sketch: would reuse most of `_build_door_mesh`'s same-Z boundary-detection logic
       (frame at a wall-facing edge instead of only room-to-room boundaries), sized/positioned
       differently (mid-wall-height opening, not floor-to-lintel) and gated by its own placement
       rule (e.g. only on true exterior walls) rather than "wherever a doorway already is."

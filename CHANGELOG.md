@@ -3,6 +3,25 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.26.0
+
+- **New: windows.** Walls tab, "Window Chance" (0 = off, default). Exposed edges of ordinary
+  (Rect-style) room walls get a real rectangular opening cut through the wall — two piers, a sill
+  and a lintel, so you can see and shoot through it — plus a separate "Procedural_Level_Windows"
+  object with frame, mullion cross and a translucent glass pane. Width, sill height and opening
+  height are adjustable. Corridors, Round rooms and Corridor-Stairs sides never get windows;
+  windows on one wall stay at least 2 tiles apart. Seeded like everything else. The glass is
+  excluded from the Collision Mesh export (it exports Walls only), the openings are not.
+- **New: themed decoration props.** Props tab, "Theme": Generic (the old crates/barrels/cones,
+  default and unchanged), Mixed Rooms (each room randomly themed), Crypt (coffins, tombs,
+  columns, candle stands), Library (bookshelves, tables, chairs, chests), Hall, Bedroom, Storage.
+  Props are stacked primitives (tables with legs, chairs with backs, bookshelves with books,
+  beds, coffins, candle stands...), all still in the single decoration mesh. Wall-type props
+  stand against a wall facing into the room; every placement is checked to stay inside its own
+  tile and clear of walls (new regression test checks every vertex in every theme).
+- Idea source: the prop shapes and room themes come from the sibling Dracula adventure project's
+  prop library, reduced to plain primitives.
+
 ## 0.25.1
 
 - **Fixed: Round rooms could clip stairs, or wall off a corridor that should be walkable.** User

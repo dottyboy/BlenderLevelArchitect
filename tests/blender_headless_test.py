@@ -16,6 +16,7 @@
 import importlib.util
 import json
 import math
+from mathutils import Vector
 import os
 import sys
 import tempfile
@@ -2125,6 +2126,108 @@ except RuntimeError as exc:
     result = {'CANCELLED'}
     check("Presets: refusal error message names the bad preset", "not_a_real_preset" in str(exc), str(exc))
 check("Presets: refuses an unknown preset name", result == {'CANCELLED'}, str(result))
+
+# ==============================================================================
+# Windows: real openings cut through room walls + frame/glass object.
+scene.wfc_room_shape = 'RECT'
+scene.wfc_sub_levels_per_floor = 1
+scene.wfc_width, scene.wfc_length, scene.wfc_height = 30, 30, 1
+scene.wfc_rooms_min, scene.wfc_rooms_max = 6, 8
+scene.wfc_room_size_min, scene.wfc_room_size_max = 4, 6
+scene.wfc_tile_size = 2.0
+scene.wfc_level_height = 3.5
+scene.wfc_wall_height = 3.0
+scene.wfc_wall_thickness = 0.25
+scene.wfc_organic_amount = 0.0
+scene.wfc_random_seed = False
+scene.wfc_seed = 1234
+check("Windows: generate_game_blueprint FINISHED", bpy.ops.object.generate_game_blueprint() == {'FINISHED'})
+
+def _wall_verts():
+    return sum(len(o.data.vertices) for o in bpy.data.objects if o.name.startswith(addon.WALLS_OBJECT_NAME))
+
+scene.wfc_window_chance = 0.0
+bpy.ops.object.generate_level_walls()
+base_verts = _wall_verts()
+check("Windows: chance 0 builds no window object", bpy.data.objects.get(addon.WINDOWS_OBJECT_NAME) is None)
+
+for organic in (0.0, 0.1):
+    scene.wfc_organic_amount = organic
+    scene.wfc_window_chance = 0.6
+    scene.wfc_window_sill, scene.wfc_window_height, scene.wfc_window_width = 1.0, 1.0, 1.0
+    result = bpy.ops.object.generate_level_walls()
+    check(f"Windows (organic={organic}): Walls FINISHED", result == {'FINISHED'}, str(result))
+    win_obj = bpy.data.objects.get(addon.WINDOWS_OBJECT_NAME)
+    check(f"Windows (organic={organic}): window object created", win_obj is not None)
+    if win_obj is not None:
+        nwin = len(win_obj.data.vertices) // (7 * 8)
+        check(f"Windows (organic={organic}): at least one window picked", nwin >= 1, f"windows={nwin}")
+        check(f"Windows (organic={organic}): two material slots", len(win_obj.data.materials) == 2)
+        glass = [p for p in win_obj.data.polygons if p.material_index == 1]
+        check(f"Windows (organic={organic}): glass faces = 6 per window", len(glass) == 6 * nwin, f"{len(glass)} vs {nwin}")
+        check(f"Windows (organic={organic}): wall mesh has more geometry than the solid wall", _wall_verts() > base_verts, f"{_wall_verts()} vs {base_verts}")
+
+# Determinism: same seed -> same window count.
+scene.wfc_organic_amount = 0.0
+bpy.ops.object.generate_level_walls()
+n1 = len(bpy.data.objects[addon.WINDOWS_OBJECT_NAME].data.vertices)
+bpy.ops.object.generate_level_walls()
+n2 = len(bpy.data.objects[addon.WINDOWS_OBJECT_NAME].data.vertices)
+check("Windows: same seed gives identical window set", n1 == n2, f"{n1} vs {n2}")
+
+# Opening is a real hole: probe the first picked edge with a ray from inside the room.
+walls = [o for o in bpy.data.objects if o.name.startswith(addon.WALLS_OBJECT_NAME)][0]
+bp = bpy.data.objects[addon.BLUEPRINT_OBJECT_NAME]
+walkable, extra = addon._read_blueprint_points(bp, scene.wfc_tile_size, addon._fine_level_height(scene), ("room_id",))
+edges = addon._pick_window_edges(
+    walkable, extra["room_id"], scene.wfc_tile_size, scene.wfc_wall_height, scene.wfc_window_sill,
+    scene.wfc_window_height, scene.wfc_window_chance, scene.wfc_seed,
+)
+check("Windows: picker matches the operator (non-empty)", len(edges) >= 1)
+(cx, cy, cz), (ddx, ddy) = sorted(edges)[0]
+ts = scene.wfc_tile_size
+origin = Vector((cx * ts, cy * ts, 1.5))
+direction = Vector((ddx, ddy, 0.0))
+hit_window = walls.ray_cast(origin, direction, distance=ts)
+check("Windows: ray through the opening centre hits no wall", not hit_window[0], str(hit_window))
+low = walls.ray_cast(Vector((cx * ts, cy * ts, 0.4)), direction, distance=ts)
+check("Windows: ray below the sill hits wall", low[0])
+scene.wfc_window_chance = 0.0
+bpy.ops.object.generate_level_walls()
+check("Windows: turning chance back to 0 removes the window object", bpy.data.objects.get(addon.WINDOWS_OBJECT_NAME) is None)
+
+# ==============================================================================
+# Themed decoration props: every themed prop must stay inside its own walkable
+# cell and clear of walls, in every theme.
+scene.wfc_window_chance = 0.0
+scene.wfc_wall_thickness = 0.25
+scene.wfc_prop_chance = 0.5
+bp = bpy.data.objects[addon.BLUEPRINT_OBJECT_NAME]
+ts_ = scene.wfc_tile_size
+walk_t, _x = addon._read_blueprint_points(bp, ts_, addon._fine_level_height(scene), ("room_id",))
+walk_xy = {(c[0], c[1]) for c in walk_t}
+for theme in ('GENERIC', 'MIXED', 'CRYPT', 'LIBRARY', 'HALL', 'BEDROOM', 'STORAGE'):
+    scene.wfc_prop_theme = theme
+    result = bpy.ops.object.generate_level_props()
+    check(f"Prop theme {theme}: Props FINISHED", result == {'FINISHED'}, str(result))
+    dec = bpy.data.objects.get(addon.PROPS_DECORATION_OBJECT_NAME)
+    check(f"Prop theme {theme}: decoration mesh has geometry", dec is not None and len(dec.data.vertices) > 0)
+    if dec is None or theme == 'GENERIC':
+        continue
+    inner = ts_ / 2.0 - scene.wfc_wall_thickness / 2.0 + 0.001
+    bad = 0
+    for v in dec.data.vertices:
+        gx, gy = round(v.co.x / ts_), round(v.co.y / ts_)
+        if (gx, gy) not in walk_xy:
+            bad += 1
+            continue
+        lx, ly = v.co.x - gx * ts_, v.co.y - gy * ts_
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            if (gx + dx, gy + dy) not in walk_xy and (lx * dx + ly * dy) > inner:
+                bad += 1
+                break
+    check(f"Prop theme {theme}: no prop vertex outside its cell or inside a wall", bad == 0, f"{bad} bad vertices")
+scene.wfc_prop_theme = 'GENERIC'
 
 # ==============================================================================
 print()

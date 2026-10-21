@@ -92,7 +92,8 @@ be pressed afterward, same as any other setting. The steps build on each other's
    constraint is created correctly, so treat it as experimental until you've verified it yourself
    in a live UPBGE session.
 5. **Step 5: Generate Props** — wall-mounted torches (each with a real light, not just a mesh)
-   and scattered crate/barrel/cone decoration placeholders, organized into their own
+   and scattered decoration (crate/barrel/cone, or themed furniture — tables, chairs,
+   bookshelves, beds, coffins, candle stands — via the Theme setting), organized into their own
    "Procedural Level Props" collection so they can be hidden or deleted independently of the
    structural geometry.
 6. **Export** — one-click glTF/GLB export of everything generated (Binary .glb or plain .gltf,
