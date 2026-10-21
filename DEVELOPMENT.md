@@ -4,7 +4,7 @@ Internal dev-facing doc: what's built, what's known-broken, what's next. Not for
 (see `dist/README.md` for that). Source of truth for the addon's actual behavior is always
 `levelArchitect_v2.py` — this file can drift out of date; the code can't.
 
-Current version: **0.30.0** (see `bl_info` in the source file).
+Current version: **0.31.0** (see `bl_info` in the source file).
 
 §2 (Development tree) was condensed 2026-08-21 — dropped the blow-by-blow investigation
 narrative and per-run stress-test numbers from older, fully-resolved entries, kept every
@@ -752,6 +752,20 @@ GN complexity there specifically.
       render (not one of the regular `generate_test_blends.py` scenarios, whose top-down framing is
       too zoomed-out to show doorway-level detail) confirmed the frame visibly follows the wall's
       curve right at the opening, not standing at a mismatched straight angle against it.
+
+- [x] **Castle + straight masonry walls (0.31.0).** `_WallRunBuilder` mirrors `_TowerBuilder` in a flat frame (x along
+      the run, outer face at y = -t/2): columns carrying every opening that contains them, the same ruin
+      profile (lattice noise over x, notches, brick-course snapping) and gap conversion, caps/steps, frames
+      on both faces, plinth on the outer face, merlons with crenel caps, stones, rubble. `_arch_h` and
+      `_arch_curve` became static methods so both builders share them. `_build_castle_mesh` composes it:
+      towers at the corners (door angle = direction to the centre), curtain runs placed with
+      rot = 0, pi/2, pi, 3pi/2 so local -y is the outward side, run ends buried at xe =
+      sqrt((R - wall/2)^2 - (t/2)^2) from the tower centre (the point where the run's outer corner lies
+      inside the tower's masonry band, so no end cap is needed), keep walls extended by t/2 each end so
+      their corners close by overlap (end caps there were coplanar with the neighbouring wall and rendered
+      black). Verified with ray casts (south wall, gate, joints, towers, courtyard). Open: connect tower
+      floors to wall tops, keep interior, wall runs as ordinary level walls (rect rooms) and ruined rect
+      rooms, a moat/ground skirt, castle exports with collision, gatehouse towers and a portcullis.
 
 - [x] **Ruins (0.30.0).** `_TowerBuilder` got `ruin` and `rubble_outside`. Columns (`_build_columns`) are now built
       once and shared by both skins, the caps and the end faces; each carries every opening that contains it

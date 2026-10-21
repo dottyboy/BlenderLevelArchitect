@@ -99,7 +99,10 @@ be pressed afterward, same as any other setting. The steps build on each other's
 6. **Round Tower** (Tower tab) — a standalone round tower at the 3D cursor: brick-textured shell with
    a real arched door, slit windows, stone frames, plinth, cornice and battlements, at a vertex
    budget picked by Brick Detail (Low/Medium/High), with floor slabs and spiral stairs inside and a Ruin slider that breaks the walls down.
-7. **Export** — one-click glTF/GLB export of everything generated (Binary .glb or plain .gltf,
+7. **Castle** (Castle tab) — a walled castle at the 3D cursor: four corner towers with interiors, curtain
+   walls with battlements and arrow slits, an arched gate, a keep and a courtyard; the Ruin slider breaks
+   everything down.
+8. **Export** — one-click glTF/GLB export of everything generated (Binary .glb or plain .gltf,
    optionally including the real torch lights), plus a separate **Export Collision Mesh** button
    that exports just Floor + Walls + Stairs — no Doors, Torches, Decoration, or Lights — suitable
    to assign directly as a level's collision geometry in a game engine.

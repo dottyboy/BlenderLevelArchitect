@@ -2467,6 +2467,79 @@ scene.wfc_tower_height = 9.0
 bpy.ops.object.generate_level_tower()
 tower = bpy.data.objects[addon.TOWER_OBJECT_NAME]
 
+# Castle: towers + curtain walls + gate + keep + courtyard, intact and ruined.
+scene.cursor.location = (0.0, 80.0, 0.0)
+scene.wfc_castle_width, scene.wfc_castle_depth = 26.0, 20.0
+scene.wfc_castle_wall_height, scene.wfc_castle_wall_thickness = 7.0, 1.1
+scene.wfc_castle_tower_radius, scene.wfc_castle_tower_height = 3.2, 12.0
+scene.wfc_castle_gate, scene.wfc_castle_keep, scene.wfc_castle_ruin = True, True, 0.0
+scene.wfc_tower_detail = 'MEDIUM'
+result = bpy.ops.object.generate_level_castle()
+check("Castle: FINISHED", result == {'FINISHED'}, str(result))
+castle = bpy.data.objects.get(addon.CASTLE_OBJECT_NAME)
+check("Castle: one object, two materials, a UV map",
+      castle is not None and len([o for o in bpy.data.objects if o.name.startswith(addon.CASTLE_OBJECT_NAME)]) == 1
+      and len(castle.data.materials) == 2 and len(castle.data.uv_layers) == 1)
+check("Castle: vertex budget under 30000 (8 meshed objects' worth)", 0 < len(castle.data.vertices) < 30000, str(len(castle.data.vertices)))
+W_, D_, T_ = 26.0, 20.0, 1.1
+wall_hit = castle.ray_cast(Vector((W_ / 4, -D_ / 2 - 6.0, 1.0)), Vector((0, 1, 0)), distance=12.0)
+check("Castle: the south wall is solid from outside and its outer face points out",
+      wall_hit[0] and abs(wall_hit[1].y - (-D_ / 2 - T_ / 2)) < 0.25 and wall_hit[2].y < -0.5, str(wall_hit[:3]))
+gate_hit = castle.ray_cast(Vector((0, -D_ / 2 - 6.0, 1.0)), Vector((0, 1, 0)), distance=12.0)
+check("Castle: a ray through the gate passes the south wall",
+      (not gate_hit[0]) or gate_hit[1].y > -D_ / 2 + 1.5, str(gate_hit[:2]))
+joint_misses = 0
+for dx in (-0.6, 0.0, 0.6):
+    for edge_x in (-W_ / 2 + 3.2 + 0.2, W_ / 2 - 3.2 - 0.2):
+        hit = castle.ray_cast(Vector((edge_x + dx, -D_ / 2, 30.0)), Vector((0, 0, -1)), distance=40.0)
+        joint_misses += (not hit[0]) or hit[1].z < 6.0
+check("Castle: no hole where the curtain walls meet the towers", joint_misses == 0, str(joint_misses))
+tower_top = castle.ray_cast(Vector((-W_ / 2, -D_ / 2 + 2.9, 30.0)), Vector((0, 0, -1)), distance=40.0)
+check("Castle: corner towers stand higher than the curtain walls", tower_top[0] and tower_top[1].z > 8.0, str(tower_top[:2]))
+yard_hit = castle.ray_cast(Vector((-8.0, -4.0, 5.0)), Vector((0, 0, -1)), distance=10.0)
+check("Castle: courtyard floor faces up at ground level", yard_hit[0] and abs(yard_hit[1].z) < 0.01 and yard_hit[2].z > 0.9, str(yard_hit[:3]))
+scene.wfc_castle_keep = False
+bpy.ops.object.generate_level_castle()
+no_keep = len(bpy.data.objects[addon.CASTLE_OBJECT_NAME].data.vertices)
+scene.wfc_castle_keep = True
+bpy.ops.object.generate_level_castle()
+with_keep = len(bpy.data.objects[addon.CASTLE_OBJECT_NAME].data.vertices)
+check("Castle: Keep adds geometry", with_keep > no_keep, f"{with_keep} vs {no_keep}")
+scene.wfc_castle_gate = False
+bpy.ops.object.generate_level_castle()
+closed = bpy.data.objects[addon.CASTLE_OBJECT_NAME].ray_cast(Vector((0, -D_ / 2 - 6.0, 1.0)), Vector((0, 1, 0)), distance=12.0)
+check("Castle: Gate off closes the south wall", closed[0] and closed[1].y < -D_ / 2, str(closed[:2]))
+scene.wfc_castle_gate = True
+avg_top = {}
+for ruin_amount in (0.0, 0.5, 1.0):
+    scene.wfc_castle_ruin = ruin_amount
+    result = bpy.ops.object.generate_level_castle()
+    check(f"Castle ruin {ruin_amount}: FINISHED", result == {'FINISHED'}, str(result))
+    cs = bpy.data.objects[addon.CASTLE_OBJECT_NAME]
+    tops = []
+    for k in range(40):
+        x = -W_ / 2 + 4.5 + (W_ - 9.0) * (k + 0.5) / 40
+        hit = cs.ray_cast(Vector((x, -D_ / 2 + 0.0, 30.0)), Vector((0, 0, -1)), distance=40.0)
+        tops.append(hit[1].z if hit[0] else 0.0)
+    avg_top[ruin_amount] = sum(tops) / len(tops)
+    g = cs.ray_cast(Vector((0, -D_ / 2 - 6.0, 0.3)), Vector((0, 1, 0)), distance=12.0)
+    check(f"Castle ruin {ruin_amount}: the gate stays passable", (not g[0]) or g[1].y > -D_ / 2 + 1.5, str(g[:2]))
+check("Castle ruin: more ruin lowers the south wall", avg_top[1.0] < avg_top[0.5] < avg_top[0.0], str(avg_top))
+scene.wfc_castle_ruin = 0.5
+bpy.ops.object.generate_level_castle()
+ca = [tuple(round(c, 3) for c in v.co) for v in bpy.data.objects[addon.CASTLE_OBJECT_NAME].data.vertices]
+bpy.ops.object.generate_level_castle()
+cb = [tuple(round(c, 3) for c in v.co) for v in bpy.data.objects[addon.CASTLE_OBJECT_NAME].data.vertices]
+check("Castle: same seed gives the same castle", ca == cb)
+scene.wfc_castle_tower_radius = 8.0
+scene.wfc_castle_width = 18.0
+try:
+    refused = bpy.ops.object.generate_level_castle() == {'CANCELLED'}
+except RuntimeError as exc:
+    refused = "too large" in str(exc)
+check("Castle: towers too big for the courtyard are refused", refused)
+scene.wfc_castle_tower_radius, scene.wfc_castle_width, scene.wfc_castle_ruin = 3.2, 26.0, 0.0
+
 # glTF round trip embeds the packed textures.
 with tempfile.TemporaryDirectory() as tmp:
     path = os.path.join(tmp, "tower.glb")

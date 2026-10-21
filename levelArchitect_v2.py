@@ -32,7 +32,7 @@ from bpy_extras.io_utils import ExportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 30, 0),
+    "version": (0, 31, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -3753,7 +3753,7 @@ class OBJECT_OT_ExportLevelGLTF(bpy.types.Operator, ExportHelper):
         base_names = (
             BLUEPRINT_OBJECT_NAME, ROUND_FLOOR_OBJECT_NAME, WALLS_OBJECT_NAME, WALLS_ROUND_OBJECT_NAME,
             STAIRS_OBJECT_NAME, DOORS_OBJECT_NAME, DOORS_ROUND_OBJECT_NAME, PROPS_TORCH_OBJECT_NAME,
-            PROPS_DECORATION_OBJECT_NAME, TOWER_OBJECT_NAME,
+            PROPS_DECORATION_OBJECT_NAME, TOWER_OBJECT_NAME, CASTLE_OBJECT_NAME,
         )
         targets = _gltf_export_targets(base_names, scene.wfc_export_include_lights)
 
@@ -7218,6 +7218,336 @@ class _TowerMesh:
         return mesh
 
 
+class _WallRunBuilder:
+    """A straight masonry wall run -- the flat sibling of _TowerBuilder, same
+    ideas: smooth brick-textured outer/inner skins, real openings (arch,
+    pointed, flat, gap) with reveals and dressed-stone frames, dressed
+    plinth, battlements or a ruined stepped top, proud stones and rubble.
+    Local frame: x along the run (0..length), outer face at y = -thickness/2,
+    inner face at y = +thickness/2, z up. Material slots: 0 brick, 1 stone."""
+
+    def __init__(self, length, height, thickness, battlements=True, seed=1, stones=None,
+                 ruin=0.0, plinth=True, rubble=True, end_caps=False):
+        self.L, self.H, self.t = length, height, thickness
+        self.ruin = max(0.0, min(1.0, ruin))
+        self.battle = battlements and self.ruin <= 0.0
+        self.Hs = height - (1.0 if self.battle else 0.0)
+        self.plinth, self.rubble, self.end_caps = plinth, rubble, end_caps
+        self.stones = stones
+        self.tile_w, self.tile_h = TOWER_TILE_W, TOWER_ROWS * TOWER_ROW_H
+        self.rng = random.Random(seed)
+        nr = random.Random(seed * 131 + 11)
+        n = max(4, int(length / 0.9) + 2)
+        self._lat1 = [nr.random() for _ in range(n)]
+        self._lat2 = [nr.random() for _ in range(max(3, n // 3))]
+        self._notches = [(nr.uniform(0.0, length), nr.uniform(0.5, 1.6)) for _ in range(1 + int(self.ruin * 3))]
+        self._notch_depth = [nr.uniform(0.55, 1.0) for _ in self._notches]
+        self.mb = _TowerMesh()
+        self.openings = []
+        self.columns = []
+
+    # -- openings
+    def add_opening(self, xc, width, sill, height, kind='arch'):
+        x0, x1 = xc - width / 2.0, xc + width / 2.0
+        if x0 < 0.25 or x1 > self.L - 0.25 or width < 0.15:
+            return False
+        rise = 0.0
+        if kind == 'arch':
+            spring = sill + max(height - width / 2.0, 0.2)
+            apex = spring + width / 2.0
+            rise = width / 2.0
+        elif kind == 'pointed':
+            rise = min(width * 0.85, max(height - 0.4, 0.3))
+            spring = sill + height - rise
+            apex = sill + height
+        elif kind == 'gap':
+            spring = apex = self.Hs
+        else:
+            spring = apex = sill + height
+        if kind != 'gap' and apex + 0.4 > self.Hs:
+            return False
+        for o in self.openings:
+            if (x0 < o['x1'] + 0.6 and o['x0'] < x1 + 0.6) and sill < o['apex'] + 0.4 and o['sill'] < apex + 0.4:
+                return False
+        self.openings.append(dict(xc=xc, w=width, sill=sill, spring=spring, apex=apex, kind=kind, rise=rise, x0=x0, x1=x1))
+        return True
+
+    # -- ruin profile
+    @staticmethod
+    def _lat(vals, x, span):
+        n = len(vals)
+        u = max(0.0, min(span, x)) / max(span, 1e-6) * (n - 1)
+        i = min(int(u), n - 2)
+        f = (1.0 - math.cos((u - i) * math.pi)) / 2.0
+        return vals[i] * (1.0 - f) + vals[i + 1] * f
+
+    def _ruin_top(self, x):
+        if self.ruin <= 0.0:
+            return self.Hs
+        v = 0.65 * self._lat(self._lat1, x, self.L) + 0.35 * self._lat(self._lat2, x, self.L)
+        top = self.Hs * (1.0 - self.ruin * (0.12 + 0.88 * v))
+        for (c, half), depth in zip(self._notches, self._notch_depth):
+            d = abs(x - c)
+            if d < half:
+                top *= 1.0 - self.ruin * depth * (1.0 - d / half) ** 0.6
+        return max(0.5, min(self.Hs, math.floor(top / TOWER_ROW_H) * TOWER_ROW_H))
+
+    def _build_columns(self):
+        colw = 0.35 if self.ruin > 0.0 else 0.5
+        if self.ruin > 0.0:
+            self.openings = [o for o in self.openings if o['sill'] < self._ruin_top(o['xc']) - 0.3]
+        cuts = {0.0, self.L}
+        for o in self.openings:
+            cuts.update((o['x0'], o['x1']))
+        cuts = sorted(cuts)
+        cols = []
+        for a, b in zip(cuts[:-1], cuts[1:]):
+            ops = sorted((o for o in self.openings if o['x0'] - 1e-6 <= a and b <= o['x1'] + 1e-6), key=lambda o: o['sill'])
+            if ops:
+                k = max(8 if o['kind'] == 'pointed' else 6 if o['kind'] == 'arch' else 1 for o in ops)
+            else:
+                k = max(1, round((b - a) / colw))
+            for i in range(k):
+                cols.append(dict(x0=a + (b - a) * i / k, x1=a + (b - a) * (i + 1) / k, ops=ops, gap=None, top=self.Hs))
+        if self.ruin > 0.0:
+            for c in cols:
+                c['top'] = self._ruin_top((c['x0'] + c['x1']) / 2.0)
+                need = max((o['apex'] + 0.4 for o in c['ops'] if o['kind'] != 'gap'), default=0.0)
+                if need <= self.Hs:
+                    c['top'] = max(c['top'], need)
+            for o in self.openings:
+                if o['kind'] != 'gap' and o['apex'] + 0.4 > self._ruin_top(o['xc']):
+                    o['kind'] = 'gap'
+        for c in cols:
+            gaps = [o for o in c['ops'] if o['kind'] == 'gap']
+            c['gap'] = max(gaps, key=lambda o: o['sill']) if gaps else None
+        for o in self.openings:
+            if o['kind'] != 'gap' or self.ruin <= 0.0:
+                continue
+            idx = [i for i, c in enumerate(cols) if o in c['ops']]
+            left = cols[idx[0] - 1] if idx[0] > 0 else None
+            right = cols[idx[-1] + 1] if idx[-1] + 1 < len(cols) else None
+            h = min(c['top'] for c in (left, right) if c is not None) if (left or right) else self.Hs
+            o['spring'] = o['apex'] = max(o['sill'] + 0.1, min(h, self.Hs))
+        self.columns = cols
+
+    def _standing_top(self, x):
+        for c in self.columns:
+            if c['x0'] - 1e-9 <= x <= c['x1'] + 1e-9:
+                return c['gap']['sill'] if c['gap'] is not None else c['top']
+        return 0.0
+
+    # -- geometry
+    def _uv(self, x, z):
+        return (x / self.tile_w, z / self.tile_h)
+
+    def _skin(self, outer):
+        y = -self.t / 2.0 if outer else self.t / 2.0
+        ny = -1.0 if outer else 1.0
+
+        def face(xz):
+            pts = [(x, y, z) for x, z in xz]
+            self.mb.poly('out' if outer else 'in', pts, [self._uv(x, z) for x, z in xz], (0.0, ny, 0.0), 0, False)
+
+        for c in self.columns:
+            a, b, top_c = c['x0'], c['x1'], c['top']
+            z = 0.0
+            for op in c['ops']:
+                if op['sill'] > z + 1e-6:
+                    face([(a, z), (b, z), (b, op['sill']), (a, op['sill'])])
+                if op['kind'] == 'gap':
+                    z = None
+                    break
+                top = op['apex'] + (0.2 if op['kind'] in ('arch', 'pointed') else 0.0)
+                if op['kind'] in ('arch', 'pointed'):
+                    h0 = _TowerBuilder._arch_h(op, a - op['xc'])
+                    h1 = _TowerBuilder._arch_h(op, b - op['xc'])
+                    face([(a, h0), (b, h1), (b, top), (a, top)])
+                z = top
+            if z is not None and z < top_c - 1e-6:
+                face([(a, z), (b, z), (b, top_c), (a, top_c)])
+
+    def _quad(self, group, pts, toward, mat=0, uvs=None):
+        self.mb.poly(group, pts, uvs or [self._uv(p[0], p[2]) for p in pts], toward, mat, False)
+
+    def _reveals(self):
+        hy = self.t / 2.0
+        for o in self.openings:
+            hole = (o['xc'], 0.0, (o['sill'] + o['spring']) / 2.0)
+
+            def quad(pa, pb):
+                pts = [(pa[0], -hy, pa[1]), (pb[0], -hy, pb[1]), (pb[0], hy, pb[1]), (pa[0], hy, pa[1])]
+                c = tuple(sum(p[k] for p in pts) / 4.0 for k in range(3))
+                uvs = [(pa[0] / self.tile_w, 0.0), (pb[0] / self.tile_w, 0.0), (pb[0] / self.tile_w, self.t / self.tile_h), (pa[0] / self.tile_w, self.t / self.tile_h)]
+                self._quad('rev', pts, (hole[0] - c[0], hole[1] - c[1], hole[2] - c[2]), 0, uvs)
+
+            for x in (o['x0'], o['x1']):
+                quad((x, o['sill']), (x, o['spring']))
+            if o['kind'] in ('arch', 'pointed'):
+                curve = _TowerBuilder._arch_curve(o, 10)
+                for k in range(len(curve) - 1):
+                    quad((o['xc'] + curve[k][0], curve[k][1]), (o['xc'] + curve[k + 1][0], curve[k + 1][1]))
+            elif o['kind'] != 'gap':
+                quad((o['x0'], o['spring']), (o['x1'], o['spring']))
+            quad((o['x0'], o['sill']), (o['x1'], o['sill']))
+
+    def _block(self, x0, x1, y0, y1, z0, z1, mat=1):
+        pts = [(x0, y0, z0), (x1, y0, z0), (x1, y1, z0), (x0, y1, z0), (x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1)]
+        self._solid8(pts, mat)
+
+    def _solid8(self, pts, mat=1):
+        c = tuple(sum(p[k] for p in pts) / 8.0 for k in range(3))
+        grp = 'b%d' % len(self.mb.faces)
+        for f in ((0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)):
+            fp = [pts[i] for i in f]
+            fc = tuple(sum(p[k] for p in fp) / 4.0 for k in range(3))
+            self.mb.poly(grp, fp, [self._uv(p[0] + p[1], p[2]) for p in fp], (fc[0] - c[0], fc[1] - c[1], fc[2] - c[2]), mat, False)
+
+    def _frames(self):
+        hy, proud = self.t / 2.0, 0.07
+        for o in self.openings:
+            if o['kind'] == 'gap':
+                continue
+            fw = 0.28 if o['kind'] in ('arch', 'pointed') else 0.2
+            for side in (-1.0, 1.0):
+                ya, yb = (side * (hy - 0.02), side * (hy + proud))
+                ya, yb = sorted((ya, yb))
+                z, i = o['sill'], 0
+                while z < o['spring'] - 1e-4:
+                    hh = min(0.36, o['spring'] - z)
+                    ext = fw + (0.12 if i % 2 else 0.0)
+                    self._block(o['x0'] - ext, o['x0'], ya, yb, z, z + hh)
+                    self._block(o['x1'], o['x1'] + ext, ya, yb, z, z + hh)
+                    z += hh
+                    i += 1
+                if o['kind'] in ('arch', 'pointed'):
+                    curve = _TowerBuilder._arch_curve(o, 10)
+                    for k in range(len(curve) - 1):
+                        (xa, za, nxa, nza), (xb, zb, nxb, nzb) = curve[k], curve[k + 1]
+                        wd = fw + (0.1 if k % 2 else 0.0)
+                        xc = o['xc']
+                        self._solid8([(xc + xa, ya, za), (xc + xb, ya, zb), (xc + xb + nxb * wd, ya, zb + nzb * wd), (xc + xa + nxa * wd, ya, za + nza * wd),
+                                      (xc + xa, yb, za), (xc + xb, yb, zb), (xc + xb + nxb * wd, yb, zb + nzb * wd), (xc + xa + nxa * wd, yb, za + nza * wd)])
+                else:
+                    self._block(o['x0'] - fw, o['x1'] + fw, ya, yb, o['spring'], o['spring'] + 0.3)
+                if o['sill'] > 0.2:
+                    self._block(o['x0'] - fw - 0.05, o['x1'] + fw + 0.05, ya, yb + side * 0.06, o['sill'] - 0.14, o['sill'])
+
+    def _plinth_and_battlements(self):
+        hy = self.t / 2.0
+        floor_doors = [o for o in self.openings if o['sill'] < 0.2]
+        n = max(1, round(self.L / 0.6))
+        if self.plinth:
+            for k in range(n):
+                a, b = self.L * k / n, self.L * (k + 1) / n
+                if any(a < o['x1'] + 0.28 and b > o['x0'] - 0.28 for o in floor_doors):
+                    continue
+                self._block(a, b, -hy - 0.14, -hy + 0.02, 0.0, 0.45)
+        if self.battle:
+            pitch = 1.5
+            m = max(1, int(self.L / pitch))
+            for k in range(m):
+                a = self.L * k / m
+                w = self.L / m * 0.62
+                self._block(a, a + w, -hy, hy, self.Hs, self.H)
+                self._block(a + w, self.L * (k + 1) / m, -hy, hy, self.Hs - 0.001, self.Hs + 0.001)
+            self._block(0.0, self.L, -hy - 0.12, -hy + 0.02, self.Hs - 0.16, self.Hs)
+
+    def _caps_and_steps(self):
+        hy = self.t / 2.0
+        cols = self.columns
+        for c in cols:
+            if c['gap'] is not None:
+                if c['gap']['sill'] <= 1e-6:
+                    continue
+                z = c['gap']['sill']
+            else:
+                z = c['top']
+            a, b = c['x0'], c['x1']
+            self._quad('cap', [(a, -hy, z), (b, -hy, z), (b, hy, z), (a, hy, z)], (0.0, 0.0, 1.0), 1,
+                       [(a / self.tile_w, 0.0), (b / self.tile_w, 0.0), (b / self.tile_w, self.t / self.tile_h), (a / self.tile_w, self.t / self.tile_h)])
+        for i in range(len(cols) - 1):
+            ca, cb = cols[i], cols[i + 1]
+            xb = cb['x0']
+            ga, gb = ca['gap'] is not None, cb['gap'] is not None
+            if ga and gb:
+                continue
+            if ga or gb:
+                gap, other = (ca, cb) if ga else (cb, ca)
+                lo, hi = gap['gap']['spring'], other['top']
+                lower_is_cb = gb
+            else:
+                lo, hi = sorted((ca['top'], cb['top']))
+                lower_is_cb = cb['top'] < ca['top']
+            if hi - lo < 1e-4:
+                continue
+            pts = [(xb, -hy, lo), (xb, -hy, hi), (xb, hy, hi), (xb, hy, lo)]
+            self._quad('step', pts, (1.0 if lower_is_cb else -1.0, 0.0, 0.0), 0,
+                       [(0.0, lo / self.tile_h), (0.0, hi / self.tile_h), (self.t / self.tile_w, hi / self.tile_h), (self.t / self.tile_w, lo / self.tile_h)])
+        if self.end_caps:
+            for x, nx in ((0.0, -1.0), (self.L, 1.0)):
+                c = cols[0] if x == 0.0 else cols[-1]
+                top = c['gap']['spring'] if c['gap'] is not None else c['top']
+                pts = [(x, -hy, 0.0), (x, -hy, top), (x, hy, top), (x, hy, 0.0)]
+                self._quad('endc', pts, (nx, 0.0, 0.0), 0, [(0.0, 0.0), (0.0, top / self.tile_h), (self.t / self.tile_w, top / self.tile_h), (self.t / self.tile_w, 0.0)])
+
+    def _stones(self, count):
+        hy = self.t / 2.0
+        for _ in range(count):
+            x = self.rng.uniform(0.4, self.L - 0.4)
+            z = self.rng.uniform(0.7, max(0.8, self.Hs - 0.6))
+            wl, hh, pr = self.rng.uniform(0.45, 0.8), self.rng.uniform(0.2, 0.3), self.rng.uniform(0.025, 0.05)
+            if x - wl / 2 < 0.05 or x + wl / 2 > self.L - 0.05:
+                continue
+            if any(abs(x - o['xc']) < o['w'] / 2 + 0.55 + wl / 2 and o['sill'] - 0.5 < z < o['apex'] + 0.55 for o in self.openings):
+                continue
+            if self.ruin > 0.0 and z + hh > min(self._standing_top(x + k * wl / 2) for k in (-1, 0, 1)) - 0.05:
+                continue
+            side = self.rng.choice((-1.0, 1.0))
+            ya, yb = sorted((side * (hy - 0.02), side * (hy + pr)))
+            self._block(x - wl / 2, x + wl / 2, ya, yb, z, z + hh)
+
+    def _rubble(self):
+        if self.ruin <= 0.0 or not self.rubble:
+            return
+        hy = self.t / 2.0
+        for _ in range(int(self.ruin * self.L * 1.4)):
+            x = self.rng.uniform(0.3, self.L - 0.3)
+            if any(o['sill'] < 0.3 and abs(x - o['xc']) < o['w'] / 2 + 0.7 for o in self.openings):
+                continue
+            side = self.rng.choice((-1.0, 1.0))
+            y = side * (hy + self.rng.uniform(0.3, 1.8))
+            hx, hyy, h = self.rng.uniform(0.12, 0.3), self.rng.uniform(0.1, 0.22), self.rng.uniform(0.1, 0.25)
+            yaw = self.rng.uniform(0.0, math.pi)
+            c_, s_ = math.cos(yaw), math.sin(yaw)
+            bot = [(x + lx * c_ - ly * s_, y + lx * s_ + ly * c_, 0.0) for lx, ly in ((-hx, -hyy), (hx, -hyy), (hx, hyy), (-hx, hyy))]
+            pts = bot + [(px, py, h) for px, py, _ in bot]
+            self._solid8_open(pts)
+
+    def _solid8_open(self, pts):
+        """Box resting on the ground: top and four sides only."""
+        cen = tuple(sum(p[k] for p in pts) / 8.0 for k in range(3))
+        grp = 'rub%d' % len(self.mb.faces)
+        for f in ((4, 5, 6, 7), (0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)):
+            fp = [pts[i] for i in f]
+            fc = tuple(sum(p[k] for p in fp) / 4.0 for k in range(3))
+            self.mb.poly(grp, fp, [self._uv(p[0] + p[1], p[2]) for p in fp], (fc[0] - cen[0], fc[1] - cen[1], fc[2] - cen[2]), 1, False)
+
+    def geometry(self):
+        self._build_columns()
+        self._skin(True)
+        self._skin(False)
+        self._reveals()
+        self._frames()
+        self._plinth_and_battlements()
+        if self.ruin > 0.0 or True:
+            self._caps_and_steps()
+        stones = self.stones if self.stones is not None else int(self.L * self.Hs * 0.35)
+        self._stones(stones)
+        self._rubble()
+        return self.mb
+
+
 class _TowerBuilder:
     """Builds one round tower. Openings are (angle, width, sill, height, kind)
     with kind 'arch' (round-headed, e.g. doors) or 'rect' (slit windows)."""
@@ -7314,7 +7644,8 @@ class _TowerBuilder:
                                   rise=rise, a0=ac - half, a1=ac + half))
         return True
 
-    def _arch_h(self, o, s):
+    @staticmethod
+    def _arch_h(o, s):
         if o['kind'] == 'arch':
             s = max(-o['w'] / 2.0, min(o['w'] / 2.0, s))
             return o['spring'] + math.sqrt(max(0.0, (o['w'] / 2.0) ** 2 - s * s))
@@ -7326,7 +7657,8 @@ class _TowerBuilder:
             return o['spring'] + math.sqrt(max(0.0, r * r - x * x))
         return o['spring']
 
-    def _arch_curve(self, o, n=10):
+    @staticmethod
+    def _arch_curve(o, n=10):
         """Intrados of a curved opening as (s, z, nx, nz): points left spring
         -> apex -> right spring with the outward unit normal in the (s, z) plane."""
         hs = o['w'] / 2.0
@@ -7827,6 +8159,123 @@ class OBJECT_OT_GenerateLevelTower(bpy.types.Operator):
         return {'FINISHED'}
 
 
+CASTLE_OBJECT_NAME = "Procedural_Level_Castle"
+
+
+def _castle_wall_openings(wb, gate, wall_h, kind_gate='arch'):
+    """Gate in the middle of the run (when asked) plus arrow slits at a
+    regular spacing."""
+    if gate and wb.L > 6.0:
+        wb.add_opening(wb.L / 2.0, 3.0, 0.0, min(4.0, wb.Hs - 1.2), kind_gate)
+    spacing = 4.5
+    k = 1
+    while k * spacing < wb.L - 1.0:
+        wb.add_opening(k * spacing, 0.28, wall_h * 0.42, 1.4, 'rect')
+        k += 1
+
+
+def _build_castle_mesh(width, depth, wall_h, wall_t, tower_r, tower_h, gate, keep, ruin, detail, seed,
+                       tower_wall=0.55, interior=True):
+    """A walled castle assembled from the Round Tower and straight wall run
+    builders: four corner towers, four curtain walls whose ends are buried in
+    the tower masonry, a gate arch in the south wall, arrow slits, an
+    optional central keep (four more wall runs with a door facing the gate)
+    and a stone courtyard slab. Everything is centered on the origin; the
+    Ruin amount is shared by all parts (each part gets its own seed)."""
+    big = _TowerMesh()
+    W, D = width, depth
+    stones_scale = {'LOW': 0.0, 'MEDIUM': 1.0, 'HIGH': 3.0}.get(detail, 1.0)
+    tower_h = max(tower_h, wall_h + 2.0)
+    hy = wall_t / 2.0
+    # -- courtyard
+    for pts in ([(-W / 2, -D / 2, 0.0), (W / 2, -D / 2, 0.0), (W / 2, D / 2, 0.0), (-W / 2, D / 2, 0.0)],):
+        big.poly('yard', pts, [(p[0] / TOWER_TILE_W, p[1] / TOWER_TILE_W) for p in pts], (0.0, 0.0, 1.0), 1)
+    # -- corner towers
+    corners = [(-W / 2, -D / 2), (W / 2, -D / 2), (W / 2, D / 2), (-W / 2, D / 2)]
+    for i, (cx, cy) in enumerate(corners):
+        door_deg = math.degrees(math.atan2(-cy, -cx)) % 360.0
+        tb = _TowerBuilder(
+            tower_r, tower_h, tower_wall, battlements=True, detail=detail, seed=seed + 11 * i,
+            interior=interior and tower_r - tower_wall >= 1.6, stair_width=1.0,
+            stair_start_deg=door_deg + 60.0, ruin=ruin,
+        )
+        tb.add_opening(door_deg, 1.3, 0.0, min(2.6, tb.Hs - 1.0), 'arch')
+        for k in range(tb.n_storeys):
+            tb.add_opening((door_deg + 180.0 + (40.0 if k % 2 else -40.0)) % 360.0, 0.28, k * tb.sh + 1.2, 1.3, 'rect')
+        tb.geometry(ground=True)
+        big.append(tb.mb, offset=(cx, cy, 0.0))
+    # -- curtain walls
+    xe = math.sqrt(max((tower_r - tower_wall / 2.0) ** 2 - hy * hy, 0.1))
+    sides = [
+        ((-W / 2 + xe, -D / 2), 0.0, W - 2 * xe, gate),
+        ((W / 2, -D / 2 + xe), math.pi / 2, D - 2 * xe, False),
+        ((W / 2 - xe, D / 2), math.pi, W - 2 * xe, False),
+        ((-W / 2, D / 2 - xe), 3 * math.pi / 2, D - 2 * xe, False),
+    ]
+    for i, (start, rot, length, has_gate) in enumerate(sides):
+        wb = _WallRunBuilder(length, wall_h, wall_t, battlements=True, seed=seed + 101 + i, ruin=ruin,
+                             stones=int(length * wall_h * 0.35 * stones_scale))
+        _castle_wall_openings(wb, has_gate, wall_h)
+        wb.geometry()
+        big.append(wb.mb, rot=rot, offset=(start[0], start[1], 0.0))
+    # -- keep
+    if keep:
+        ks = max(6.0, min(W, D) * 0.38)
+        kcx, kcy = 0.0, D * 0.12
+        kh = max(wall_h * 1.45, wall_h + 3.0)
+        kt = max(wall_t, 1.0)
+        corners_k = [(kcx - ks / 2, kcy - ks / 2), (kcx + ks / 2, kcy - ks / 2), (kcx + ks / 2, kcy + ks / 2), (kcx - ks / 2, kcy + ks / 2)]
+        dirs = [(1, 0, 0.0), (0, 1, math.pi / 2), (-1, 0, math.pi), (0, -1, 3 * math.pi / 2)]
+        for i, ((cx, cy), (dx, dy, rot)) in enumerate(zip(corners_k, dirs)):
+            wb = _WallRunBuilder(ks + kt, kh, kt, battlements=True, seed=seed + 301 + i, ruin=ruin,
+                                 stones=int(ks * kh * 0.3 * stones_scale))
+            if i == 0:
+                wb.add_opening(wb.L / 2.0, 2.0, 0.0, 2.8, 'arch')
+            else:
+                wb.add_opening(wb.L / 2.0, 0.3, kh * 0.45, 1.5, 'rect')
+            wb.geometry()
+            big.append(wb.mb, rot=rot, offset=(cx - dx * kt / 2.0, cy - dy * kt / 2.0, 0.0))
+    return big
+
+
+class OBJECT_OT_GenerateLevelCastle(bpy.types.Operator):
+    """Builds a walled castle at the 3D cursor from masonry parts: four
+    corner towers (with interiors), curtain walls with battlements, arrow
+    slits and a gate, an optional keep, and a courtyard. Ruin breaks the
+    whole thing down. Standalone, like the tower, and replaces any
+    previous castle made by this operator."""
+    bl_idname = "object.generate_level_castle"
+    bl_label = "Generate Castle"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        scene = context.scene
+        if scene.wfc_castle_tower_radius * 2.0 + 3.0 > min(scene.wfc_castle_width, scene.wfc_castle_depth):
+            self.report({'ERROR'}, "Towers are too large for the courtyard: raise Width/Depth or lower the tower radius.")
+            return {'CANCELLED'}
+        _remove_objects_by_prefix(CASTLE_OBJECT_NAME)
+        soup = _build_castle_mesh(
+            scene.wfc_castle_width, scene.wfc_castle_depth, scene.wfc_castle_wall_height,
+            scene.wfc_castle_wall_thickness, scene.wfc_castle_tower_radius, scene.wfc_castle_tower_height,
+            scene.wfc_castle_gate, scene.wfc_castle_keep, scene.wfc_castle_ruin,
+            scene.wfc_tower_detail, scene.wfc_seed,
+        )
+        mesh = soup.to_mesh(CASTLE_OBJECT_NAME)
+        obj = bpy.data.objects.new(CASTLE_OBJECT_NAME, mesh)
+        context.collection.objects.link(obj)
+        obj.location = scene.cursor.location
+        mesh.materials.append(get_or_create_tower_brick_material())
+        mesh.materials.append(get_or_create_tower_stone_material())
+        _add_viewport_color_attribute(mesh)
+        for o in context.selected_objects:
+            o.select_set(False)
+        obj.select_set(True)
+        context.view_layer.objects.active = obj
+        self.report({'INFO'}, f"Castle generated: {len(mesh.vertices)} vertices.")
+        _update_debug_snapshot(context, "Castle")
+        return {'FINISHED'}
+
+
 def _section(layout, idname, title, icon, default_closed=False):
     """A collapsible section with a native disclosure triangle (Blender's
     UILayout.panel(), added in 4.1) that remembers open/closed state on its
@@ -8115,6 +8564,8 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
             self._draw_export_tab(context, layout)
         elif scene.wfc_active_tab == 'TOWER':
             self._draw_tower_tab(context, layout)
+        elif scene.wfc_active_tab == 'CASTLE':
+            self._draw_castle_tab(context, layout)
 
         layout.separator()
         section = _section(layout, "LA_debug", "Debug: Last Generation Params", 'CONSOLE', default_closed=True)
@@ -8312,6 +8763,27 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
             'MOD_LATTICE', 'COLLECTION_COLOR_06',
         )
 
+    def _draw_castle_tab(self, context, layout):
+        scene = context.scene
+        col = layout.column(align=True)
+        row = col.row(align=True)
+        row.prop(scene, "wfc_castle_width", text="Width")
+        row.prop(scene, "wfc_castle_depth", text="Depth")
+        row = col.row(align=True)
+        row.prop(scene, "wfc_castle_wall_height", text="Wall Height")
+        row.prop(scene, "wfc_castle_wall_thickness", text="Thick")
+        row = col.row(align=True)
+        row.prop(scene, "wfc_castle_tower_radius", text="Tower R")
+        row.prop(scene, "wfc_castle_tower_height", text="Tower H")
+        col.prop(scene, "wfc_tower_detail", text="Brick Detail")
+        col.separator()
+        col.prop(scene, "wfc_castle_gate", text="Gate")
+        col.prop(scene, "wfc_castle_keep", text="Keep")
+        col.prop(scene, "wfc_castle_ruin", text="Ruin")
+        layout.label(text="Built at the 3D cursor.")
+        layout.separator()
+        _step_button(layout, "object.generate_level_castle", "Generate Castle", 'HOME', 'COLLECTION_COLOR_05')
+
     def _draw_tower_tab(self, context, layout):
         scene = context.scene
         col = layout.column(align=True)
@@ -8399,6 +8871,7 @@ classes = (
     OBJECT_OT_GenerateLevelDoors,
     OBJECT_OT_GenerateLevelProps,
     OBJECT_OT_GenerateLevelTower,
+    OBJECT_OT_GenerateLevelCastle,
     OBJECT_OT_ExportLevelGLTF,
     OBJECT_OT_ExportLevelCollisionGLTF,
     OBJECT_OT_CopyLevelArchitectParams,
@@ -8919,6 +9392,40 @@ def register():
         name="Windows per Storey", default=2, min=0, max=8,
         description="Slit windows around each 3 m storey (staggered per storey)"
     )
+    bpy.types.Scene.wfc_castle_width = FloatProperty(
+        name="Castle Width", default=26.0, min=12.0, max=120.0, unit='LENGTH',
+        description="East-west distance between the corner tower centres"
+    )
+    bpy.types.Scene.wfc_castle_depth = FloatProperty(
+        name="Castle Depth", default=20.0, min=12.0, max=120.0, unit='LENGTH',
+        description="North-south distance between the corner tower centres (the gate is on the south side)"
+    )
+    bpy.types.Scene.wfc_castle_wall_height = FloatProperty(
+        name="Castle Wall Height", default=7.0, min=3.0, max=25.0, unit='LENGTH',
+        description="Curtain wall height including battlements"
+    )
+    bpy.types.Scene.wfc_castle_wall_thickness = FloatProperty(
+        name="Castle Wall Thickness", default=1.1, min=0.5, max=2.5, unit='LENGTH',
+        description="Curtain wall thickness"
+    )
+    bpy.types.Scene.wfc_castle_tower_radius = FloatProperty(
+        name="Castle Tower Radius", default=3.2, min=2.0, max=8.0, unit='LENGTH',
+        description="Outer radius of the four corner towers"
+    )
+    bpy.types.Scene.wfc_castle_tower_height = FloatProperty(
+        name="Castle Tower Height", default=12.0, min=5.0, max=40.0, unit='LENGTH',
+        description="Corner tower height (kept at least 2 m above the curtain walls)"
+    )
+    bpy.types.Scene.wfc_castle_gate = BoolProperty(
+        name="Gate", default=True, description="A large arched gate in the middle of the south wall"
+    )
+    bpy.types.Scene.wfc_castle_keep = BoolProperty(
+        name="Keep", default=True, description="A square keep in the courtyard with a door facing the gate"
+    )
+    bpy.types.Scene.wfc_castle_ruin = FloatProperty(
+        name="Ruin", default=0.0, min=0.0, max=1.0, subtype='FACTOR',
+        description="How ruined every part of the castle is (towers, walls, keep). 0 = intact"
+    )
     bpy.types.Scene.wfc_tower_ruin = FloatProperty(
         name="Ruin", default=0.0, min=0.0, max=1.0, subtype='FACTOR',
         description="How ruined the tower is: the top breaks down to a jagged edge that steps along "
@@ -8967,6 +9474,8 @@ def register():
             ('EXPORT', "Export", "One-click glTF/GLB export", 'EXPORT', 5),
             ('TOWER', "Tower", "Round tower: brick-textured shell, arched door, slit windows, "
                                "battlements", 'MESH_CYLINDER', 6),
+            ('CASTLE', "Castle", "Walled castle: corner towers, curtain walls, gate, keep, ruins",
+                                 'HOME', 7),
         ],
         default='SETUP',
         description="Which step's settings the panel below shows",
@@ -9049,6 +9558,15 @@ def unregister():
     del bpy.types.Scene.wfc_tower_door
     del bpy.types.Scene.wfc_tower_door_angle
     del bpy.types.Scene.wfc_tower_windows
+    del bpy.types.Scene.wfc_castle_width
+    del bpy.types.Scene.wfc_castle_depth
+    del bpy.types.Scene.wfc_castle_wall_height
+    del bpy.types.Scene.wfc_castle_wall_thickness
+    del bpy.types.Scene.wfc_castle_tower_radius
+    del bpy.types.Scene.wfc_castle_tower_height
+    del bpy.types.Scene.wfc_castle_gate
+    del bpy.types.Scene.wfc_castle_keep
+    del bpy.types.Scene.wfc_castle_ruin
     del bpy.types.Scene.wfc_tower_ruin
     del bpy.types.Scene.wfc_tower_interior
     del bpy.types.Scene.wfc_tower_stair_width

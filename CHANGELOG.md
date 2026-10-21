@@ -3,6 +3,26 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.31.0
+
+- **New: Castle** (new Castle tab, built at the 3D cursor). A walled castle assembled from masonry parts:
+  four corner towers (each with a door facing the courtyard, slit windows and the Round Tower's interior
+  of floors and spiral stairs), four curtain walls with battlements and arrow slits whose ends are buried
+  in the tower masonry, a large arched gate in the south wall, an optional keep in the courtyard (its
+  door faces the gate) and a stone courtyard slab. Width, depth, wall height/thickness, tower radius and
+  height, Gate, Keep and Brick Detail are adjustable.
+- **Ruin works on the whole castle** (one slider): towers, walls and keep break down into stepped
+  jagged edges with breaches, collapsed arches and rubble; the gate stays passable.
+- **New building block: straight masonry wall runs** (`_WallRunBuilder`), the flat sibling of the tower
+  shell: brick-textured skins, arched/pointed/flat openings with reveals and stone frames, plinth,
+  battlements, ruin, stones, rubble. Used by the castle's curtain walls and keep; not yet wired into
+  ordinary level walls.
+- Tests: wall solidity and outward normals, gate and ruined-gate passability, tower/wall joints without
+  holes, towers above walls, keep/gate toggles, more ruin = lower walls, deterministic seed, refusal when
+  the towers do not fit.
+- Known: the tower doors open onto the courtyard but nothing connects a tower's upper floors to the wall
+  tops, and the keep has no interior.
+
 ## 0.30.0
 
 - **New: ruins.** A "Ruin" slider (0..1, default 0) on the Tower tab and, for Masonry Round rooms, on the
