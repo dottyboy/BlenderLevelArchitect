@@ -106,9 +106,11 @@ be pressed afterward, same as any other setting. The steps build on each other's
 
 **Round rooms have a real shape**, not a blocky per-tile approximation — every Round room's floor
 is a merged n-gon disc (**Room Shape Sides**, Setup tab, 3 = triangle up to a smooth circle), its
-guard-rail wall hugs that same curve with a real opening wherever a corridor connects, and its
-doorway frames (including the arch, with Round/Pointed Door Style) are oriented along the wall's
-own curve at that exact spot instead of standing at a straight, mismatched angle against it.
+wall hugs that same curve with a real opening wherever a corridor connects, and its doorway frames
+(including the arch, with Round/Pointed Door Style) follow the wall's own curve at that exact spot
+instead of standing at a straight, mismatched angle against it. By default (Walls tab, **Round
+Rooms: Masonry**) that wall is a brick-textured stone ring with stone door frames and scattered
+stones; **Classic** keeps the older plain-box ring with Room Shape Sides.
 
 **Add Ceiling** (under Scale & Style) closes every room's ceiling instead of leaving it open —
 turn this on for an FPS-style playtest so rooms don't open onto empty space overhead. It's a live

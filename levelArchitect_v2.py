@@ -32,7 +32,7 @@ from bpy_extras.io_utils import ExportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 28, 0),
+    "version": (0, 29, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -4062,6 +4062,158 @@ def _room_shape_sides_wall_positions(cx, cy, rx, ry, sides):
     ]
 
 
+def _round_room_opening_ranges(room, room_id, room_id_grid, walkable, tile_size, min_width_m=1.4):
+    """Parameter-angle ranges [(t0, t1), ...] (t1 > t0, possibly beyond 2*pi
+    after merging) where a Round room's rim ellipse passes through a walkable
+    cell that is NOT one of the room's own floor cells -- i.e. every place a
+    corridor or a neighbouring room actually meets the ring, including the
+    dead corner of the bounding rectangle a corridor may legitimately cross
+    (see _build_round_room_walls_mesh for why that happens). The ring is
+    sampled densely and tested against the cell grid (centered convention:
+    cell i spans (i-0.5)..(i+0.5) tiles) with a small pad so a corridor that
+    only touches the rim is still opened. Each run is widened to at least
+    min_width_m (arc length) and runs closer than a frame's width are
+    merged, so openings never overlap."""
+    x, y, rw, rl, z = room['x'], room['y'], room['w'], room['l'], room['z']
+    cx, cy = (x + (rw - 1) / 2.0) * tile_size, (y + (rl - 1) / 2.0) * tile_size
+    rx, ry = (rw / 2.0) * tile_size, (rl / 2.0) * tile_size
+    n = 1440
+    pad = 0.05
+    marked = [False] * n
+    for k in range(n):
+        t = TOWER_TAU * k / n
+        px, py = cx + rx * math.cos(t), cy + ry * math.sin(t)
+        for ox, oy in ((0.0, 0.0), (pad, 0.0), (-pad, 0.0), (0.0, pad), (0.0, -pad)):
+            cell = (math.floor((px + ox) / tile_size + 0.5), math.floor((py + oy) / tile_size + 0.5), z)
+            if cell in walkable and room_id_grid.get(cell) != room_id:
+                marked[k] = True
+                break
+            if room_id_grid.get(cell) == room_id:
+                # the ring crosses one of the room's own cells: open it if the half of
+                # that cell nearest the ring leads straight out into a walkable neighbour
+                lx, ly = (px + ox) - cell[0] * tile_size, (py + oy) - cell[1] * tile_size
+                for ddx, ddy in HORIZONTAL_NEIGHBORS:
+                    nb = (cell[0] + ddx, cell[1] + ddy, z)
+                    if nb in walkable and room_id_grid.get(nb) != room_id and lx * ddx + ly * ddy >= 0.0:
+                        marked[k] = True
+                        break
+                if marked[k]:
+                    break
+    if not any(marked):
+        return []
+    if all(marked):
+        return [(0.0, TOWER_TAU)]
+    start = next(k for k in range(n) if marked[k] and not marked[k - 1])
+    runs, k, count = [], start, 0
+    while count < n:
+        if marked[k % n]:
+            j = k
+            while marked[(j + 1) % n] and (j + 1 - k) < n:
+                j += 1
+            runs.append([TOWER_TAU * k / n, TOWER_TAU * (j + 1) / n])
+            count += j + 1 - k
+            k = j + 1
+        else:
+            k += 1
+            count += 1
+    # perimeter (Ramanujan) -> metres per radian, to widen narrow runs
+    per = math.pi * (3 * (rx + ry) - math.sqrt((3 * rx + ry) * (rx + 3 * ry)))
+    m_per_rad = per / TOWER_TAU
+    gap_merge = 1.0 / m_per_rad
+    min_w = min_width_m / m_per_rad
+    for r in runs:
+        w = r[1] - r[0]
+        if w < min_w:
+            mid = (r[0] + r[1]) / 2.0
+            r[0], r[1] = mid - min_w / 2.0, mid + min_w / 2.0
+    runs.sort()
+    merged = [runs[0]]
+    for r in runs[1:]:
+        if r[0] - merged[-1][1] < gap_merge:
+            merged[-1][1] = max(merged[-1][1], r[1])
+        else:
+            merged.append(r)
+    if len(merged) > 1 and merged[0][0] + TOWER_TAU - merged[-1][1] < gap_merge:
+        merged[0][0] = merged[-1][0] - TOWER_TAU
+        merged.pop()
+    return [(a, b) for a, b in merged]
+
+
+def _build_round_room_masonry_mesh(
+    room_meta, room_id_grid, walkable_cells, tile_size, fine_level_height, wall_height,
+    wall_thickness, z_offsets, door_style, door_height, cap_top, seed, name,
+):
+    """Round room walls as brick-textured masonry (the Round Tower's shell
+    method, see _TowerBuilder) instead of the n-gon ring of plain boxes: a
+    smooth textured ring around the room's rim ellipse, real arched/pointed/
+    flat openings cut exactly where a corridor or room meets the ring (see
+    _round_room_opening_ranges), dressed-stone frames, scattered proud
+    stones, and an optional flat stone cap. The shell is built as a circle
+    and stretched to the room's ellipse (a positive-determinant map, so
+    face orientation survives); the outer skin sits ON the rim and the
+    wall grows inward, so it stays inside the room's reserved rectangle.
+    Material slots: 0 = brick, 1 = dressed stone."""
+    walkable = set(walkable_cells)
+    big = _TowerMesh()
+    kind_for_style = {'FLAT': 'rect', 'ROUND': 'arch', 'POINTED': 'pointed'}
+    for room_id, room in enumerate(room_meta):
+        if room['shape'] != 'ROUND':
+            continue
+        x, y, rw, rl, z = room['x'], room['y'], room['w'], room['l'], room['z']
+        cells_here = [c for c, rid in room_id_grid.items() if rid == room_id and c[2] == z]
+        if not cells_here:
+            continue
+        cxc = sum(c[0] for c in cells_here) / len(cells_here)
+        cyc = sum(c[1] for c in cells_here) / len(cells_here)
+        nearest = min(cells_here, key=lambda c: (c[0] - cxc) ** 2 + (c[1] - cyc) ** 2)
+        cx, cy = (x + (rw - 1) / 2.0) * tile_size, (y + (rl - 1) / 2.0) * tile_size
+        rx, ry = (rw / 2.0) * tile_size, (rl / 2.0) * tile_size
+        R = max(rx, ry)
+        wall_c = min(wall_thickness, R * 0.4)
+        if R - wall_c < 0.5:
+            continue
+        sx, sy = rx / R, ry / R
+        per = math.pi * (3 * (rx + ry) - math.sqrt((3 * rx + ry) * (rx + 3 * ry)))
+        ranges = _round_room_opening_ranges(room, room_id, room_id_grid, walkable, tile_size)
+        # seam in the middle of the largest stretch of solid wall
+        seam = 0.0
+        if ranges:
+            ordered = sorted(ranges)
+            best = -1.0
+            for i, (a0, b0) in enumerate(ordered):
+                nxt = ordered[(i + 1) % len(ordered)][0] + (TOWER_TAU if i + 1 == len(ordered) else 0.0)
+                if nxt - b0 > best:
+                    best, seam = nxt - b0, (b0 + nxt) / 2.0
+        if len(ranges) == 1 and ranges[0][1] - ranges[0][0] >= TOWER_TAU - 1e-6:
+            continue  # ring would be nothing but an opening
+        stones = int(per * wall_height * 0.35)
+        builder = _TowerBuilder(
+            R, wall_height, wall_c, battlements=False, detail='MEDIUM', seed=seed + room_id,
+            plinth=False, cap_top=cap_top, brick_cols=max(1, round(per / TOWER_TILE_W)),
+            stones=stones, seam=seam,
+        )
+        skip_room = False
+        for t0, t1 in ranges:
+            placed = False
+            tries = [(kind_for_style.get(door_style, 'rect'), door_height),
+                     ('rect', min(door_height, builder.Hs - 0.5)), ('gap', 0.0)]
+            if builder.Hs < 1.4:
+                tries = [('gap', 0.0)]
+            for kind, h in tries:
+                if builder.add_opening_range(t0, t1, 0.0, h, kind):
+                    placed = True
+                    break
+            if not placed:
+                skip_room = True  # opening wider than the ring allows: leave this room's wall out, never seal a corridor
+                break
+        if skip_room:
+            continue
+        builder.geometry(ground=False)
+        z0 = z * fine_level_height + z_offsets.get(nearest, 0.0)
+        big.append(builder.mb, rot=seam, sx=sx, sy=sy, offset=(cx, cy, z0))
+    return big.to_mesh(name)
+
+
 def _build_round_room_walls_mesh(
     room_meta, room_id_grid, walkable_cells, tile_size, fine_level_height, wall_height,
     wall_thickness, room_shape_sides, z_offsets, name,
@@ -6185,18 +6337,33 @@ class OBJECT_OT_GenerateLevelWalls(bpy.types.Operator):
         sub_levels = max(1, scene.wfc_sub_levels_per_floor)
         per_floor = scene.wfc_wall_grouping == 'PER_FLOOR'
 
+        masonry_rings = scene.wfc_round_wall_style == 'MASONRY'
+
         def _add_round_ring(name, meta_for_floor):
-            ring_mesh_data = _build_round_room_walls_mesh(
-                meta_for_floor, room_id_grid, walkable_cells, tile_size, level_height,
-                scene.wfc_wall_height, scene.wfc_wall_thickness, scene.wfc_room_shape_sides,
-                z_offsets, name,
-            )
+            if masonry_rings:
+                ring_mesh_data = _build_round_room_masonry_mesh(
+                    meta_for_floor, room_id_grid, walkable_cells, tile_size, level_height,
+                    scene.wfc_wall_height, scene.wfc_wall_thickness, z_offsets,
+                    scene.wfc_door_style, scene.wfc_door_height, scene.wfc_wall_cap_top,
+                    scene.wfc_seed, name,
+                )
+            else:
+                ring_mesh_data = _build_round_room_walls_mesh(
+                    meta_for_floor, room_id_grid, walkable_cells, tile_size, level_height,
+                    scene.wfc_wall_height, scene.wfc_wall_thickness, scene.wfc_room_shape_sides,
+                    z_offsets, name,
+                )
             if not ring_mesh_data.vertices:
                 bpy.data.meshes.remove(ring_mesh_data)
                 return None
             ring_obj = bpy.data.objects.new(name, ring_mesh_data)
             context.collection.objects.link(ring_obj)
-            ring_mesh_data.materials.append(wall_material)
+            if masonry_rings:
+                ring_mesh_data.materials.append(get_or_create_tower_brick_material())
+                ring_mesh_data.materials.append(get_or_create_tower_stone_material())
+                ring_obj["gla_masonry_ring"] = True
+            else:
+                ring_mesh_data.materials.append(wall_material)
             _add_viewport_color_attribute(ring_mesh_data)
             return ring_obj
 
@@ -6247,6 +6414,8 @@ class OBJECT_OT_GenerateLevelWalls(bpy.types.Operator):
 
         if scene.wfc_wall_corner_rounding:
             for obj in created:
+                if obj.get("gla_masonry_ring"):
+                    continue  # smooth textured ring: a Bevel would only soften its stone details
                 _add_corner_rounding_modifier(obj, scene.wfc_wall_corner_radius)
 
         # Rounding is applied before the window object is added on purpose:
@@ -6469,6 +6638,8 @@ class OBJECT_OT_GenerateLevelDoors(bpy.types.Operator):
             return panels
 
         def _add_round_doors(name, meta_for_floor):
+            if scene.wfc_round_wall_style == 'MASONRY':
+                return None  # the masonry ring carries its own arched/flat stone frames
             round_mesh_data = _build_round_room_doors_mesh(
                 meta_for_floor, room_ids, walkable_cells, tile_size, level_height,
                 scene.wfc_door_height, scene.wfc_door_frame_thickness, scene.wfc_room_shape_sides,
@@ -7009,6 +7180,22 @@ class _TowerMesh:
         self.mats.append(mat)
         self.smooth.append(smooth)
 
+    def append(self, other, rot=0.0, sx=1.0, sy=1.0, offset=(0.0, 0.0, 0.0)):
+        """Appends another soup, rotated about Z by rot, then stretched by
+        (sx, sy) along X/Y (an ellipse from a circle), then moved. Both
+        operations have a positive determinant, so outward-facing winding
+        survives."""
+        base = len(self.verts)
+        c, s_ = math.cos(rot), math.sin(rot)
+        for x, y, z in other.verts:
+            xr, yr = x * c - y * s_, x * s_ + y * c
+            self.verts.append((xr * sx + offset[0], yr * sy + offset[1], z + offset[2]))
+        for ids in other.faces:
+            self.faces.append([i + base for i in ids])
+        self.uvs.extend(other.uvs)
+        self.mats.extend(other.mats)
+        self.smooth.extend(other.smooth)
+
     def to_mesh(self, name):
         mesh = bpy.data.meshes.new(name + "_Mesh")
         mesh.from_pydata(self.verts, [], self.faces)
@@ -7031,15 +7218,20 @@ class _TowerBuilder:
     DETAIL_STONES = {'LOW': 0, 'MEDIUM': 70, 'HIGH': 320}
 
     def __init__(self, radius, height, wall, battlements=True, detail='MEDIUM', seed=1,
-                 interior=False, stair_width=1.0, stair_start_deg=0.0):
+                 interior=False, stair_width=1.0, stair_start_deg=0.0,
+                 plinth=True, cap_top=False, brick_cols=None, stones=None, seam=0.0):
         self.R, self.H, self.wall = radius, height, wall
+        self.plinth = plinth
+        self.cap_top = cap_top
+        self.stones = stones            # None: from detail; else an explicit count
+        self.seam = seam                # world param angle where the shell's angular sweep starts/ends
         self.interior = interior
         self.stair_w = stair_width
         # snapped to the 64-segment slab grid so the slab hole ends exactly where a stair arrives
         self.stair_a0 = round(math.radians(stair_start_deg) / (TOWER_TAU / 64.0)) * (TOWER_TAU / 64.0)
         self.tile_w, self.tile_h = TOWER_TILE_W, TOWER_ROWS * TOWER_ROW_H
-        self.Ko = max(1, round(TOWER_TAU * radius / self.tile_w))
-        self.Ki = max(1, round(TOWER_TAU * (radius - wall) / self.tile_w))
+        self.Ko = brick_cols or max(1, round(TOWER_TAU * radius / self.tile_w))
+        self.Ki = max(1, round(self.Ko * (radius - wall) / radius))
         self.battle = battlements
         self.detail = detail
         self.rng = random.Random(seed)
@@ -7063,23 +7255,80 @@ class _TowerBuilder:
         half = width / 2.0 / self.R
         # keep the whole opening inside (0, 2*pi): the shell is built as one angular sweep
         ac = min(max(ac, half + 0.02), TOWER_TAU - half - 0.02)
-        spring = sill + (max(height - width / 2.0, 0.2) if kind == 'arch' else height)
-        apex = spring + (width / 2.0 if kind == 'arch' else 0.0)
-        if apex + 0.4 > self.Hs or width >= self.R * 1.2:
+        return self._register_opening(ac, half, sill, height, kind)
+
+    def add_opening_range(self, t0, t1, sill, height, kind='arch'):
+        """Opening spanning the world parameter angles t0..t1 (t1 > t0); the
+        shell's seam is rotated away by self.seam, so it must not straddle it."""
+        half = (t1 - t0) / 2.0
+        ac = ((t0 + t1) / 2.0 - self.seam) % TOWER_TAU
+        if ac - half < 0.01 or ac + half > TOWER_TAU - 0.01:
+            return False
+        return self._register_opening(ac, half, sill, height, kind)
+
+    @staticmethod
+    def _curved(o):
+        return o['kind'] in ('arch', 'pointed')
+
+    def _register_opening(self, ac, half, sill, height, kind):
+        width = 2.0 * half * self.R
+        rise = 0.0
+        if kind == 'arch':
+            spring = sill + max(height - width / 2.0, 0.2)
+            apex = spring + width / 2.0
+            rise = width / 2.0
+        elif kind == 'pointed':
+            rise = min(width * 0.85, max(height - 0.4, 0.3))
+            spring = sill + height - rise
+            apex = sill + height
+        elif kind == 'gap':
+            # full-height opening with no frame or lintel: for walls too low to hold a real door
+            spring = apex = self.Hs
+        else:
+            spring = sill + height
+            apex = spring
+        if (kind != 'gap' and apex + 0.4 > self.Hs) or width >= self.R * 1.9 or width < 0.15:
             return False
         for o in self.openings:  # no overlapping openings
             sep = abs(ac - o['ac']) * self.R
             if sep < (width + o['w']) / 2.0 + 0.6 and sill < o['apex'] + 0.4 and o['sill'] < apex + 0.4:
                 return False
         self.openings.append(dict(ac=ac, w=width, sill=sill, spring=spring, apex=apex, kind=kind,
-                                  a0=ac - half, a1=ac + half))
+                                  rise=rise, a0=ac - half, a1=ac + half))
         return True
 
     def _arch_h(self, o, s):
-        if o['kind'] != 'arch':
-            return o['spring']
-        s = max(-o['w'] / 2.0, min(o['w'] / 2.0, s))
-        return o['spring'] + math.sqrt(max(0.0, (o['w'] / 2.0) ** 2 - s * s))
+        if o['kind'] == 'arch':
+            s = max(-o['w'] / 2.0, min(o['w'] / 2.0, s))
+            return o['spring'] + math.sqrt(max(0.0, (o['w'] / 2.0) ** 2 - s * s))
+        if o['kind'] == 'pointed':
+            hs = o['w'] / 2.0
+            c = (o['rise'] ** 2 - hs * hs) / (2.0 * hs)
+            r = hs + c
+            x = abs(max(-hs, min(hs, s))) + c
+            return o['spring'] + math.sqrt(max(0.0, r * r - x * x))
+        return o['spring']
+
+    def _arch_curve(self, o, n=10):
+        """Intrados of a curved opening as (s, z, nx, nz): points left spring
+        -> apex -> right spring with the outward unit normal in the (s, z) plane."""
+        hs = o['w'] / 2.0
+        pts = []
+        if o['kind'] == 'arch':
+            for k in range(n + 1):
+                t = math.pi * (1.0 - k / n)
+                pts.append((hs * math.cos(t), o['spring'] + hs * math.sin(t), math.cos(t), math.sin(t)))
+            return pts
+        c = (o['rise'] ** 2 - hs * hs) / (2.0 * hs)
+        r = hs + c
+        phi_a = math.acos(max(-1.0, min(1.0, -c / r)))
+        half_n = max(1, n // 2)
+        left = []
+        for k in range(half_n + 1):
+            phi = math.pi + (phi_a - math.pi) * k / half_n
+            left.append((c + r * math.cos(phi), o['spring'] + r * math.sin(phi), math.cos(phi), math.sin(phi)))
+        right = [(-x, z, -nx, nz) for x, z, nx, nz in reversed(left[:-1])]
+        return left + right
 
     # -- smooth textured shell, outer or inner skin
     def _shell(self, outer):
@@ -7093,7 +7342,7 @@ class _TowerBuilder:
         columns = []
         for a0, a1 in zip(hard[:-1], hard[1:]):
             op = next((o for o in self.openings if o['a0'] - 1e-6 <= a0 and a1 <= o['a1'] + 1e-6), None)
-            k = max(1, round((a1 - a0) * R / 0.5)) if op is None else (6 if op['kind'] == 'arch' else 1)
+            k = max(1, round((a1 - a0) * R / 0.5)) if op is None else (8 if op['kind'] == 'pointed' else 6 if op['kind'] == 'arch' else 1)
             for i in range(k):
                 columns.append((a0 + (a1 - a0) * i / k, a0 + (a1 - a0) * (i + 1) / k, op))
 
@@ -7110,10 +7359,10 @@ class _TowerBuilder:
             if op is None:
                 face([(a0, 0), (a1, 0), (a1, Hs), (a0, Hs)])
                 continue
-            top = op['apex'] + (0.2 if op['kind'] == 'arch' else 0.0)
+            top = op['apex'] + (0.2 if self._curved(op) else 0.0)
             if op['sill'] > 1e-6:
                 face([(a0, 0), (a1, 0), (a1, op['sill']), (a0, op['sill'])])
-            if op['kind'] == 'arch':
+            if self._curved(op):
                 h0 = self._arch_h(op, (a0 - op['ac']) * self.R)
                 h1 = self._arch_h(op, (a1 - op['ac']) * self.R)
                 face([(a0, h0), (a1, h1), (a1, top), (a0, top)])
@@ -7138,10 +7387,11 @@ class _TowerBuilder:
 
             for a in (a0, a1):
                 quad((a, o['sill']), (a, o['spring']))
-            if o['kind'] == 'arch':
+            if self._curved(o):
                 prev = (a0, o['spring'])
-                for i in range(1, 7):
-                    a = a0 + (a1 - a0) * i / 6
+                m = 8 if o['kind'] == 'pointed' else 6
+                for i in range(1, m + 1):
+                    a = a0 + (a1 - a0) * i / m
                     cur = (a, self._arch_h(o, (a - o['ac']) * self.R))
                     quad(prev, cur)
                     prev = cur
@@ -7172,6 +7422,8 @@ class _TowerBuilder:
     def _frames(self):
         Ro, proud = self.R, 0.06
         for o in self.openings:
+            if o['kind'] == 'gap':
+                continue
             fw = 0.26 if o['kind'] == 'arch' else 0.18
             ac, w = o['ac'], o['w']
 
@@ -7186,19 +7438,16 @@ class _TowerBuilder:
                 blk(w / 2, w / 2 + ext, z, z + hh)
                 z += hh
                 i += 1
-            if o['kind'] == 'arch':
-                ra, n = w / 2.0, 9
-                for k in range(n):
-                    t0, t1 = math.pi * k / n, math.pi * (k + 1) / n
-                    rr = (ra, ra + fw + (0.1 if k % 2 else 0.0))
-
-                    def pt(t, r):
-                        return (r * math.cos(t), o['spring'] + r * math.sin(t))
-                    (x00, z00), (x01, z01) = pt(t0, rr[0]), pt(t0, rr[1])
-                    (x10, z10), (x11, z11) = pt(t1, rr[0]), pt(t1, rr[1])
-                    r0, r1 = Ro - 0.02, Ro + proud
-                    self._solid([(ac + x00 / Ro, z00, r0), (ac + x10 / Ro, z10, r0), (ac + x11 / Ro, z11, r0), (ac + x01 / Ro, z01, r0),
-                                 (ac + x00 / Ro, z00, r1), (ac + x10 / Ro, z10, r1), (ac + x11 / Ro, z11, r1), (ac + x01 / Ro, z01, r1)])
+            if self._curved(o):
+                curve = self._arch_curve(o, 10)
+                r0, r1 = Ro - 0.02, Ro + proud
+                for k in range(len(curve) - 1):
+                    (xa, za, nxa, nza), (xb, zb, nxb, nzb) = curve[k], curve[k + 1]
+                    wa = fw + (0.1 if k % 2 else 0.0)
+                    xa2, za2 = xa + nxa * wa, za + nza * wa
+                    xb2, zb2 = xb + nxb * wa, zb + nzb * wa
+                    self._solid([(ac + xa / Ro, za, r0), (ac + xb / Ro, zb, r0), (ac + xb2 / Ro, zb2, r0), (ac + xa2 / Ro, za2, r0),
+                                 (ac + xa / Ro, za, r1), (ac + xb / Ro, zb, r1), (ac + xb2 / Ro, zb2, r1), (ac + xa2 / Ro, za2, r1)])
             else:
                 blk(-w / 2 - fw, w / 2 + fw, o['spring'], o['spring'] + 0.3)
             blk(-w / 2 - fw - 0.05, w / 2 + fw + 0.05, o['sill'] - 0.14, o['sill'], Ro + proud + 0.08)
@@ -7212,7 +7461,8 @@ class _TowerBuilder:
             am = (a0 + a1) / 2.0
             if any(abs(((am - o['ac'] + math.pi) % TOWER_TAU) - math.pi) < o['w'] / 2 / Ro + 0.28 for o in doors):
                 continue
-            self._wedge(a0, a1, Ro - 0.02, Ro + 0.16, 0.0, 0.45)
+            if self.plinth:
+                self._wedge(a0, a1, Ro - 0.02, Ro + 0.16, 0.0, 0.45)
             if self.battle:
                 self._wedge(a0, a1, Ro - 0.02, Ro + 0.18, self.Hs - 0.16, self.Hs)
 
@@ -7237,6 +7487,17 @@ class _TowerBuilder:
                 continue
             wl, hh, pr = self.rng.uniform(0.45, 0.8), self.rng.uniform(0.2, 0.3), self.rng.uniform(0.025, 0.05)
             self._wedge(a - wl / 2 / Ro, a + wl / 2 / Ro, Ro - 0.02, Ro + pr, z, z + hh)
+
+    def _cap(self):
+        """Flat stone cap across the wall top (rooms: no battlements)."""
+        Ro, Ri = self.R, self.R - self.wall
+        n = max(24, round(TOWER_TAU * Ro / 0.6))
+        z = self.Hs
+        for k in range(n):
+            a0, a1 = TOWER_TAU * k / n, TOWER_TAU * (k + 1) / n
+            pts = [_cyl_point(a0, Ro, z), _cyl_point(a1, Ro, z), _cyl_point(a1, Ri, z), _cyl_point(a0, Ri, z)]
+            uvs = [(self._u(a, self.Ko), 0.0) for a in (a0, a1, a1, a0)]
+            self.mb.poly('cap', pts, uvs, (0.0, 0.0, 1.0), 1)
 
     def _ground(self):
         Ri = self.R - self.wall
@@ -7314,7 +7575,7 @@ class _TowerBuilder:
                 self._wedge(a, b, r0, r1, top - 0.30, top)
             self._slab((k + 1) * self.sh, hole)
 
-    def build(self, name):
+    def geometry(self, ground=True):
         self._shell(True)
         self._shell(False)
         self._reveals()
@@ -7322,10 +7583,17 @@ class _TowerBuilder:
             self._frames()
         self._rings()
         self._battlements()
-        self._stones(self.DETAIL_STONES.get(self.detail, 70))
-        self._ground()
+        if self.cap_top:
+            self._cap()
+        self._stones(self.stones if self.stones is not None else self.DETAIL_STONES.get(self.detail, 70))
+        if ground:
+            self._ground()
         if self.interior:
             self._stairs()
+        return self.mb
+
+    def build(self, name):
+        self.geometry()
         return self.mb.to_mesh(name)
 
 
@@ -7805,6 +8073,8 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
         radius_row.enabled = scene.wfc_wall_corner_rounding
         radius_row.prop(scene, "wfc_wall_corner_radius", text="Radius")
         col.separator()
+        col.prop(scene, "wfc_round_wall_style", text="Round Rooms")
+        col.separator()
         col.prop(scene, "wfc_window_chance", text="Window Chance")
         win_col = col.column(align=True)
         win_col.enabled = scene.wfc_window_chance > 0.0
@@ -8251,6 +8521,19 @@ def register():
         name="Window Height", default=1.0, min=0.3, max=5.0, unit='LENGTH',
         description="Height of the opening (clamped so a lintel always remains under the wall top)"
     )
+    bpy.types.Scene.wfc_round_wall_style = EnumProperty(
+        name="Round Room Walls",
+        items=[
+            ('MASONRY', "Masonry", "Brick-textured smooth ring on the room's rim with real arched/"
+                                   "pointed/flat openings exactly where corridors meet it, stone frames "
+                                   "and scattered stones (the Round Tower method). Uses Door Style and "
+                                   "Door Height; Round rooms then get no separate RoundDoors object"),
+            ('CLASSIC', "Classic", "Plain-box n-gon ring (Room Shape Sides) with whole polygon "
+                                   "edges left open, plus separate oriented door frames"),
+        ],
+        default='MASONRY',
+        description="How the walls of Round rooms are built"
+    )
     bpy.types.Scene.wfc_organic_amount = FloatProperty(
         name="Organic Irregularity", default=0.0, min=0.0, max=0.3, unit='LENGTH',
         description="Jitters wall height/thickness, stair tread width, and ramp edges for a "
@@ -8545,6 +8828,7 @@ def unregister():
     del bpy.types.Scene.wfc_window_width
     del bpy.types.Scene.wfc_window_sill
     del bpy.types.Scene.wfc_window_height
+    del bpy.types.Scene.wfc_round_wall_style
     del bpy.types.Scene.wfc_organic_amount
     del bpy.types.Scene.wfc_uv_tile_size
     del bpy.types.Scene.wfc_stair_mesh_style

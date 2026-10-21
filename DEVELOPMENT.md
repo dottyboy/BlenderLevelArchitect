@@ -4,7 +4,7 @@ Internal dev-facing doc: what's built, what's known-broken, what's next. Not for
 (see `dist/README.md` for that). Source of truth for the addon's actual behavior is always
 `levelArchitect_v2.py` — this file can drift out of date; the code can't.
 
-Current version: **0.28.0** (see `bl_info` in the source file).
+Current version: **0.29.0** (see `bl_info` in the source file).
 
 §2 (Development tree) was condensed 2026-08-21 — dropped the blow-by-blow investigation
 narrative and per-run stress-test numbers from older, fully-resolved entries, kept every
@@ -752,6 +752,25 @@ GN complexity there specifically.
       render (not one of the regular `generate_test_blends.py` scenarios, whose top-down framing is
       too zoomed-out to show doorway-level detail) confirmed the frame visibly follows the wall's
       curve right at the opening, not standing at a mismatched straight angle against it.
+
+- [x] **Round rooms as masonry (0.29.0).** `_build_round_room_masonry_mesh` reuses `_TowerBuilder` per Round room:
+      a circle of radius max(rx, ry) is built, rotated by a seam angle (middle of the widest solid stretch,
+      so no opening straddles the shell's 0/2pi sweep) and stretched by (rx/R, ry/R); both maps have a positive
+      determinant so `_TowerMesh.poly`'s outward orientation survives. Openings come from
+      `_round_room_opening_ranges`: 1440 ring samples tested against the cell grid (CENTERED convention, cell i
+      spans i-0.5..i+0.5 tiles -- NOT the corner convention the older ring code's dead-corner pass used) -- a sample
+      is marked when it lies in a non-room walkable cell, or inside one of the room's own cells in the half facing
+      a non-room walkable neighbour (this second rule catches a corridor that only touches the rim tangentially:
+      the first version missed it and the ray test found 19/3012 sealed passages). Runs are widened to >= 1.4 m and
+      merged when closer than 1 m so frames never overlap. Placement falls back arch/pointed/flat -> flat ->
+      'gap' (full height, no frame) -> leave the room's wall out; a corridor is never sealed. Outer skin is ON the
+      rim and the wall grows inward. UV columns come from the Ramanujan perimeter. In Masonry mode the Doors step
+      skips RoundDoors and the Walls step skips the Bevel modifier for ring objects (custom property
+      `gla_masonry_ring`). Tests: ray cast along every adjacent walkable pair at 0.3 m and 1.2 m heights, five seeds,
+      three door styles, wall heights 0.61 and 3.0, plus BVH overlap against stairs. Legacy Round-room tests now
+      pin `wfc_round_wall_style = 'CLASSIC'`. Known open issue (pre-existing, Classic has it too): stair runs
+      clip rings at 3 m wall height. Open: reuse for non-round rooms, ruins, torch brackets on the ring,
+      props against curved walls (decoration still assumes straight tile walls).
 
 - [x] **Round Tower interior (0.28.0).** `_TowerBuilder._slab/_stairs`. Storey height = shell height / int(shell
       height / 3), so the top slab is the roof platform. One full turn of stairs per storey, a wedge block per

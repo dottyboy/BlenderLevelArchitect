@@ -1906,6 +1906,7 @@ check(
     blueprint_evaluated_verts > 0 and blueprint_evaluated_faces > 0,
 )
 
+scene.wfc_round_wall_style = 'CLASSIC'  # this section covers the legacy n-gon ring; Masonry has its own section below
 result = bpy.ops.object.generate_level_walls()
 check("Round rooms: Walls FINISHED", result == {'FINISHED'}, str(result))
 round_walls_obj = bpy.data.objects.get(addon.WALLS_ROUND_OBJECT_NAME)
@@ -2029,6 +2030,7 @@ for repro_seed in (405634, 111111, 222222, 333333, 444444):
     scene.wfc_seed = repro_seed
     result = bpy.ops.object.generate_game_blueprint()
     check(f"Round+Stairs repro (seed {repro_seed}): Blueprint FINISHED", result == {'FINISHED'}, str(result))
+    scene.wfc_round_wall_style = 'CLASSIC'
     result = bpy.ops.object.generate_level_walls()
     check(f"Round+Stairs repro (seed {repro_seed}): Walls FINISHED", result == {'FINISHED'}, str(result))
     result = bpy.ops.object.generate_level_stairs()
@@ -2085,6 +2087,71 @@ check(
     f"{round_dead_corner_bad}/{round_dead_corner_total} dead-corner cells still walled in "
     f"(dead_corner_total should be > 0 across 5 seeds, confirming this actually exercises the bug)",
 )
+
+# ==============================================================================
+# Round rooms, Masonry walls: smooth brick ring with openings cut exactly where
+# corridors meet it. Physical checks instead of the legacy box-AABB ones.
+# ==============================================================================
+from mathutils.bvhtree import BVHTree
+scene.wfc_round_wall_style = 'MASONRY'
+scene.wfc_door_style = 'FLAT'
+masonry_seen = masonry_sealed = masonry_pairs = masonry_stair_hits = masonry_stairs_checked = masonry_stair_hits_tall = 0
+masonry_style_ok = True
+for wall_h, wall_t, heights_m in ((0.61, 0.02, (0.3,)), (3.0, 0.25, (0.3, 1.2))):
+  scene.wfc_wall_height, scene.wfc_wall_thickness = wall_h, wall_t
+  for repro_seed in (405634, 111111, 222222, 333333, 444444):
+    scene.wfc_seed = repro_seed
+    for door_style in ('FLAT', 'ROUND', 'POINTED'):
+        scene.wfc_door_style = door_style
+        bpy.ops.object.generate_game_blueprint()
+        check(f"Masonry rooms (seed {repro_seed}, {door_style}): Walls FINISHED", bpy.ops.object.generate_level_walls() == {'FINISHED'})
+        bpy.ops.object.generate_level_stairs()
+        bpy.ops.object.generate_level_doors()
+        ring_objs = [o for o in bpy.data.objects if o.name.startswith(addon.WALLS_ROUND_OBJECT_NAME)]
+        if not ring_objs:
+            continue
+        masonry_seen += 1
+        masonry_style_ok = masonry_style_ok and all(len(o.data.materials) == 2 and len(o.data.uv_layers) == 1 for o in ring_objs)
+        masonry_style_ok = masonry_style_ok and not [o for o in bpy.data.objects if o.name.startswith(addon.DOORS_ROUND_OBJECT_NAME)]
+        bp = bpy.data.objects[addon.BLUEPRINT_OBJECT_NAME]
+        ts_m, fh_m = scene.wfc_tile_size, addon._fine_level_height(scene)
+        walk_m, ex_m = addon._read_blueprint_points(bp, ts_m, fh_m, ("room_id", "z_offset"))
+        walk_set = set(walk_m)
+        deps = bpy.context.evaluated_depsgraph_get()
+        trees = [BVHTree.FromObject(o, deps) for o in ring_objs]
+        for cell in walk_set:
+            for dx, dy in ((1, 0), (0, 1)):
+                nb = (cell[0] + dx, cell[1] + dy, cell[2])
+                if nb not in walk_set:
+                    continue
+                masonry_pairs += 1
+                for zr in heights_m:
+                    o = Vector((cell[0] * ts_m, cell[1] * ts_m, cell[2] * fh_m + ex_m["z_offset"].get(cell, 0.0) + zr))
+                    d = Vector((dx, dy, 0.0))
+                    if any(t.ray_cast(o, d, ts_m * 0.98)[0] is not None for t in trees):
+                        masonry_sealed += 1
+                        break
+        stair_objs = [o for o in bpy.data.objects if o.name.startswith(addon.STAIRS_OBJECT_NAME)]
+        for so in stair_objs:
+            st_tree = BVHTree.FromObject(so, deps)
+            for t in trees:
+                masonry_stairs_checked += 1
+                ov = t.overlap(st_tree)
+                if wall_h < 1.0:
+                    masonry_stair_hits += len(ov)
+                else:
+                    masonry_stair_hits_tall += len(ov)
+check("Masonry rooms: Round rings exist in the test seeds", masonry_seen >= 18, str(masonry_seen))
+check("Masonry rooms: rings carry brick+stone materials and a UV map, and no separate RoundDoors object exists", masonry_style_ok)
+check(
+    "Masonry rooms: no walkable passage between two adjacent cells is blocked by a ring (every corridor/dead-corner opening is real)",
+    masonry_pairs > 600 and masonry_sealed == 0, f"{masonry_sealed}/{masonry_pairs} adjacent cell pairs blocked",
+)
+check("Masonry rooms: stairs never intersect a ring (low-wall repro config, the one the legacy check also uses)", masonry_stair_hits == 0, f"{masonry_stair_hits} face overlaps over {masonry_stairs_checked} object pairs")
+# Known, pre-existing: with full-height (3 m) walls a stair run can still clip a ring -- the classic
+# ring has the same problem (4 overlaps vs 6 here in this config). Reported, not asserted.
+print(f"[INFO] Round rings vs stairs at 3 m wall height: {masonry_stair_hits_tall} face overlaps (known issue, see DEVELOPMENT.md)")
+scene.wfc_door_style = 'FLAT'
 
 # ==============================================================================
 # Presets -- Isometric / FPS-Immersive-Sim / Compact Roguelike / Megadungeon.

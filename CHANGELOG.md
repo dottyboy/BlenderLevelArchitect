@@ -3,6 +3,25 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.29.0
+
+- **Round rooms get masonry walls** (Walls tab, "Round Rooms": Masonry (default) / Classic). Masonry
+  uses the Round Tower method on every Round room: a smooth brick-textured ring sitting on the room's
+  rim ellipse (the wall grows inward, so it stays inside the room's reserved rectangle), dressed-stone
+  frames, scattered proud stones, an optional flat stone cap (Cap Top), and real openings cut exactly
+  where a corridor or neighbouring room meets the ring -- as wide as the passage (at least 1.4 m)
+  instead of a whole 30-degree polygon edge. Openings follow Door Style (Flat / Round arch / Pointed
+  arch) and Door Height; walls too low for a door get a plain full-height gap. Elliptical rooms
+  (width != length) are handled by building a circle and stretching it. Round rooms no longer get a
+  separate RoundDoors object in Masonry mode (the frames are part of the ring). Classic keeps the old
+  n-gon ring and oriented door frames unchanged.
+- Tower: pointed arches and a "gap" opening kind were added to the shared builder.
+- Verified by ray casts: across 5 seeds x 3 door styles x 2 wall heights (>1000 adjacent walkable cell
+  pairs), no passage between walkable cells is blocked by a masonry ring; stairs never intersect a ring
+  with low walls.
+- Known: with full-height (3 m) walls, a stair run can still clip a Round room's ring. The Classic ring
+  does it too (the older tests only ran with 0.61 m walls); not fixed here.
+
 ## 0.28.0
 
 - **Round Tower interiors.** New "Floors + Spiral Stairs" option (on by default) and "Stair Width".
