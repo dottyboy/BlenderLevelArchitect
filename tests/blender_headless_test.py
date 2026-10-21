@@ -2137,20 +2137,14 @@ for wall_h, wall_t, heights_m in ((0.61, 0.02, (0.3,)), (3.0, 0.25, (0.3, 1.2)))
             for t in trees:
                 masonry_stairs_checked += 1
                 ov = t.overlap(st_tree)
-                if wall_h < 1.0:
-                    masonry_stair_hits += len(ov)
-                else:
-                    masonry_stair_hits_tall += len(ov)
+                masonry_stair_hits += len(ov)
 check("Masonry rooms: Round rings exist in the test seeds", masonry_seen >= 18, str(masonry_seen))
 check("Masonry rooms: rings carry brick+stone materials and a UV map, and no separate RoundDoors object exists", masonry_style_ok)
 check(
     "Masonry rooms: no walkable passage between two adjacent cells is blocked by a ring (every corridor/dead-corner opening is real)",
     masonry_pairs > 600 and masonry_sealed == 0, f"{masonry_sealed}/{masonry_pairs} adjacent cell pairs blocked",
 )
-check("Masonry rooms: stairs never intersect a ring (low-wall repro config, the one the legacy check also uses)", masonry_stair_hits == 0, f"{masonry_stair_hits} face overlaps over {masonry_stairs_checked} object pairs")
-# Known, pre-existing: with full-height (3 m) walls a stair run can still clip a ring -- the classic
-# ring has the same problem (4 overlaps vs 6 here in this config). Reported, not asserted.
-print(f"[INFO] Round rings vs stairs at 3 m wall height: {masonry_stair_hits_tall} face overlaps (known issue, see DEVELOPMENT.md)")
+check("Masonry rooms: stairs never intersect a ring (both the 0.61 m repro config and full 3 m walls)", masonry_stair_hits == 0, f"{masonry_stair_hits} face overlaps over {masonry_stairs_checked} object pairs")
 scene.wfc_door_style = 'FLAT'
 
 # ==============================================================================

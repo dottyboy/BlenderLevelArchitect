@@ -3,6 +3,18 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.29.1
+
+- **Fixed: masonry Round-room rings clipped stair runs at full wall height.** The "stair clips the
+  ring" problem showed up once walls were as tall as in a real level (the old tests only used 0.61 m
+  walls). Two causes in the masonry ring: a floor-level doorway got a window-sill stone that sank
+  0.14 m below the floor into the stairs of the level underneath (now only real windows get a sill
+  stone), and the ring, frames and proud stones stood exactly on the room's rim, so anything 6 cm
+  proud poked into the neighbouring cell (the ring now stays 0.1 m inside the rim). The stairs test
+  now runs at both wall heights and asserts zero overlaps.
+- Not fixed: the Classic ring still clips stairs in 1 of 5 test seeds at 3 m wall height (4 face
+  overlaps); Masonry is the default.
+
 ## 0.29.0
 
 - **Round rooms get masonry walls** (Walls tab, "Round Rooms": Masonry (default) / Classic). Masonry

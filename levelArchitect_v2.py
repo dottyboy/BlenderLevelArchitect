@@ -32,7 +32,7 @@ from bpy_extras.io_utils import ExportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 29, 0),
+    "version": (0, 29, 1),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -4062,6 +4062,9 @@ def _room_shape_sides_wall_positions(cx, cy, rx, ry, sides):
     ]
 
 
+ROUND_RING_INSET = 0.1  # metres the masonry ring (incl. its proud stones/frames) stays inside the room's rim
+
+
 def _round_room_opening_ranges(room, room_id, room_id_grid, walkable, tile_size, min_width_m=1.4):
     """Parameter-angle ranges [(t0, t1), ...] (t1 > t0, possibly beyond 2*pi
     after merging) where a Round room's rim ellipse passes through a walkable
@@ -4076,7 +4079,7 @@ def _round_room_opening_ranges(room, room_id, room_id_grid, walkable, tile_size,
     merged, so openings never overlap."""
     x, y, rw, rl, z = room['x'], room['y'], room['w'], room['l'], room['z']
     cx, cy = (x + (rw - 1) / 2.0) * tile_size, (y + (rl - 1) / 2.0) * tile_size
-    rx, ry = (rw / 2.0) * tile_size, (rl / 2.0) * tile_size
+    rx, ry = (rw / 2.0) * tile_size - ROUND_RING_INSET, (rl / 2.0) * tile_size - ROUND_RING_INSET
     n = 1440
     pad = 0.05
     marked = [False] * n
@@ -4150,8 +4153,9 @@ def _build_round_room_masonry_mesh(
     _round_room_opening_ranges), dressed-stone frames, scattered proud
     stones, and an optional flat stone cap. The shell is built as a circle
     and stretched to the room's ellipse (a positive-determinant map, so
-    face orientation survives); the outer skin sits ON the rim and the
-    wall grows inward, so it stays inside the room's reserved rectangle.
+    face orientation survives); the outer skin sits ROUND_RING_INSET inside
+    the rim and the wall grows inward, so the ring and everything proud of
+    it stays inside the room's reserved rectangle.
     Material slots: 0 = brick, 1 = dressed stone."""
     walkable = set(walkable_cells)
     big = _TowerMesh()
@@ -4167,7 +4171,10 @@ def _build_round_room_masonry_mesh(
         cyc = sum(c[1] for c in cells_here) / len(cells_here)
         nearest = min(cells_here, key=lambda c: (c[0] - cxc) ** 2 + (c[1] - cyc) ** 2)
         cx, cy = (x + (rw - 1) / 2.0) * tile_size, (y + (rl - 1) / 2.0) * tile_size
-        rx, ry = (rw / 2.0) * tile_size, (rl / 2.0) * tile_size
+        # Inset: the proud stones and frames stand ~0.06 m outside the shell, and a ring exactly ON
+        # the rim would push them into the neighbouring cell (a stair run or corridor wall right
+        # outside the room's reserved rectangle). Keeping the whole ring inside it removes that.
+        rx, ry = (rw / 2.0) * tile_size - ROUND_RING_INSET, (rl / 2.0) * tile_size - ROUND_RING_INSET
         R = max(rx, ry)
         wall_c = min(wall_thickness, R * 0.4)
         if R - wall_c < 0.5:
@@ -7450,7 +7457,8 @@ class _TowerBuilder:
                                  (ac + xa / Ro, za, r1), (ac + xb / Ro, zb, r1), (ac + xb2 / Ro, zb2, r1), (ac + xa2 / Ro, za2, r1)])
             else:
                 blk(-w / 2 - fw, w / 2 + fw, o['spring'], o['spring'] + 0.3)
-            blk(-w / 2 - fw - 0.05, w / 2 + fw + 0.05, o['sill'] - 0.14, o['sill'], Ro + proud + 0.08)
+            if o['sill'] > 0.2:  # a window sill stone; a floor-level doorway has no sill (it would sink below the floor)
+                blk(-w / 2 - fw - 0.05, w / 2 + fw + 0.05, o['sill'] - 0.14, o['sill'], Ro + proud + 0.08)
 
     def _rings(self):
         Ro = self.R

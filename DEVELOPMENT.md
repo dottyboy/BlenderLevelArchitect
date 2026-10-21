@@ -4,7 +4,7 @@ Internal dev-facing doc: what's built, what's known-broken, what's next. Not for
 (see `dist/README.md` for that). Source of truth for the addon's actual behavior is always
 `levelArchitect_v2.py` — this file can drift out of date; the code can't.
 
-Current version: **0.29.0** (see `bl_info` in the source file).
+Current version: **0.29.1** (see `bl_info` in the source file).
 
 §2 (Development tree) was condensed 2026-08-21 — dropped the blow-by-blow investigation
 narrative and per-run stress-test numbers from older, fully-resolved entries, kept every
@@ -768,8 +768,8 @@ GN complexity there specifically.
       skips RoundDoors and the Walls step skips the Bevel modifier for ring objects (custom property
       `gla_masonry_ring`). Tests: ray cast along every adjacent walkable pair at 0.3 m and 1.2 m heights, five seeds,
       three door styles, wall heights 0.61 and 3.0, plus BVH overlap against stairs. Legacy Round-room tests now
-      pin `wfc_round_wall_style = 'CLASSIC'`. Known open issue (pre-existing, Classic has it too): stair runs
-      clip rings at 3 m wall height. Open: reuse for non-round rooms, ruins, torch brackets on the ring,
+      pin `wfc_round_wall_style = 'CLASSIC'`. Fixed in 0.29.1: the stair clipping at 3 m wall height was a sill stone sinking below a floor-level
+      doorway plus proud stones on the rim; ring now inset by ROUND_RING_INSET. Classic still clips in 1/5 seeds. Open: reuse for non-round rooms, ruins, torch brackets on the ring,
       props against curved walls (decoration still assumes straight tile walls).
 
 - [x] **Round Tower interior (0.28.0).** `_TowerBuilder._slab/_stairs`. Storey height = shell height / int(shell
