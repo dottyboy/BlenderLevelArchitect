@@ -102,7 +102,7 @@ be pressed afterward, same as any other setting. The steps build on each other's
 7. **Castle** (Castle tab) — a walled castle at the 3D cursor: four corner towers with interiors, curtain
    walls with battlements and arrow slits, an arched gate, a keep and a courtyard; the Ruin slider breaks
    everything down.
-8. **Export** — one-click glTF/GLB export of everything generated (Binary .glb or plain .gltf,
+8. **Export** — one-click glTF/GLB export (plus **Export Game Package**: glb + a JSON with walkable rectangles, entrance/exit, rooms, stairs and lights for an engine loader) of everything generated (Binary .glb or plain .gltf,
    optionally including the real torch lights), plus a separate **Export Collision Mesh** button
    that exports just Floor + Walls + Stairs — no Doors, Torches, Decoration, or Lights — suitable
    to assign directly as a level's collision geometry in a game engine.

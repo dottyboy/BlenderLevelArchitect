@@ -3,6 +3,22 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.33.0
+
+- **New: Export Game Package (glb + json)** (Export tab). Besides the glTF it writes a JSON file
+  ("gla-export/1") next to it describing what a game engine has to know: per floor the walkable tiles merged
+  into a few rectangles (an exact cover), the entrance and exit, stairs, every room (shape and rectangle),
+  and the torch lights (position, colour, watts, radius). Everything is in engine coordinates (x right, y up,
+  z = -Blender y). The glb always comes out as one self-contained binary with textures embedded.
+- First consumer: the Vampire Adventure project loads such a package as a playable location (see its
+  README, "Generated dungeons"): rectangle-based walking, route finding over the tiles, wall cut-away
+  between camera and player, torches as real lights, Architect's flat room colours restyled to that game's
+  stone/wood/cobble, brick rings keep their own textures.
+- Tests: the rectangle merge on 40 random tile sets, coverage = exactly the walkable tiles, entrance/exit
+  inside a rectangle, light list and axis conversion, the export operator writing both files.
+- Known: a package describes all floors but a consumer is expected to use one; export single-floor
+  levels (Height = 1) for such loaders. Tower and Castle are not packaged yet.
+
 ## 0.32.0
 
 - **Fixed: torches floated in open air.** The wall-adjacency test for torch placement compared a 2D

@@ -4,7 +4,7 @@ Internal dev-facing doc: what's built, what's known-broken, what's next. Not for
 (see `dist/README.md` for that). Source of truth for the addon's actual behavior is always
 `levelArchitect_v2.py` — this file can drift out of date; the code can't.
 
-Current version: **0.32.0** (see `bl_info` in the source file).
+Current version: **0.33.0** (see `bl_info` in the source file).
 
 §2 (Development tree) was condensed 2026-08-21 — dropped the blow-by-blow investigation
 narrative and per-run stress-test numbers from older, fully-resolved entries, kept every
@@ -752,6 +752,23 @@ GN complexity there specifically.
       render (not one of the regular `generate_test_blends.py` scenarios, whose top-down framing is
       too zoomed-out to show doorway-level detail) confirmed the frame visibly follows the wall's
       curve right at the opening, not standing at a mismatched straight angle against it.
+
+- [x] **Game package export + Vampire loader (0.33.0).** `_merge_cells_to_rects` (rows of runs, equal runs on
+      consecutive rows stacked; exact), `_build_game_package` (pure data; engine axes via `_to_engine`),
+      `OBJECT_OT_ExportGamePackage` (forces a self-contained .glb, restores the user's Binary setting).
+      Vampire side, in the other project: `scripts/dungeon.gd`, `Location.build_dungeon` on top of the region
+      machinery, `shaders/cutaway.gdshader`, `pipeline/import_dungeon.py`, `--dungeontest`. Lessons: (a) the
+      region pathfinder routes through the CENTRE of rectangle overlaps, which for adjacent corridor/room
+      rectangles lies on a wall edge and the clamp then traps the player in a corner (1 of 6 goals failed);
+      the dungeon routes A* over tile centres (8 directions, no corner cutting) with string pulling instead,
+      accepting a straight leg only when five points 0.4 m around every sample are walkable. (b) A camera
+      that looks in from one side needs walls above head height removed between camera and player: done in a
+      shader (discard in a box around the player on the camera side), not by hiding objects. (c) Architect's
+      debug-colour swatches are mapped to the game's own materials by the material NAMES the exporter keeps
+      (LA_Floor_*, LA_Simple_Wall, LA_Door...). Verified: `--dungeontest` walks entrance->exit and to every room
+      centre on 4 different seeds (round rooms included), screenshots checked.
+      Open: castle/tower packages, multi-floor use (stairs between rooms), doors that open, props as Vampire
+      assets, story hooks (exits to other locations), saving/loading inside a dungeon seed.
 
 - [x] **Polish pass (0.32.0).** (1) Torch bug: `wall_adjacent` tested `(x+dx, y+dy)` against a set of `(x, y, z)` cells, so
       every direction passed; fixed with the z component. (2) `_round_ring_inner_ellipse`,

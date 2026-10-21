@@ -2593,6 +2593,74 @@ except RuntimeError as exc:
 check("Castle: towers too big for the courtyard are refused", refused)
 scene.wfc_castle_tower_radius, scene.wfc_castle_width, scene.wfc_castle_ruin = 3.2, 26.0, 0.0
 
+# Game package: glb + JSON description with walk rectangles, entrance/exit, rooms, lights.
+import random as _rnd
+_r = _rnd.Random(5)
+rect_ok = True
+for _trial in range(40):
+    cells = {(_r.randrange(12), _r.randrange(12)) for _ in range(_r.randrange(1, 90))}
+    rects = addon._merge_cells_to_rects(cells)
+    covered = set()
+    for x0, y0, x1, y1 in rects:
+        for xx in range(x0, x1 + 1):
+            for yy in range(y0, y1 + 1):
+                if (xx, yy) in covered:
+                    rect_ok = False
+                covered.add((xx, yy))
+    rect_ok = rect_ok and covered == cells
+check("Game package: _merge_cells_to_rects is an exact, non-overlapping cover (40 random sets)", rect_ok)
+
+scene.wfc_width, scene.wfc_length, scene.wfc_height = 14, 14, 1
+scene.wfc_rooms_min, scene.wfc_rooms_max = 4, 6
+scene.wfc_room_size_min, scene.wfc_room_size_max = 3, 5
+scene.wfc_room_shape = 'MIXED'
+scene.wfc_sub_levels_per_floor = 1
+scene.wfc_level_height = 4.0
+scene.wfc_wall_height, scene.wfc_wall_thickness = 3.0, 0.25
+scene.wfc_torch_chance, scene.wfc_prop_chance = 0.5, 0.2
+scene.wfc_seed = 77
+scene.wfc_random_seed = False
+bpy.ops.object.generate_game_blueprint()
+bpy.ops.object.generate_level_walls()
+bpy.ops.object.generate_level_doors()
+bpy.ops.object.generate_level_props()
+bp_pkg = bpy.data.objects[addon.BLUEPRINT_OBJECT_NAME]
+pkg = addon._build_game_package(scene, bp_pkg, "level.glb")
+ts_p = scene.wfc_tile_size
+walk_p, _ex_p = addon._read_blueprint_points(bp_pkg, ts_p, addon._fine_level_height(scene), ("room_id",))
+check("Game package: format tag and one floor", pkg["format"] == "gla-export/1" and len(pkg["floors"]) == 1, str(pkg["format"]))
+fl = pkg["floors"][0]
+area = sum((r[2] - r[0]) * (r[3] - r[1]) for r in fl["walk_rects"])
+check("Game package: walk rectangles cover exactly the walkable cells", abs(area - len(walk_p) * ts_p * ts_p) < 1e-3, f"{area} vs {len(walk_p) * ts_p * ts_p}")
+bad_rect = 0
+for r in fl["walk_rects"]:
+    for gx in range(int(round(r[0] / ts_p + 0.5)), int(round(r[2] / ts_p - 0.5)) + 1):
+        for gy_engine in range(int(round(r[1] / ts_p + 0.5)), int(round(r[3] / ts_p - 0.5)) + 1):
+            if (gx, -gy_engine, 0) not in walk_p:
+                bad_rect += 1
+check("Game package: every cell inside every rectangle is walkable (engine z = -blender y)", bad_rect == 0, str(bad_rect))
+check("Game package: entrance and exit are reported, inside a rectangle",
+      pkg["entrance"] is not None and pkg["exit"] is not None and all(
+          any(r[0] <= m["pos"][0] <= r[2] and r[1] <= m["pos"][2] <= r[3] for r in fl["walk_rects"])
+          for m in (pkg["entrance"], pkg["exit"])), str((pkg["entrance"], pkg["exit"])))
+n_lights = len([o for o in bpy.data.objects if o.name.startswith(addon.PROPS_LIGHT_NAME_PREFIX) and o.type == 'LIGHT'])
+check("Game package: every generated light is listed", len(pkg["lights"]) == n_lights and n_lights > 0, f"{len(pkg['lights'])} vs {n_lights}")
+if pkg["lights"]:
+    L0 = [o for o in bpy.data.objects if o.name.startswith(addon.PROPS_LIGHT_NAME_PREFIX) and o.type == 'LIGHT']
+    ref = L0[0].matrix_world.translation
+    check("Game package: light positions use engine axes (x, z-up -> y, -y -> z)",
+          any(abs(l["pos"][0] - ref.x) < 1e-3 and abs(l["pos"][1] - ref.z) < 1e-3 and abs(l["pos"][2] + ref.y) < 1e-3 for l in pkg["lights"]))
+check("Game package: rooms are listed with engine-space rectangles", len(pkg["rooms"]) >= 3 and all(r["rect"][2] > r["rect"][0] and r["rect"][3] > r["rect"][1] for r in pkg["rooms"]))
+with tempfile.TemporaryDirectory() as tmp_p:
+    out_p = os.path.join(tmp_p, "dungeon_test.glb")
+    result = bpy.ops.object.export_game_package(filepath=out_p)
+    check("Game package: export operator FINISHED", result == {'FINISHED'}, str(result))
+    check("Game package: glb written", os.path.exists(out_p) and os.path.getsize(out_p) > 10_000)
+    check("Game package: json written next to it", os.path.exists(os.path.join(tmp_p, "dungeon_test.json")))
+    with open(os.path.join(tmp_p, "dungeon_test.json")) as fh_p:
+        loaded_p = json.load(fh_p)
+    check("Game package: json round-trips and references the glb by name", loaded_p["glb"] == "dungeon_test.glb" and loaded_p["floors"][0]["walk_rects"] == fl["walk_rects"])
+
 # glTF round trip embeds the packed textures.
 with tempfile.TemporaryDirectory() as tmp:
     path = os.path.join(tmp, "tower.glb")

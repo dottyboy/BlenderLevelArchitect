@@ -32,7 +32,7 @@ from bpy_extras.io_utils import ExportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 32, 0),
+    "version": (0, 33, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -8433,6 +8433,174 @@ class OBJECT_OT_GenerateLevelCastle(bpy.types.Operator):
         return {'FINISHED'}
 
 
+# ==============================================================================
+# 8. GAME PACKAGE EXPORT (glb + JSON description)
+# ==============================================================================
+# glTF carries the visuals; an engine also needs to know where a character may
+# walk, where the entrance and exit are, which rooms exist and where the
+# lights hang. The JSON ("gla-export/1") describes exactly that, in the
+# engine's own coordinates: x right, y up, z = -Blender y (what the glTF
+# importer produces). Walkable cells are merged into a few rectangles so an
+# engine with rectangle-based navigation (Vampire Adventure) can use them
+# as they are; engines with a navmesh can ignore them and bake from the
+# collision export.
+GAME_PACKAGE_FORMAT = "gla-export/1"
+
+
+def _merge_cells_to_rects(cells):
+    """Greedy rectangle cover of a set of (x, y) grid cells: horizontal runs per
+    row, then equal runs on consecutive rows are stacked. Returns [(x0, y0, x1, y1)]
+    in INCLUSIVE cell units. Exact (no cell is lost or double counted)."""
+    rows = {}
+    for x, y in cells:
+        rows.setdefault(y, []).append(x)
+    runs = {}
+    for y, xs in rows.items():
+        xs.sort()
+        start = prev = xs[0]
+        out = []
+        for x in xs[1:]:
+            if x == prev + 1:
+                prev = x
+            else:
+                out.append((start, prev))
+                start = prev = x
+        out.append((start, prev))
+        runs[y] = out
+    rects, active = [], {}
+    for y in sorted(runs):
+        row = set(runs[y])
+        for key in list(active):
+            y_start, y_end = active[key]
+            if key in row and y_end == y - 1:
+                active[key][1] = y
+                row.discard(key)
+            else:
+                rects.append((key[0], y_start, key[1], y_end))
+                del active[key]
+        for key in row:
+            active[key] = [y, y]
+    for key, (y_start, y_end) in active.items():
+        rects.append((key[0], y_start, key[1], y_end))
+    return sorted(rects, key=lambda r: (r[1], r[0]))
+
+
+def _to_engine(x, y, z):
+    """Blender world (x, y, z-up) -> engine/glTF (x, y-up, z)."""
+    return [round(x, 4), round(z, 4), round(-y, 4)]
+
+
+def _build_game_package(scene, blueprint_obj, glb_name=""):
+    """The JSON description of the generated level (see the section comment).
+    Pure data: reads the blueprint's attributes and the generated light objects."""
+    ts = scene.wfc_tile_size
+    fine_h = _fine_level_height(scene)
+    walkable, extra = _read_blueprint_points(
+        blueprint_obj, ts, fine_h, ("tile_id", "tile_rotation", "room_id", "z_offset"))
+    tile_ids = extra.get("tile_id", {})
+    rotations = extra.get("tile_rotation", {})
+    room_ids = extra.get("room_id", {})
+    by_z = {}
+    for cell in walkable:
+        by_z.setdefault(cell[2], set()).add((cell[0], cell[1]))
+    floors = []
+    for z in sorted(by_z):
+        rects = []
+        for x0, y0, x1, y1 in _merge_cells_to_rects(by_z[z]):
+            ex0, ex1 = (x0 - 0.5) * ts, (x1 + 0.5) * ts
+            ey0, ey1 = (y0 - 0.5) * ts, (y1 + 0.5) * ts
+            rects.append([round(ex0, 4), round(-ey1, 4), round(ex1, 4), round(-ey0, 4)])  # [x0, z0, x1, z1]
+        floors.append({"z": z, "y": round(z * fine_h, 4), "cells": len(by_z[z]), "walk_rects": rects})
+
+    def marker(tile):
+        found = [c for c in sorted(walkable) if tile_ids.get(c) == tile]
+        if not found:
+            return None
+        c = found[0]
+        y = c[2] * fine_h + extra.get("z_offset", {}).get(c, 0.0)
+        return {"floor": c[2], "cell": [c[0], c[1]], "pos": _to_engine(c[0] * ts, c[1] * ts, y)}
+
+    stairs = []
+    for c in sorted(walkable):
+        if tile_ids.get(c) == TILE_STAIR:
+            dx, dy = _direction_for_rotation(rotations.get(c, 0.0))
+            y = c[2] * fine_h + extra.get("z_offset", {}).get(c, 0.0)
+            stairs.append({"floor": c[2], "cell": [c[0], c[1]], "pos": _to_engine(c[0] * ts, c[1] * ts, y),
+                           "dir": [dx, -dy]})
+    rooms = []
+    for i, r in enumerate(json.loads(blueprint_obj.get("gla_room_meta", "[]"))):
+        ex0, ex1 = (r['x'] - 0.5) * ts, (r['x'] + r['w'] - 0.5) * ts
+        ey0, ey1 = (r['y'] - 0.5) * ts, (r['y'] + r['l'] - 0.5) * ts
+        rooms.append({"id": i, "shape": r['shape'], "floor": r['z'],
+                      "rect": [round(ex0, 4), round(-ey1, 4), round(ex1, 4), round(-ey0, 4)],
+                      "center": [round((ex0 + ex1) / 2, 4), round(-(ey0 + ey1) / 2, 4)]})
+    lights = []
+    for obj in _objects_matching_prefix(PROPS_LIGHT_NAME_PREFIX):
+        if obj.type != 'LIGHT':
+            continue
+        loc = obj.matrix_world.translation
+        lights.append({"pos": _to_engine(loc.x, loc.y, loc.z), "color": [round(c, 4) for c in obj.data.color],
+                       "energy_w": round(obj.data.energy, 3), "radius": round(obj.data.shadow_soft_size, 3)})
+    return {
+        "format": GAME_PACKAGE_FORMAT,
+        "generator": "Game Level Architect " + ".".join(str(v) for v in bl_info["version"]),
+        "seed": scene.wfc_seed,
+        "glb": glb_name,
+        "tile_size": ts,
+        "level_height": fine_h,
+        "coordinates": "engine: x right, y up, z = -blender_y",
+        "floors": floors,
+        "entrance": marker(TILE_ENTRANCE),
+        "exit": marker(TILE_EXIT),
+        "stairs": stairs,
+        "rooms": rooms,
+        "lights": lights,
+    }
+
+
+class OBJECT_OT_ExportGamePackage(bpy.types.Operator, ExportHelper):
+    """Exports the level as glTF AND a JSON description (walkable rectangles,
+    entrance/exit, rooms, stairs, lights) next to it, so an engine loader does
+    not have to guess where a character may walk."""
+    bl_idname = "object.export_game_package"
+    bl_label = "Export Game Package (glb + json)"
+    bl_description = "Export the level as glTF plus a JSON file describing walkable areas, entrance/exit, rooms and lights"
+    bl_options = {'REGISTER'}
+
+    filename_ext = ".glb"
+    filter_glob: StringProperty(default="*.glb", options={'HIDDEN'})
+
+    def execute(self, context):
+        scene = context.scene
+        blueprint_obj = bpy.data.objects.get(BLUEPRINT_OBJECT_NAME)
+        if blueprint_obj is None or blueprint_obj.data.attributes.get("tile_id") is None:
+            self.report({'ERROR'}, "Generate a Game Blueprint first.")
+            return {'CANCELLED'}
+        if not hasattr(bpy.ops.export_scene, "gltf"):
+            self.report({'ERROR'}, "glTF exporter isn't available -- enable Import-Export: glTF 2.0.")
+            return {'CANCELLED'}
+        base_names = (
+            BLUEPRINT_OBJECT_NAME, ROUND_FLOOR_OBJECT_NAME, WALLS_OBJECT_NAME, WALLS_ROUND_OBJECT_NAME,
+            STAIRS_OBJECT_NAME, DOORS_OBJECT_NAME, DOORS_ROUND_OBJECT_NAME, PROPS_TORCH_OBJECT_NAME,
+            PROPS_DECORATION_OBJECT_NAME, WINDOWS_OBJECT_NAME,
+        )
+        targets = _gltf_export_targets(base_names, False)
+        stem = os.path.splitext(self.filepath)[0]
+        glb_path = stem + ".glb"
+        scene_binary = scene.wfc_export_binary
+        scene.wfc_export_binary = True  # the package always references one self-contained .glb
+        try:
+            _run_gltf_export(context, glb_path, targets, False)
+        finally:
+            scene.wfc_export_binary = scene_binary
+        package = _build_game_package(scene, blueprint_obj, os.path.basename(glb_path))
+        json_path = stem + ".json"
+        with open(json_path, "w", encoding="utf-8") as fh:
+            json.dump(package, fh, indent=1)
+        self.report({'INFO'}, f"Exported '{glb_path}' and '{json_path}' ({sum(len(f['walk_rects']) for f in package['floors'])} walk rectangles).")
+        return {'FINISHED'}
+
+
 def _section(layout, idname, title, icon, default_closed=False):
     """A collapsible section with a native disclosure triangle (Blender's
     UILayout.panel(), added in 4.1) that remembers open/closed state on its
@@ -9004,6 +9172,12 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
         export_row.operator("object.export_level_gltf", text="Export Level (glTF/GLB)", icon='EXPORT')
         export_row.enabled = bpy.data.objects.get(BLUEPRINT_OBJECT_NAME) is not None
 
+        package_row = layout.row(align=True)
+        package_row.scale_y = 1.2
+        _color_swatch(package_row, 'COLLECTION_COLOR_05')
+        package_row.operator("object.export_game_package", text="Export Game Package (glb + json)", icon='PACKAGE')
+        package_row.enabled = bpy.data.objects.get(BLUEPRINT_OBJECT_NAME) is not None
+
         layout.separator()
         layout.label(text="Collision Mesh -- Floor + Walls + Stairs only")
         collision_row = layout.row(align=True)
@@ -9029,6 +9203,7 @@ classes = (
     OBJECT_OT_GenerateLevelProps,
     OBJECT_OT_GenerateLevelTower,
     OBJECT_OT_GenerateLevelCastle,
+    OBJECT_OT_ExportGamePackage,
     OBJECT_OT_ExportLevelGLTF,
     OBJECT_OT_ExportLevelCollisionGLTF,
     OBJECT_OT_CopyLevelArchitectParams,
