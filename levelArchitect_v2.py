@@ -17,6 +17,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 import json
+import re
 import math
 import os
 import random
@@ -32,7 +33,7 @@ from bpy_extras.io_utils import ExportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 36, 0),
+    "version": (0, 37, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -3152,6 +3153,15 @@ class OBJECT_OT_GenerateGameBlueprint(bpy.types.Operator):
             }
             for i, room in enumerate(solver.rooms)
         ])
+
+        # a copy of what the game package needs, kept on the scene because "Separate by Floor/Room" consumes this object
+        _walk_c, _ex_c = _read_blueprint_points(
+            level_obj, scene.wfc_tile_size, _fine_level_height(scene), ("tile_id", "tile_rotation", "room_id", "z_offset"))
+        scene["gla_package_cache"] = json.dumps({
+            "cells": [[c[0], c[1], c[2], _ex_c["tile_id"].get(c, 0), round(_ex_c["tile_rotation"].get(c, 0.0), 4),
+                       _ex_c["room_id"].get(c, -1), round(_ex_c["z_offset"].get(c, 0.0), 4)] for c in sorted(_walk_c)],
+            "rooms": level_obj["gla_room_meta"],
+        })
 
         self.report(
             {'INFO'},
@@ -8492,21 +8502,68 @@ def _to_engine(x, y, z):
     return [round(x, 4), round(z, 4), round(-y, 4)]
 
 
-def _build_game_package(scene, blueprint_obj, glb_name=""):
-    """The JSON description of the generated level (see the section comment).
-    Pure data: reads the blueprint's attributes and the generated light objects."""
+def _package_source(scene, blueprint_obj):
+    """(walkable, extra, room_meta) from the live Blueprint, or from the copy stored at generation time
+    when Separate by Floor/Room has already consumed the Blueprint object."""
     ts = scene.wfc_tile_size
     fine_h = _fine_level_height(scene)
-    walkable, extra = _read_blueprint_points(
-        blueprint_obj, ts, fine_h, ("tile_id", "tile_rotation", "room_id", "z_offset"))
+    if blueprint_obj is not None and blueprint_obj.data.attributes.get("tile_id") is not None:
+        walkable, extra = _read_blueprint_points(
+            blueprint_obj, ts, fine_h, ("tile_id", "tile_rotation", "room_id", "z_offset"))
+        return walkable, extra, json.loads(blueprint_obj.get("gla_room_meta", "[]"))
+    cache = json.loads(scene["gla_package_cache"])
+    walkable = {(c[0], c[1], c[2]) for c in cache["cells"]}
+    extra = {"tile_id": {}, "tile_rotation": {}, "room_id": {}, "z_offset": {}}
+    for x, y, z, tid, rot, rid, zo in cache["cells"]:
+        extra["tile_id"][(x, y, z)] = tid
+        extra["tile_rotation"][(x, y, z)] = rot
+        extra["room_id"][(x, y, z)] = rid
+        extra["z_offset"][(x, y, z)] = zo
+    return walkable, extra, json.loads(cache["rooms"])
+
+
+def _stair_links(walkable, extra, ts, fine_h):
+    """One record per stairwell: the cell it starts on (floor z), where it arrives
+    (the cell the run points at, one floor up), and the way back down (the cell
+    above the stair cell, arriving at the cell behind it)."""
+    tile_ids = extra.get("tile_id", {})
+    rotations = extra.get("tile_rotation", {})
+    links = []
+    for c in sorted(walkable):
+        if tile_ids.get(c) != TILE_STAIR:
+            continue
+        x, y, z = c
+        dx, dy = _direction_for_rotation(rotations.get(c, 0.0))
+        top = (x + dx, y + dy, z + 1)
+        bottom = (x - dx, y - dy, z)
+        if top not in walkable or (x, y, z + 1) not in walkable:
+            continue  # a stair that does not reach a walkable landing is decoration only
+        links.append({"cell": [x, y], "from_z": z, "to_z": z + 1, "dir": [dx, -dy],
+                      "up": {"trigger": _to_engine(x * ts, y * ts, z * fine_h), "arrive": _to_engine(top[0] * ts, top[1] * ts, (z + 1) * fine_h)},
+                      "down": {"trigger": _to_engine(x * ts, y * ts, (z + 1) * fine_h), "arrive": _to_engine(bottom[0] * ts, bottom[1] * ts, z * fine_h)}})
+    return links
+
+
+def _build_game_package(scene, blueprint_obj, glb_name="", floor=None):
+    """The JSON description of the generated level (see the section comment).
+    Pure data: reads the blueprint's attributes and the generated light objects.
+    floor=k makes a package of ONE floor (grid level z == k): positions are
+    relative to that floor's level (the loader shifts the scene down by
+    `floor_y`), stairs become links to the neighbouring floors' packages."""
+    ts = scene.wfc_tile_size
+    fine_h = _fine_level_height(scene)
+    walkable, extra, room_meta = _package_source(scene, blueprint_obj)
     tile_ids = extra.get("tile_id", {})
     rotations = extra.get("tile_rotation", {})
     room_ids = extra.get("room_id", {})
     by_z = {}
     for cell in walkable:
         by_z.setdefault(cell[2], set()).add((cell[0], cell[1]))
+    all_levels = sorted(by_z)
     floors = []
-    for z in sorted(by_z):
+    for z in all_levels:
+        if floor is not None and z != floor:
+            continue
         rects = []
         for x0, y0, x1, y1 in _merge_cells_to_rects(by_z[z]):
             ex0, ex1 = (x0 - 0.5) * ts, (x1 + 0.5) * ts
@@ -8515,12 +8572,12 @@ def _build_game_package(scene, blueprint_obj, glb_name=""):
         floors.append({"z": z, "y": round(z * fine_h, 4), "cells": len(by_z[z]), "walk_rects": rects})
 
     def marker(tile):
-        found = [c for c in sorted(walkable) if tile_ids.get(c) == tile]
+        found = [c for c in sorted(walkable) if tile_ids.get(c) == tile and (floor is None or c[2] == floor)]
         if not found:
             return None
         c = found[0]
         y = c[2] * fine_h + extra.get("z_offset", {}).get(c, 0.0)
-        return {"floor": c[2], "cell": [c[0], c[1]], "pos": _to_engine(c[0] * ts, c[1] * ts, y)}
+        return {"floor": c[2], "cell": [c[0], c[1]], "pos": _to_engine(c[0] * ts, c[1] * ts, y - (floor or 0) * fine_h)}
 
     stairs = []
     for c in sorted(walkable):
@@ -8529,8 +8586,11 @@ def _build_game_package(scene, blueprint_obj, glb_name=""):
             y = c[2] * fine_h + extra.get("z_offset", {}).get(c, 0.0)
             stairs.append({"floor": c[2], "cell": [c[0], c[1]], "pos": _to_engine(c[0] * ts, c[1] * ts, y),
                            "dir": [dx, -dy]})
+    links_all = _stair_links(walkable, extra, ts, fine_h)
     rooms = []
-    for i, r in enumerate(json.loads(blueprint_obj.get("gla_room_meta", "[]"))):
+    for i, r in enumerate(room_meta):
+        if floor is not None and r['z'] != floor:
+            continue
         ex0, ex1 = (r['x'] - 0.5) * ts, (r['x'] + r['w'] - 0.5) * ts
         ey0, ey1 = (r['y'] - 0.5) * ts, (r['y'] + r['l'] - 0.5) * ts
         rooms.append({"id": i, "shape": r['shape'], "floor": r['z'],
@@ -8541,13 +8601,17 @@ def _build_game_package(scene, blueprint_obj, glb_name=""):
         if obj.type != 'LIGHT':
             continue
         loc = obj.matrix_world.translation
-        lights.append({"pos": _to_engine(loc.x, loc.y, loc.z), "color": [round(c, 4) for c in obj.data.color],
+        if floor is not None and abs(loc.z - floor * fine_h) > fine_h * 0.5 + 0.01:
+            continue
+        lights.append({"pos": _to_engine(loc.x, loc.y, loc.z - (floor or 0) * fine_h), "color": [round(c, 4) for c in obj.data.color],
                        "energy_w": round(obj.data.energy, 3), "radius": round(obj.data.shadow_soft_size, 3)})
     props = []
     deco = bpy.data.objects.get(PROPS_DECORATION_OBJECT_NAME)
     if deco is not None and deco.get("gla_props"):
         for x, y, z, kind, rot in json.loads(deco["gla_props"]):
-            props.append({"kind": kind, "pos": _to_engine(x, y, z), "yaw": rot})
+            if floor is not None and abs(z - floor * fine_h) > fine_h * 0.5 + 0.01:
+                continue
+            props.append({"kind": kind, "pos": _to_engine(x, y, z - (floor or 0) * fine_h), "yaw": rot})
     return {
         "format": GAME_PACKAGE_FORMAT,
         "generator": "Game Level Architect " + ".".join(str(v) for v in bl_info["version"]),
@@ -8557,6 +8621,11 @@ def _build_game_package(scene, blueprint_obj, glb_name=""):
         "level_height": fine_h,
         "wall_height": scene.wfc_wall_height,
         "props": props,
+        "floor_index": floor,
+        "floor_count": len(all_levels),
+        "floor_y": round((floor or 0) * fine_h, 4),
+        "stair_links": [dict(l, **{"direction": "up", "to_floor": l["to_z"]}) for l in links_all if floor is not None and l["from_z"] == floor]
+                       + [dict(l, **{"direction": "down", "to_floor": l["from_z"]}) for l in links_all if floor is not None and l["to_z"] == floor],
         "coordinates": "engine: x right, y up, z = -blender_y",
         "floors": floors,
         "entrance": marker(TILE_ENTRANCE),
@@ -8578,16 +8647,82 @@ class OBJECT_OT_ExportGamePackage(bpy.types.Operator, ExportHelper):
 
     filename_ext = ".glb"
     filter_glob: StringProperty(default="*.glb", options={'HIDDEN'})
+    per_floor: BoolProperty(
+        name="One package per floor", default=False,
+        description="Write <name>_f0.glb/.json, <name>_f1.glb/.json ... one self-contained package per floor, linked "
+                    "by stair records. Needs Wall/Door/Stair grouping = Per Floor and Separate by Floor/Room run on the Blueprint")
+
+    def _floor_targets(self, floor, fine_h):
+        pattern = re.compile(r"_Floor%d(_|$)" % floor)
+        targets = [o for o in bpy.data.objects
+                   if o.type == 'MESH' and o.name.startswith("Procedural_Level_") and pattern.search(o.name)
+                   and not o.name.startswith(PROPS_TORCH_OBJECT_NAME)]
+        # the Round-room floor overlay is one object for all floors: cut out this floor's faces
+        rf = bpy.data.objects.get(ROUND_FLOOR_OBJECT_NAME)
+        temp = None
+        if rf is not None:
+            import bmesh
+            bm = bmesh.new()
+            bm.from_mesh(rf.data)
+            drop = [f for f in bm.faces if abs(f.calc_center_median().z - floor * fine_h) > fine_h * 0.5]
+            bmesh.ops.delete(bm, geom=drop, context='FACES')
+            if bm.faces:
+                mesh = bpy.data.meshes.new(ROUND_FLOOR_OBJECT_NAME + "_Floor%d_Mesh" % floor)
+                bm.to_mesh(mesh)
+                for mat in rf.data.materials:
+                    mesh.materials.append(mat)
+                temp = bpy.data.objects.new(ROUND_FLOOR_OBJECT_NAME + "_Floor%d" % floor, mesh)
+                bpy.context.collection.objects.link(temp)
+                targets.append(temp)
+            bm.free()
+        return targets, temp
+
+    def _export_floors(self, context, stem, blueprint_obj):
+        scene = context.scene
+        if scene.wfc_sub_levels_per_floor != 1:
+            self.report({'ERROR'}, "Per-floor packages need Sub-Levels per Floor = 1.")
+            return {'CANCELLED'}
+        fine_h = _fine_level_height(scene)
+        base = _build_game_package(scene, blueprint_obj, "")
+        levels = [f["z"] for f in base["floors"]]
+        written = []
+        previous = scene.wfc_export_binary
+        scene.wfc_export_binary = True
+        try:
+            for z in levels:
+                targets, temp = self._floor_targets(z, fine_h)
+                if not any(o.name.startswith(BLUEPRINT_OBJECT_NAME) for o in targets):
+                    self.report({'ERROR'}, f"Floor {z}: no per-floor Blueprint object. Set Wall/Door/Stair grouping to Per Floor, "
+                                           f"generate them, and run Separate by Floor/Room on the Blueprint first.")
+                    return {'CANCELLED'}
+                glb = f"{stem}_f{z}.glb"
+                try:
+                    _run_gltf_export(context, glb, targets, False)
+                finally:
+                    if temp is not None:
+                        mesh = temp.data
+                        bpy.data.objects.remove(temp, do_unlink=True)
+                        bpy.data.meshes.remove(mesh)
+                package = _build_game_package(scene, blueprint_obj, os.path.basename(glb), floor=z)
+                with open(f"{stem}_f{z}.json", "w", encoding="utf-8") as fh:
+                    json.dump(package, fh, indent=1)
+                written.append(os.path.basename(glb))
+        finally:
+            scene.wfc_export_binary = previous
+        self.report({'INFO'}, "Exported per-floor packages: " + ", ".join(written))
+        return {'FINISHED'}
 
     def execute(self, context):
         scene = context.scene
         blueprint_obj = bpy.data.objects.get(BLUEPRINT_OBJECT_NAME)
-        if blueprint_obj is None or blueprint_obj.data.attributes.get("tile_id") is None:
+        if (blueprint_obj is None or blueprint_obj.data.attributes.get("tile_id") is None) and not scene.get("gla_package_cache"):
             self.report({'ERROR'}, "Generate a Game Blueprint first.")
             return {'CANCELLED'}
         if not hasattr(bpy.ops.export_scene, "gltf"):
             self.report({'ERROR'}, "glTF exporter isn't available -- enable Import-Export: glTF 2.0.")
             return {'CANCELLED'}
+        if self.per_floor:
+            return self._export_floors(context, os.path.splitext(self.filepath)[0], blueprint_obj)
         base_names = (
             BLUEPRINT_OBJECT_NAME, ROUND_FLOOR_OBJECT_NAME, WALLS_OBJECT_NAME, WALLS_ROUND_OBJECT_NAME,
             STAIRS_OBJECT_NAME, DOORS_OBJECT_NAME, DOORS_ROUND_OBJECT_NAME, PROPS_TORCH_OBJECT_NAME,
@@ -9329,7 +9464,11 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
         package_row.scale_y = 1.2
         _color_swatch(package_row, 'COLLECTION_COLOR_05')
         package_row.operator("object.export_game_package", text="Export Game Package (glb + json)", icon='PACKAGE')
-        package_row.enabled = bpy.data.objects.get(BLUEPRINT_OBJECT_NAME) is not None
+        package_row.enabled = bpy.data.objects.get(BLUEPRINT_OBJECT_NAME) is not None or bool(scene.get("gla_package_cache"))
+        floors_row = layout.row(align=True)
+        floors_op = floors_row.operator("object.export_game_package", text="Export Package per Floor", icon='PACKAGE')
+        floors_op.per_floor = True
+        floors_row.enabled = package_row.enabled and scene.wfc_wall_grouping == 'PER_FLOOR'
 
         layout.separator()
         layout.label(text="Collision Mesh -- Floor + Walls + Stairs only")

@@ -2721,6 +2721,69 @@ with tempfile.TemporaryDirectory() as tmp_c:
     check("Castle package: export operator FINISHED and both files exist",
           result == {'FINISHED'} and os.path.getsize(out_c) > 10_000 and os.path.exists(os.path.join(tmp_c, "castle_test.json")), str(result))
 
+# Per-floor packages: two floors joined by stairs, each its own glb + json with stair links to the other.
+scene.wfc_width, scene.wfc_length, scene.wfc_height = 12, 12, 2
+scene.wfc_rooms_min, scene.wfc_rooms_max = 4, 6
+scene.wfc_room_size_min, scene.wfc_room_size_max = 3, 5
+scene.wfc_room_shape = 'RECT'
+scene.wfc_sub_levels_per_floor = 1
+scene.wfc_level_height = 4.5
+scene.wfc_tile_size = 3.0
+scene.wfc_stairs_per_level = 1
+scene.wfc_stair_bend_chance = 0.0
+scene.wfc_wall_grouping = 'PER_FLOOR'
+scene.wfc_door_grouping = 'PER_FLOOR'
+scene.wfc_torch_chance, scene.wfc_prop_chance = 0.4, 0.2
+scene.wfc_random_seed = False
+scene.wfc_seed = 8
+scene.wfc_round_wall_style = 'MASONRY'
+bpy.ops.object.generate_game_blueprint()
+bpy.ops.object.generate_level_walls()
+bpy.ops.object.generate_level_stairs()
+bpy.ops.object.generate_level_doors()
+bpy.ops.object.generate_level_props()
+check("Per-floor package: the scene keeps a package cache after generating the Blueprint", bool(scene.get("gla_package_cache")))
+bp_floor = bpy.data.objects[addon.BLUEPRINT_OBJECT_NAME]
+pkg_whole = addon._build_game_package(scene, bp_floor, "w.glb")
+bpy.ops.object.select_all(action='DESELECT')
+bpy.context.view_layer.objects.active = bp_floor
+bp_floor.select_set(True)
+check("Per-floor package: Separate by Floor/Room FINISHED", bpy.ops.object.separate_level_by_floor() == {'FINISHED'})
+check("Per-floor package: the Blueprint object is gone after separating (the cache is what remains)",
+      bpy.data.objects.get(addon.BLUEPRINT_OBJECT_NAME) is None)
+with tempfile.TemporaryDirectory() as tmp_f:
+    out_f = os.path.join(tmp_f, "deep.glb")
+    result = bpy.ops.object.export_game_package(filepath=out_f, per_floor=True)
+    check("Per-floor package: export FINISHED", result == {'FINISHED'}, str(result))
+    files = sorted(os.listdir(tmp_f))
+    check("Per-floor package: one glb and one json per floor", files == ["deep_f0.glb", "deep_f0.json", "deep_f1.glb", "deep_f1.json"], str(files))
+    pk = [json.load(open(os.path.join(tmp_f, f"deep_f{k}.json"))) for k in (0, 1)]
+    check("Per-floor package: each knows its index, the floor count and its height",
+          [p_["floor_index"] for p_ in pk] == [0, 1] and all(p_["floor_count"] == 2 for p_ in pk) and abs(pk[1]["floor_y"] - 4.5) < 1e-6)
+    check("Per-floor package: one floor of walk rectangles per package", all(len(p_["floors"]) == 1 for p_ in pk))
+    def _cells_of(pkg_):
+        out_ = set()
+        for r_ in pkg_["floors"][0]["walk_rects"]:
+            for ix in range(int(round(r_[0] / 3.0 + 0.5)), int(round(r_[2] / 3.0 - 0.5)) + 1):
+                for iz in range(int(round(r_[1] / 3.0 + 0.5)), int(round(r_[3] / 3.0 - 0.5)) + 1):
+                    out_.add((ix, iz))
+        return out_
+    c0, c1 = _cells_of(pk[0]), _cells_of(pk[1])
+    ups = [l for l in pk[0]["stair_links"] if l["direction"] == "up"]
+    downs = [l for l in pk[1]["stair_links"] if l["direction"] == "down"]
+    check("Per-floor package: at least one stair goes up from floor 0 and has its way back down on floor 1", len(ups) >= 1 and len(downs) == len(ups), f"{len(ups)} up, {len(downs)} down")
+    def _cell(p_):
+        return (int(round(p_[0] / 3.0)), int(round(p_[2] / 3.0)))
+    check("Per-floor package: every stair trigger and arrival sits on a walkable cell of the right floor",
+          all(_cell(l["up"]["trigger"]) in c0 and _cell(l["up"]["arrive"]) in c1 for l in ups)
+          and all(_cell(l["down"]["trigger"]) in c1 and _cell(l["down"]["arrive"]) in c0 for l in downs))
+    check("Per-floor package: positions are floor-relative (y ~ 0 on both floors)",
+          all(abs(l["up"]["trigger"][1]) < 1e-6 for l in ups) and all(abs(p_["entrance"]["pos"][1]) < 1e-6 for p_ in pk if p_["entrance"]))
+    check("Per-floor package: lights and props are split by floor (their y stays near 0)",
+          all(abs(l_["pos"][1]) < 4.5 for p_ in pk for l_ in p_["lights"]) and all(abs(q["pos"][1]) < 1.0 for p_ in pk for q in p_["props"]))
+    check("Per-floor package: glb files are real", all(os.path.getsize(os.path.join(tmp_f, f"deep_f{k}.glb")) > 5_000 for k in (0, 1)))
+check("Per-floor package: whole-level package still works with the cache (floors 0 and 1 present)", len(pkg_whole["floors"]) == 2)
+
 # glTF round trip embeds the packed textures.
 with tempfile.TemporaryDirectory() as tmp:
     path = os.path.join(tmp, "tower.glb")

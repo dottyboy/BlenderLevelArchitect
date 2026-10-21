@@ -4,7 +4,7 @@ Internal dev-facing doc: what's built, what's known-broken, what's next. Not for
 (see `dist/README.md` for that). Source of truth for the addon's actual behavior is always
 `levelArchitect_v2.py` — this file can drift out of date; the code can't.
 
-Current version: **0.36.0** (see `bl_info` in the source file).
+Current version: **0.37.0** (see `bl_info` in the source file).
 
 §2 (Development tree) was condensed 2026-08-21 — dropped the blow-by-blow investigation
 narrative and per-run stress-test numbers from older, fully-resolved entries, kept every
@@ -753,6 +753,16 @@ GN complexity there specifically.
       too zoomed-out to show doorway-level detail) confirmed the frame visibly follows the wall's
       curve right at the opening, not standing at a mismatched straight angle against it.
 
+- [x] **Per-floor packages (0.37.0).** Floors are separate locations on the engine side, which avoids a y-aware walker,
+      occlusion of upper floors and picking planes: each floor's glb holds only its objects (`_Floor<k>` name match;
+      torch mesh left out, lights/props come from the JSON), stairs become fade links. Stair geometry used: a stair
+      cell (x, y, z) with direction d climbs to the landing (x+d, z+1); the landing room is open above the stair cell
+      itself, so the way back down is the cell (x, y, z+1) arriving at (x-d, z). Stairs whose landing is not walkable are
+      skipped. Pitfalls: Separate by Floor/Room deletes the Blueprint (hence the cache on the scene); sub-levels > 1 are
+      refused; one floor of the first seed tried had no usable stair (seed 9), so generate and check `stair_links`. Vampire
+      side: the importer wires `stairs_out`/`arrivals`; a trigger arms only after the player has stepped 2 m away from
+      every trigger (an arrival one tile from the trigger must not bounce back); door panels need the hinge-origin
+      transform composed by hand when the scene is not in the tree yet (global_transform is identity there).
 - [x] **Castle areas (0.36.0).** `_castle_package_rooms`: four anchor points computed from the same keep geometry as
       the mesh builder, snapped to the nearest walkable cell. Lesson from the Vampire side: a story prop standing in
       the one-cell-wide strip in front of the keep wall blocked the only route between the yards (A* ignores

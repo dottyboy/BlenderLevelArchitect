@@ -3,6 +3,23 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.37.0
+
+- **Export Package per Floor** (Export tab; or "One package per floor" in the Game Package dialog). Writes
+  `<name>_f0.glb/.json`, `<name>_f1.glb/.json`, ... one self-contained package per floor. Each JSON carries its
+  floor index and count, `floor_y` (the loader shifts the scene down so the floor sits at y = 0; every position in
+  the JSON is already floor-relative), only that floor's walk rectangles, rooms, lights and props, and
+  `stair_links`: for each stairwell the trigger cell and the arrival cell on the neighbouring floor, up from the
+  lower floor and back down from the upper one (arrival is the cell the run points at / the cell behind the stair).
+- Needs Wall/Door/Stair grouping = Per Floor and Separate by Floor/Room run first (the per-floor objects it
+  exports). Because Separate consumes the Blueprint object, a copy of the cells (tile id, rotation, room, offset)
+  is now stored on the scene when the Blueprint is generated (`gla_package_cache`); the package builder reads it
+  when the Blueprint is gone. The Round-room floor overlay (one object for all floors) is cut per floor.
+- Tests: cache, separating, one glb+json per floor, floor index/count/height, stair trigger and arrival cells on the
+  right floors' walkable cells, floor-relative y, lights/props split by floor.
+- Vampire Adventure uses it for a two-floor location (stairs = fade to the other floor) and swings the exported
+  door panels open as the player approaches (the panel origin is its hinge).
+
 ## 0.36.0
 
 - **Castle package lists named areas** (`rooms`): COURTYARD (inside the gate), KEEP_FRONT, WEST_YARD and EAST_YARD,
