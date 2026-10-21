@@ -2334,6 +2334,7 @@ scene.wfc_prop_theme = 'GENERIC'
 # Round Tower: brick-textured shell + real openings + dressed-stone details.
 import tempfile
 scene.cursor.location = (40.0, 0.0, 0.0)
+scene.wfc_tower_lights = False   # the lantern tests further down switch them on; the older checks probe the empty axis
 scene.wfc_tower_radius, scene.wfc_tower_height, scene.wfc_tower_wall = 3.0, 9.0, 0.55
 scene.wfc_tower_battlements, scene.wfc_tower_door, scene.wfc_tower_windows = True, True, 2
 scene.wfc_tower_door_angle = 270.0
@@ -2348,8 +2349,8 @@ for detail in ('LOW', 'MEDIUM', 'HIGH'):
     counts[detail] = len(tower.data.vertices)
 check("Tower: vertex budget grows with detail (Low < Medium < High)",
       counts['LOW'] < counts['MEDIUM'] < counts['HIGH'], str(counts))
-check("Tower: Medium (with interior) stays under 3500 vertices (old brick-by-brick shell alone: ~8400)", counts['MEDIUM'] < 3500, str(counts))
-check("Tower: Low (with interior) stays under 2000 vertices", counts['LOW'] < 2000, str(counts))
+check("Tower: Medium (with interior and railing) stays under 4200 vertices (old brick-by-brick shell alone: ~8400)", counts['MEDIUM'] < 4200, str(counts))
+check("Tower: Low (with interior and railing) stays under 3000 vertices", counts['LOW'] < 3000, str(counts))
 
 scene.wfc_tower_detail = 'MEDIUM'
 bpy.ops.object.generate_level_tower()
@@ -2681,8 +2682,8 @@ for r in crects:
     for ix in range(int(round(r[0] / 0.5 + 0.5)), int(round(r[2] / 0.5 - 0.5)) + 1):
         for iz in range(int(round(r[1] / 0.5 + 0.5)), int(round(r[3] / 0.5 - 0.5)) + 1):
             ccells.add((ix, iz))
-check("Castle package: four named areas, each on a walkable cell",
-      len(cpkg["rooms"]) == 4 and all(
+check("Castle package: five named areas (incl. KEEP_HALL), each on a walkable cell",
+      len(cpkg["rooms"]) == 5 and all(
           (int(round(r["center"][0] / 0.5)), int(round(r["center"][1] / 0.5))) in ccells for r in cpkg["rooms"]),
       str([r["shape"] for r in cpkg["rooms"]]))
 check("Castle package: rectangles reproduce the cells exactly (count)", len(ccells) == cpkg["floors"][0]["cells"], f"{len(ccells)} vs {cpkg['floors'][0]['cells']}")
@@ -2925,6 +2926,21 @@ scene.wfc_wall_style = 'BOXES'
 scene.wfc_wall_ruin = 0.0
 scene.wfc_window_chance = 0.0
 
+# Keep interior: a hall with a floor and a ceiling, reachable through the keep's door.
+scene.wfc_castle_keep, scene.wfc_castle_gate, scene.wfc_castle_ruin = True, True, 0.0
+scene.cursor.location = (0.0, 80.0, 0.0)
+bpy.ops.object.generate_level_castle()
+kc = bpy.data.objects[addon.CASTLE_OBJECT_NAME]
+hall = kc.ray_cast(Vector((0.0, 20.0 * 0.12, 3.0)), Vector((0, 0, -1)), distance=5.0)
+check("Keep hall: a stone floor at ground level inside the keep, facing up", hall[0] and abs(hall[1].z) < 0.01 and hall[2].z > 0.9, str(hall[:3]))
+ceil = kc.ray_cast(Vector((0.0, 20.0 * 0.12, 1.0)), Vector((0, 0, 1)), distance=20.0)
+roof_z = max(7.0 * 1.45, 7.0 + 3.0) - 1.0
+check("Keep hall: a ceiling slab at the keep's walkway level, its underside facing down", ceil[0] and abs(ceil[1].z - (roof_z - 0.3)) < 0.01 and ceil[2].z < -0.9, str(ceil[:3]))
+roof = kc.ray_cast(Vector((0.0, 20.0 * 0.12, 30.0)), Vector((0, 0, -1)), distance=40.0)
+check("Keep hall: the roof walkway on top of it faces up", roof[0] and abs(roof[1].z - roof_z) < 0.01 and roof[2].z > 0.9, str(roof[:3]))
+door_ray = kc.ray_cast(Vector((0.0, -10.0 + 1.0, 1.2)), Vector((0, 1, 0)), distance=20.0)
+check("Keep hall: a person can walk in through the keep door (ray along the door axis meets only the far wall)", door_ray[0] and door_ray[1].y > 5.0, str(door_ray[:2]))
+
 # Brick colours for the tower and the castle.
 scene.cursor.location = (0.0, 120.0, 0.0)
 nt = len(addon.BRICK_TINTS)
@@ -2951,6 +2967,75 @@ for choice, expect in (('PLAIN', None), ('SLATE', {addon.BRICK_COLOR_INDEX['SLAT
     else:
         check("Castle colour Slate: every brick face carries the slate tint", sl == expect, str(sl))
 scene.wfc_castle_brick_color = 'PLAIN'
+bpy.ops.object.generate_level_tower()
+tower = bpy.data.objects[addon.TOWER_OBJECT_NAME]
+
+# Windows keep clear of the spiral steps (no step block in front of any slit window).
+scene.cursor.location = (0.0, 140.0, 0.0)
+scene.wfc_tower_height, scene.wfc_tower_radius, scene.wfc_tower_wall = 13.0, 3.0, 0.55
+scene.wfc_tower_interior, scene.wfc_tower_windows, scene.wfc_tower_ruin = True, 3, 0.0
+scene.wfc_tower_door_angle = 270.0
+bpy.ops.object.generate_level_tower()
+tw2 = bpy.data.objects[addon.TOWER_OBJECT_NAME]
+# rebuild the builder exactly as the operator does and verify no window overlaps a step block
+b3 = addon._TowerBuilder(3.0, 13.0, 0.55, battlements=True, detail='MEDIUM', seed=scene.wfc_seed, interior=True,
+                         stair_width=1.0, stair_start_deg=scene.wfc_tower_door_angle + 60.0, ruin=0.0)
+b3.add_opening(scene.wfc_tower_door_angle, 1.3, 0.0, min(2.6, b3.Hs - 1.0), 'arch')
+addon._tower_openings_from_settings(b3, scene)
+clash = 0
+wins = [o for o in b3.openings if o['kind'] == 'rect']
+for o in wins:
+    deg = math.degrees(o['ac'] + b3.seam)
+    for b0, b1 in b3.step_blocks_at(deg, o['w']):
+        if b0 < o['apex'] and o['sill'] < b1:
+            clash += 1
+check("Tower windows: no spiral step block overlaps any slit window", len(wins) >= 3 and clash == 0, f"{clash} clashes, {len(wins)} windows")
+check("Tower windows: still has windows on every storey", len({b3.storey_of(o['sill']) for o in wins}) >= b3.n_storeys - 1, str(len(wins)))
+# Stair railing: a balustrade on the inner lane edge, and round the stairwell opening.
+def _rail_probe(rail_on):
+    scene.wfc_tower_lights = False   # the axis lantern would swallow rays that start on the axis
+    scene.wfc_tower_stair_rail = rail_on
+    scene.wfc_tower_height = 9.0
+    scene.wfc_tower_windows = 0
+    bpy.ops.object.generate_level_tower()
+    t_ = bpy.data.objects[addon.TOWER_OBJECT_NAME]
+    sh_ = 8.0 / 2
+    steps_ = max(12, round(sh_ / 0.18))
+    rise_ = sh_ / steps_
+    a0_r = math.radians(round((270.0 + 60.0) / 5.625) * 5.625)
+    hits = []
+    for j in (4, 9, 14):
+        ang = a0_r + math.tau * (j + 0.5) / steps_
+        top_ = (j + 1) * rise_
+        h_ = t_.ray_cast(Vector((0.0, 0.0, top_ + 0.5)), Vector((math.cos(ang), math.sin(ang), 0.0)), distance=4.0)
+        hits.append(math.hypot(h_[1].x, h_[1].y) if h_[0] else 9.0)
+    return hits
+off_hits, on_hits = _rail_probe(False), _rail_probe(True)
+check("Stair railing: without it a ray across the lane reaches the wall (radius ~2.45)", all(h > 2.3 for h in off_hits), str(off_hits))
+check("Stair railing: with it the balustrade stops the ray at the lane's inner edge (radius ~1.45)", all(1.3 < h < 1.7 for h in on_hits), str(on_hits))
+scene.wfc_tower_stair_rail = True
+# Lanterns: a Point light + lantern geometry under every floor of an interior; regenerating replaces them.
+scene.wfc_tower_lights = True
+scene.wfc_tower_height = 9.0
+bpy.ops.object.generate_level_tower()
+tl = [o for o in bpy.data.objects if o.name.startswith(addon.TOWER_LIGHT_PREFIX) and o.type == 'LIGHT']
+t_obj = bpy.data.objects[addon.TOWER_OBJECT_NAME]
+scene.wfc_tower_lights = True
+check("Tower lanterns: one light per storey (2 for a 9 m tower)", len(tl) == 2, str(len(tl)))
+check("Tower lanterns: lights hang on the axis, under the floor slabs",
+      all(abs(l.location.x - t_obj.location.x) < 1e-4 and abs(l.location.y - t_obj.location.y) < 1e-4 for l in tl)
+      and sorted(round(l.location.z - t_obj.location.z, 1) for l in tl) == [3.3, 7.3], str(sorted(round(l.location.z - t_obj.location.z, 2) for l in tl)))
+lamp_hit = t_obj.ray_cast(Vector((0.0, 0.0, 2.6)), Vector((0, 0, 1)), distance=3.0)
+check("Tower lanterns: a lamp body hangs there (a ray up the axis meets its underside well below the slab at 4 m)", lamp_hit[0] and 3.0 < lamp_hit[1].z < 3.3, str(lamp_hit[:2]))
+bpy.ops.object.generate_level_tower()
+check("Tower lanterns: regenerating replaces the lights, not piles them up",
+      len([o for o in bpy.data.objects if o.name.startswith(addon.TOWER_LIGHT_PREFIX) and o.type == 'LIGHT']) == 2)
+scene.wfc_tower_lights = False
+bpy.ops.object.generate_level_tower()
+check("Tower lanterns: switched off, no lights", not [o for o in bpy.data.objects if o.name.startswith(addon.TOWER_LIGHT_PREFIX)])
+scene.wfc_tower_lights = True
+scene.wfc_tower_windows = 2
+scene.wfc_tower_height = 9.0
 bpy.ops.object.generate_level_tower()
 tower = bpy.data.objects[addon.TOWER_OBJECT_NAME]
 

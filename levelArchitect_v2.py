@@ -33,7 +33,7 @@ from bpy_extras.io_utils import ExportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 40, 0),
+    "version": (0, 41, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -3709,6 +3709,7 @@ def _gltf_export_targets(base_names, include_lights):
         targets.extend(_objects_matching_prefix(base_name))
     if include_lights:
         targets.extend(_objects_matching_prefix(PROPS_LIGHT_NAME_PREFIX))
+        targets.extend(_objects_matching_prefix(TOWER_LIGHT_PREFIX))
     return targets
 
 
@@ -7282,6 +7283,7 @@ class OBJECT_OT_GenerateLevelProps(bpy.types.Operator):
 # All maths is plain Python (no Geometry Nodes), baked, and exports to glTF
 # like every other part of the addon. See DEVELOPMENT.md section 2 (0.27.0).
 TOWER_OBJECT_NAME = "Procedural_Level_Tower"
+TOWER_LIGHT_PREFIX = "Procedural_Level_LanternLight"
 TOWER_TAU = 2.0 * math.pi
 TOWER_TILE_W = 2.4
 TOWER_ROW_H = 0.26
@@ -7927,10 +7929,13 @@ class _TowerBuilder:
     def __init__(self, radius, height, wall, battlements=True, detail='MEDIUM', seed=1,
                  interior=False, stair_width=1.0, stair_start_deg=0.0,
                  plinth=True, cap_top=False, brick_cols=None, stones=None, seam=0.0,
-                 ruin=0.0, rubble_outside=True, floor_levels=None):
+                 ruin=0.0, rubble_outside=True, floor_levels=None, stair_rail=True, lanterns=False):
         self.R, self.H, self.wall = radius, height, wall
         self.ruin = max(0.0, min(1.0, ruin))
         self.rubble_outside = rubble_outside
+        self.stair_rail = stair_rail
+        self.lanterns = lanterns
+        self.lantern_points = []   # (z) of every lantern's flame, in the tower's own frame (on the axis)
         if self.ruin > 0.0:
             battlements = False  # nothing crenellated survives a ruin
         nr = random.Random(seed * 131 + 7)
@@ -8022,6 +8027,51 @@ class _TowerBuilder:
         self.openings.append(dict(ac=ac, w=width, sill=sill, spring=spring, apex=apex, kind=kind,
                                   rise=rise, a0=ac - half, a1=ac + half))
         return True
+
+    def storey_of(self, z):
+        """Index of the storey whose floor is at or below z."""
+        k = 0
+        for i in range(self.n_storeys):
+            if self.levels[i] <= z + 1e-6:
+                k = i
+        return k
+
+    def step_blocks_at(self, deg, width):
+        """[(z_bottom, z_top), ...] of the spiral steps in front of a wall point at world angle deg, over the
+        angular span of `width` metres. Empty without an interior. Mirrors _stairs (same step count, rise, start)."""
+        if not self.interior:
+            return []
+        a = (math.radians(deg) - self.seam) % TOWER_TAU
+        half = width / 2.0 / self.R + 0.03
+        out = []
+        for k in range(self.n_storeys):
+            z_lo, z_hi = self.levels[k], self.levels[k + 1]
+            h = z_hi - z_lo
+            steps = max(12, round(h / 0.18))
+            rise = h / steps
+            lo = ((a - half - self.stair_a0) % TOWER_TAU) / TOWER_TAU * steps
+            hi = lo + 2 * half / TOWER_TAU * steps
+            for j in range(int(math.floor(lo)), int(math.floor(hi)) + 1):
+                top = z_lo + ((j % steps) + 1) * rise
+                out.append((top - 0.30, top))
+        return out
+
+    def add_window(self, deg, width, sill, height):
+        """A slit window that keeps clear of the spiral steps: the sill is moved (up or down, nearest first, inside
+        its storey) until no step block overlaps the opening plus a small margin; dropped when nothing fits."""
+        blocks = self.step_blocks_at(deg, width)
+        if not blocks:
+            return self.add_opening(deg, width, sill, height, 'rect')
+        k = self.storey_of(sill)
+        z_min, z_max = self.levels[k] + 0.5, self.levels[k + 1] - 0.6
+        for shift in [0.0] + [d * s_ for d in range(1, 30) for s_ in (0.1, -0.1)]:
+            sl = sill + shift
+            if sl < z_min or sl + height > z_max:
+                continue
+            if any(b0 < sl + height + 0.12 and sl - 0.12 < b1 for b0, b1 in blocks):
+                continue
+            return self.add_opening(deg, width, sl, height, 'rect')
+        return False
 
     @staticmethod
     def _arch_h(o, s):
@@ -8411,6 +8461,8 @@ class _TowerBuilder:
                 pts = [(0.0, 0.0, zz), c(a0, rb, zz), c(a1, rb, zz)]
                 self.mb.poly(grp, pts, [uv(p) for p in pts], nrm, 1)
             if in_hole(i):
+                if self.stair_rail:
+                    self._wedge(a0, a1, rb - 0.06, rb + 0.06, z, z + 0.9)  # balustrade round the stairwell opening
                 am = (a0 + a1) / 2.0
                 pts = [c(a0, rb, z), c(a1, rb, z), c(a1, rb, z - t), c(a0, rb, z - t)]
                 self.mb.poly(grp, pts, [uv(p) for p in pts], (math.cos(am), math.sin(am), 0.0), 1)
@@ -8450,7 +8502,22 @@ class _TowerBuilder:
                 b = self.stair_a0 + TOWER_TAU * (j + 1) / steps
                 top = z_lo + (j + 1) * rise
                 self._wedge(a, b, r0, r1, 0.0 if k == 0 and j < 2 else top - 0.30, top)
+                if self.stair_rail:
+                    # a stone balustrade along the open (inner) edge of the lane, 0.9 m above each tread
+                    self._wedge(a, b, r0 - 0.06, r0 + 0.06, top, top + 0.9)
             self._slab(z_hi, hole)
+            if self.lanterns:
+                self._lantern(z_hi)
+
+    def _lantern(self, z_ceiling):
+        """A lantern on a thin chain under a floor slab, on the tower's axis (the one place the stair lane never
+        reaches). Four wedge quadrants each for the chain and the lamp body."""
+        z_lamp0 = z_ceiling - self.SLAB_T - 0.62
+        for q in range(4):
+            a0, a1 = q * math.pi / 2.0, (q + 1) * math.pi / 2.0
+            self._wedge(a0, a1, 0.0, 0.025, z_lamp0 + 0.3, z_ceiling - self.SLAB_T)      # chain
+            self._wedge(a0, a1, 0.0, 0.15, z_lamp0, z_lamp0 + 0.3)                        # lamp body
+        self.lantern_points.append(z_lamp0 + 0.15)
 
     def geometry(self, ground=True):
         self._build_columns()
@@ -8488,7 +8555,7 @@ def _tower_openings_from_settings(builder, scene):
         sill = builder.levels[k] + 1.2
         for i in range(count):
             deg = scene.wfc_tower_door_angle + 360.0 * (i + 0.25 + 0.5 * (k % 2)) / count
-            builder.add_opening(deg % 360.0, 0.28, sill, 1.3, 'rect')
+            builder.add_window(deg % 360.0, 0.28, sill, 1.3)
 
 
 class OBJECT_OT_GenerateLevelTower(bpy.types.Operator):
@@ -8508,11 +8575,13 @@ class OBJECT_OT_GenerateLevelTower(bpy.types.Operator):
             self.report({'ERROR'}, "Wall Thickness must be at least 0.3 m smaller than the Radius.")
             return {'CANCELLED'}
         _remove_objects_by_prefix(TOWER_OBJECT_NAME)
+        _remove_objects_by_prefix(TOWER_LIGHT_PREFIX)
         builder = _TowerBuilder(
             radius, height, wall, battlements=scene.wfc_tower_battlements,
             detail=scene.wfc_tower_detail, seed=scene.wfc_seed,
             ruin=scene.wfc_tower_ruin,
-            interior=scene.wfc_tower_interior and radius - wall >= 1.6,
+            interior=scene.wfc_tower_interior and radius - wall >= 1.6, stair_rail=scene.wfc_tower_stair_rail,
+            lanterns=scene.wfc_tower_lights,
             stair_width=scene.wfc_tower_stair_width,
             stair_start_deg=scene.wfc_tower_door_angle + 60.0,
         )
@@ -8527,6 +8596,15 @@ class OBJECT_OT_GenerateLevelTower(bpy.types.Operator):
         obj.location = scene.cursor.location
         for mat_ in masonry_material_list(bool(tint)):
             mesh.materials.append(mat_)
+        if scene.wfc_tower_lights:
+            for li, zl in enumerate(builder.lantern_points):
+                light_data = bpy.data.lights.new(name=f"{TOWER_LIGHT_PREFIX}_Data", type='POINT')
+                light_data.energy = scene.wfc_torch_light_energy
+                light_data.color = tuple(scene.wfc_torch_light_color)
+                light_data.shadow_soft_size = scene.wfc_torch_light_radius
+                light_obj = bpy.data.objects.new(f"{TOWER_LIGHT_PREFIX}_{li:02d}", light_data)
+                light_obj.location = (obj.location.x, obj.location.y, obj.location.z + zl)
+                context.collection.objects.link(light_obj)
         _add_viewport_color_attribute(mesh)
         for o in context.selected_objects:
             o.select_set(False)
@@ -8604,7 +8682,7 @@ def _build_castle_mesh(width, depth, wall_h, wall_t, tower_r, tower_h, gate, kee
         for ang in (m - 45.0, m + 45.0):
             tb.add_opening(ang % 360.0, 1.3, hs_wall, 2.2, 'arch')
         for k in range(tb.n_storeys):
-            tb.add_opening((m + 180.0 + (40.0 if k % 2 else -40.0)) % 360.0, 0.28, tb.levels[k] + 1.2, 1.3, 'rect')
+            tb.add_window((m + 180.0 + (40.0 if k % 2 else -40.0)) % 360.0, 0.28, tb.levels[k] + 1.2, 1.3)
         tb.geometry(ground=True)
         big.append(tb.mb, rot=tb.seam, offset=(cx, cy, 0.0), mat_map=part_map('tower', i))
     # -- curtain walls
@@ -8638,6 +8716,15 @@ def _build_castle_mesh(width, depth, wall_h, wall_t, tower_r, tower_h, gate, kee
                 wb.add_opening(wb.L / 2.0, 0.3, kh * 0.45, 1.5, 'rect')
             wb.geometry()
             big.append(wb.mb, rot=rot, offset=(cx - dx * kt / 2.0, cy - dy * kt / 2.0, 0.0), mat_map=part_map('keep', 0))
+        # interior hall: stone floor and a ceiling slab at the walkway level (top face = the roof walkway)
+        inner = ks / 2.0 - kt / 2.0
+        stone_slot = len(BRICK_TINTS) if (mixed or base_tint) else 1
+        z_roof = kh - 1.0
+        fl = [(kcx - inner, kcy - inner, 0.0), (kcx + inner, kcy - inner, 0.0), (kcx + inner, kcy + inner, 0.0), (kcx - inner, kcy + inner, 0.0)]
+        big.poly('keepfloor', fl, [(q[0] / TOWER_TILE_W, q[1] / TOWER_TILE_W) for q in fl], (0.0, 0.0, 1.0), stone_slot)
+        for zz, nrm in ((z_roof, (0.0, 0.0, 1.0)), (z_roof - 0.3, (0.0, 0.0, -1.0))):
+            rf = [(q[0], q[1], zz) for q in fl]
+            big.poly('keeproof', rf, [(q[0] / TOWER_TILE_W, q[1] / TOWER_TILE_W) for q in rf], nrm, stone_slot)
     return big
 
 
@@ -9004,6 +9091,12 @@ def _castle_walk_cells(width, depth, wall_t, tower_r, gate, keep, step=0.5, apro
                 if keep and abs(x - kcx) <= kb and abs(y - kcy) <= kb:
                     inside = False
             passage = gate and abs(x) <= 1.1 and -hy - apron <= y <= -hy + wall_t / 2.0 + m
+            if keep:
+                kin = ks / 2.0 - kt / 2.0 - m
+                if abs(x - kcx) <= kin and abs(y - kcy) <= kin:
+                    passage = True   # inside the keep's hall
+                if abs(x - kcx) <= 0.8 and kcy - ks / 2.0 - kt / 2.0 - m <= y <= kcy - ks / 2.0 + kt / 2.0 + m:
+                    passage = True   # through the keep's south door
             outside_apron = gate and abs(x) <= 6.0 and -hy - apron <= y <= -hy - wall_t / 2.0 - m
             if inside or passage or outside_apron:
                 cells.add((i, j))
@@ -9021,6 +9114,8 @@ def _castle_package_rooms(scene, cells, step, ox, oy):
              ("WEST_YARD", -W * 0.3, D * 0.12), ("EAST_YARD", W * 0.3, D * 0.12)]
     if not scene.wfc_castle_keep:
         spots[1] = ("KEEP_FRONT", 0.0, 0.0)
+    else:
+        spots.append(("KEEP_HALL", 0.0, kcy))
     rooms = []
     for i, (name, x, y) in enumerate(spots):
         # cells here are already shifted by (ox, oy); snap in that frame
@@ -9038,6 +9133,8 @@ def _castle_package_lights(scene, loc):
     hx, hy = scene.wfc_castle_width / 2.0, scene.wfc_castle_depth / 2.0
     spots = [(-2.2, -hy - 0.9), (2.2, -hy - 0.9)]
     spots += [(sx * (hx - 5.0), sy * (hy - 4.5)) for sx in (-1, 1) for sy in (-1, 1)]
+    if scene.wfc_castle_keep:
+        spots.append((0.0, hy * 0.24))   # the keep's hall (its centre, as in _build_castle_mesh)
     return [{"pos": _to_engine(loc.x + x, loc.y + y, loc.z + 2.6), "color": [1.0, 0.55, 0.24], "energy_w": 80.0, "radius": 0.25}
             for x, y in spots]
 
@@ -9662,6 +9759,12 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
         stair_row = col.row(align=True)
         stair_row.enabled = scene.wfc_tower_interior
         stair_row.prop(scene, "wfc_tower_stair_width", text="Stair Width")
+        rail_row = col.row(align=True)
+        rail_row.enabled = scene.wfc_tower_interior
+        rail_row.prop(scene, "wfc_tower_stair_rail", text="Stair Railing")
+        lamp_row = col.row(align=True)
+        lamp_row.enabled = scene.wfc_tower_interior
+        lamp_row.prop(scene, "wfc_tower_lights", text="Lanterns")
         layout.label(text="Built at the 3D cursor.")
         layout.separator()
         _step_button(
@@ -10338,6 +10441,16 @@ def register():
                     "battlements) joined by one full turn of stone spiral stairs per storey, hugging "
                     "the inner wall. Skipped automatically when the inner radius is under 1.6 m"
     )
+    bpy.types.Scene.wfc_tower_lights = BoolProperty(
+        name="Lanterns", default=True,
+        description="A hanging lantern and a real Point light under every floor of the tower's interior (needs "
+                    "Floors + Spiral Stairs). Light strength/colour follow the Props tab's torch settings"
+    )
+    bpy.types.Scene.wfc_tower_stair_rail = BoolProperty(
+        name="Stair Railing", default=True,
+        description="A low stone balustrade along the open inner edge of the spiral stairs and round the "
+                    "stairwell opening of every floor"
+    )
     bpy.types.Scene.wfc_tower_stair_width = FloatProperty(
         name="Stair Width", default=1.0, min=0.7, max=2.0, unit='LENGTH',
         description="Radial width of the spiral stair lane along the inner wall"
@@ -10473,6 +10586,8 @@ def unregister():
     del bpy.types.Scene.wfc_castle_brick_color
     del bpy.types.Scene.wfc_tower_ruin
     del bpy.types.Scene.wfc_tower_interior
+    del bpy.types.Scene.wfc_tower_lights
+    del bpy.types.Scene.wfc_tower_stair_rail
     del bpy.types.Scene.wfc_tower_stair_width
     del bpy.types.Scene.wfc_debug_params
     del bpy.types.Scene.wfc_export_binary

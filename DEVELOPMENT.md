@@ -4,7 +4,7 @@ Internal dev-facing doc: what's built, what's known-broken, what's next. Not for
 (see `dist/README.md` for that). Source of truth for the addon's actual behavior is always
 `levelArchitect_v2.py` — this file can drift out of date; the code can't.
 
-Current version: **0.40.0** (see `bl_info` in the source file).
+Current version: **0.41.0** (see `bl_info` in the source file).
 
 §2 (Development tree) was condensed 2026-08-21 — dropped the blow-by-blow investigation
 narrative and per-run stress-test numbers from older, fully-resolved entries, kept every
@@ -753,6 +753,16 @@ GN complexity there specifically.
       too zoomed-out to show doorway-level detail) confirmed the frame visibly follows the wall's
       curve right at the opening, not standing at a mismatched straight angle against it.
 
+- [x] **Interior finishing (0.41.0).** `step_blocks_at(deg, width)` mirrors `_stairs` (same step count/rise/start) and
+      returns the (bottom, top) of every step in front of a wall point; `add_window` searches sill shifts of +-0.1 m
+      steps inside the storey with a 0.12 m margin each side. Railing: a 0.12 m wide wedge at the lane's inner radius per
+      step, plus wedges round each slab hole's inner arc. Lanterns hang from the slab underside on the axis (chain
+      and body as four wedge quadrants); the Point lights are separate objects named `Procedural_Level_LanternLight_*`
+      (NOT the Props prefix, so regenerating props neither deletes them nor lists them in a level package; the
+      first name `...TowerLight...` shared the tower object's prefix, and `_remove_objects_by_prefix` and the tests'
+      prefix counts swallowed them). Keep hall: floor quad plus ceiling slab (two quads) at kh - 1.0, the same height
+      the wall caps use. Tests that probe the empty tower axis must switch the lanterns off. Not done: props inside
+      tower storeys, stairs to the keep roof, hall furniture.
 - [x] **Tower / castle brick colour (0.40.0).** `_remap_soup_materials` for a single soup (tower), `mat_map` per part for the
       castle (`part_map`: one tint, or Mixed = walls 1, keep 5, towers 2/3/4/6 by index). Any direct `poly(..., mat)` call
       outside the builders (the courtyard slab) must use the stone slot of the list in use -- slot 1 means "tint 1" once the

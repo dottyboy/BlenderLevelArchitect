@@ -3,6 +3,24 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.41.0
+
+- **Tower interiors are finished off.**
+  - Slit windows now keep clear of the spiral steps: each window's sill is moved up or down (nearest first, inside
+    its storey) until no step block overlaps the opening plus a small margin; a window that fits nowhere is dropped.
+  - **Stair Railing** (on by default): a low stone balustrade along the open inner edge of the stairs and round the
+    stairwell opening of every floor (about 650 more vertices; switch it off to save them).
+  - **Lanterns** (on by default): a lantern hanging on a chain from under every floor slab, on the tower's axis (the
+    one place the stair lane never reaches), each with a real Point light that follows the Props tab's torch
+    strength and colour. They are removed and rebuilt with the tower and included in a glTF export with
+    "Include Lights".
+- **Castle keep has an interior hall**: a stone floor, a ceiling slab at the walkway level (its top is the roof
+  walkway behind the battlements), and the keep's door opens into it. The castle package lists a KEEP_HALL area, the
+  hall and the door passage as walkable ground, and a light in the hall.
+- Tests: no step overlaps any window on a 13 m tower with 3 windows per storey, railing stops a ray across the lane,
+  one lantern light per storey on the axis, regeneration replaces them, hall floor/ceiling/roof, walking in through
+  the door.
+
 ## 0.40.0
 
 - **Brick Color for the Round Tower and the Castle** (Tower and Castle tabs). Pick Plain or one of the room tints
