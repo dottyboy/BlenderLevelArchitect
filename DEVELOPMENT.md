@@ -4,7 +4,7 @@ Internal dev-facing doc: what's built, what's known-broken, what's next. Not for
 (see `dist/README.md` for that). Source of truth for the addon's actual behavior is always
 `levelArchitect_v2.py` — this file can drift out of date; the code can't.
 
-Current version: **0.38.0** (see `bl_info` in the source file).
+Current version: **0.39.0** (see `bl_info` in the source file).
 
 §2 (Development tree) was condensed 2026-08-21 — dropped the blow-by-blow investigation
 narrative and per-run stress-test numbers from older, fully-resolved entries, kept every
@@ -753,6 +753,15 @@ GN complexity there specifically.
       too zoomed-out to show doorway-level detail) confirmed the frame visibly follows the wall's
       curve right at the opening, not standing at a mismatched straight angle against it.
 
+- [x] **Room brick colours + stone door frames (0.39.0).** `_TowerMesh.append(..., mat_map)` remaps the builders' slot 0
+      (brick) / 1 (stone) per room: slot = `brick_tint_slot(room_id)` (0 for corridors, 1 + rid % (N-1) for rooms), stone
+      is slot N. Material list = `masonry_material_list(room_colors)`. The first idea, multiplying the albedo by an RGB
+      tint, barely changed the red-brown brick (blue-grey times red is still brown); Hue/Saturation/Value works, with
+      Blender's hue convention (0.5 = no shift; brick hue is ~0.05, so parameter h shifts it by h - 0.5). The Mix node's
+      A/B/Result sockets exist once per data type (pick by `.type`, not by name) -- no longer needed after the switch.
+      Door frames: with Masonry walls slot 0 of the door object becomes the stone material and the UV tile size
+      TOWER_TILE_W; panels keep `LA_Door`. Not done: per-room tint for tower/castle, tint cycling that avoids two
+      neighbouring rooms sharing a colour, brick colour from a user palette.
 - [x] **Masonry level walls (0.38.0).** `_build_masonry_wall_mesh` reuses `_WallRunBuilder` per merged run of exposed edges
       (same merge rule as the boxes path: consecutive cells, equal elevation offset, same direction and line). Local frame
       -> world: rotation theta = atan2(dx, -dy) so local -y points outward; start point from the run's low/high cell

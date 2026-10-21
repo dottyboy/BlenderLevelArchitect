@@ -33,7 +33,7 @@ from bpy_extras.io_utils import ExportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 38, 0),
+    "version": (0, 39, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -4194,7 +4194,7 @@ def _prop_inside_ring(kind, rot, px, py, geo, tile_size, margin=0.97):
 
 def _build_round_room_masonry_mesh(
     room_meta, room_id_grid, walkable_cells, tile_size, fine_level_height, wall_height,
-    wall_thickness, z_offsets, door_style, door_height, cap_top, seed, name, ruin=0.0,
+    wall_thickness, z_offsets, door_style, door_height, cap_top, seed, name, ruin=0.0, room_colors=False,
 ):
     """Round room walls as brick-textured masonry (the Round Tower's shell
     method, see _TowerBuilder) instead of the n-gon ring of plain boxes: a
@@ -4267,7 +4267,8 @@ def _build_round_room_masonry_mesh(
             continue
         builder.geometry(ground=False)
         z0 = z * fine_level_height + z_offsets.get(nearest, 0.0)
-        big.append(builder.mb, rot=seam, sx=sx, sy=sy, offset=(cx, cy, z0))
+        mat_map = {0: brick_tint_slot(room_id), 1: len(BRICK_TINTS)} if room_colors else None
+        big.append(builder.mb, rot=seam, sx=sx, sy=sy, offset=(cx, cy, z0), mat_map=mat_map)
     return big.to_mesh(name)
 
 
@@ -4424,7 +4425,7 @@ def _build_round_room_walls_mesh(
 def _build_masonry_wall_mesh(
     walkable_cells, tile_size, level_height, wall_height, wall_thickness, z_offsets=None,
     forced_wall_edges=None, skip_cells=None, window_edges=None, window_width=1.0, window_sill=1.0,
-    window_height=1.0, ruin=0.0, seed=1, name="Walls",
+    window_height=1.0, ruin=0.0, seed=1, name="Walls", room_ids=None, room_colors=False,
 ):
     """Ordinary level walls (the exposed edges of rooms and corridors) as
     brick-textured masonry: every straight run of exposed edges becomes one
@@ -4437,12 +4438,16 @@ def _build_masonry_wall_mesh(
     gets an end cap. Returns (mesh, accepted_window_edges) -- a window whose
     opening the builder could not fit (too tall for the wall) is dropped, so
     the caller builds frames/glass only for the accepted ones. Material slots:
-    0 brick, 1 dressed stone."""
+    0 brick, 1 dressed stone; with room_colors the slots are
+    masonry_material_list(True): per-room brick tints (a run is split where
+    the room changes, so a wall belongs to the room on its inner side) then stone."""
     walkable = set(walkable_cells)
     z_offsets = z_offsets or {}
     forced = forced_wall_edges or set()
     skip = skip_cells or set()
     window_edges = window_edges or set()
+    room_ids = room_ids or {}
+    n_tints = len(BRICK_TINTS)
     ht = wall_thickness / 2.0
     edges = []
     for cell in sorted(walkable):
@@ -4475,7 +4480,8 @@ def _build_masonry_wall_mesh(
         i = 0
         while i < len(items):
             j = i
-            while j + 1 < len(items) and items[j + 1][0] == items[j][0] + 1 and items[j + 1][1] == items[i][1]:
+            while (j + 1 < len(items) and items[j + 1][0] == items[j][0] + 1 and items[j + 1][1] == items[i][1]
+                   and (not room_colors or room_ids.get(items[j + 1][2], -1) == room_ids.get(items[i][2], -1))):
                 j += 1
             run = items[i:j + 1]
             i = j + 1
@@ -4520,7 +4526,8 @@ def _build_masonry_wall_mesh(
                         accepted.add((cell, d))
             wb.geometry()
             sx, sy = start[0] - ux * ext_s, start[1] - uy * ext_s
-            big.append(wb.mb, rot=theta, offset=(sx, sy, z * level_height + off))
+            mat_map = {0: brick_tint_slot(room_ids.get(run[0][2], -1)), 1: n_tints} if room_colors else None
+            big.append(wb.mb, rot=theta, offset=(sx, sy, z * level_height + off), mat_map=mat_map)
     return big.to_mesh(name), accepted
 
 
@@ -6510,7 +6517,8 @@ class OBJECT_OT_GenerateLevelWalls(bpy.types.Operator):
                 mesh, ok = _build_masonry_wall_mesh(
                     cells, tile_size, level_height, scene.wfc_wall_height, scene.wfc_wall_thickness,
                     z_offsets=z_offsets, forced_wall_edges=forced_wall_edges, skip_cells=skip_cells,
-                    ruin=scene.wfc_wall_ruin, seed=scene.wfc_seed, name=mesh_name, **window_kwargs,
+                    ruin=scene.wfc_wall_ruin, seed=scene.wfc_seed, name=mesh_name,
+                    room_ids=room_id_grid, room_colors=scene.wfc_masonry_room_colors, **window_kwargs,
                 )
                 accepted_windows.update(ok)
                 return mesh
@@ -6523,8 +6531,8 @@ class OBJECT_OT_GenerateLevelWalls(bpy.types.Operator):
 
         def _wall_materials(mesh_data):
             if masonry_walls:
-                mesh_data.materials.append(get_or_create_tower_brick_material())
-                mesh_data.materials.append(get_or_create_tower_stone_material())
+                for mat_ in masonry_material_list(scene.wfc_masonry_room_colors):
+                    mesh_data.materials.append(mat_)
             else:
                 mesh_data.materials.append(wall_material)
 
@@ -6556,7 +6564,7 @@ class OBJECT_OT_GenerateLevelWalls(bpy.types.Operator):
                     meta_for_floor, room_id_grid, walkable_cells, tile_size, level_height,
                     scene.wfc_wall_height, scene.wfc_wall_thickness, z_offsets,
                     scene.wfc_door_style, scene.wfc_door_height, scene.wfc_wall_cap_top,
-                    scene.wfc_seed, name, ruin=scene.wfc_round_wall_ruin,
+                    scene.wfc_seed, name, ruin=scene.wfc_round_wall_ruin, room_colors=scene.wfc_masonry_room_colors,
                 )
             else:
                 ring_mesh_data = _build_round_room_walls_mesh(
@@ -6570,8 +6578,8 @@ class OBJECT_OT_GenerateLevelWalls(bpy.types.Operator):
             ring_obj = bpy.data.objects.new(name, ring_mesh_data)
             context.collection.objects.link(ring_obj)
             if masonry_rings:
-                ring_mesh_data.materials.append(get_or_create_tower_brick_material())
-                ring_mesh_data.materials.append(get_or_create_tower_stone_material())
+                for mat_ in masonry_material_list(scene.wfc_masonry_room_colors):
+                    ring_mesh_data.materials.append(mat_)
                 ring_obj["gla_masonry_ring"] = True
             else:
                 ring_mesh_data.materials.append(wall_material)
@@ -6813,7 +6821,13 @@ class OBJECT_OT_GenerateLevelDoors(bpy.types.Operator):
 
         # Order matters -- _build_door_mesh bakes material_index 0/1/2 for
         # ordinary/Entrance/Exit respectively, matching this exact order.
-        door_materials = [get_or_create_door_material(), get_or_create_entrance_material(), get_or_create_exit_material()]
+        # With Masonry walls the door FRAMES are dressed stone (the swinging panels stay wood); the frame UVs
+        # use the masonry tile size so the stone blocks come out at the same scale as the walls'.
+        masonry_frames = scene.wfc_wall_style == 'MASONRY'
+        panel_material = get_or_create_door_material()
+        door_materials = [get_or_create_tower_stone_material() if masonry_frames else panel_material,
+                          get_or_create_entrance_material(), get_or_create_exit_material()]
+        door_uv = TOWER_TILE_W if masonry_frames else scene.wfc_uv_tile_size
 
         panel_warnings = []
 
@@ -6830,7 +6844,7 @@ class OBJECT_OT_GenerateLevelDoors(bpy.types.Operator):
             )
             panels = _build_door_panels(
                 doorway_records, scene.wfc_door_height, scene.wfc_door_frame_thickness,
-                door_materials[0], name_prefix, uv_tile_size=scene.wfc_uv_tile_size,
+                panel_material, name_prefix, uv_tile_size=scene.wfc_uv_tile_size,
             )
             if panels:
                 panels_collection = _get_or_create_collection(DOOR_PANELS_COLLECTION_NAME, context.collection)
@@ -6849,7 +6863,7 @@ class OBJECT_OT_GenerateLevelDoors(bpy.types.Operator):
                 meta_for_floor, room_ids, walkable_cells, tile_size, level_height,
                 scene.wfc_door_height, scene.wfc_door_frame_thickness, scene.wfc_room_shape_sides,
                 z_offsets, scene.wfc_door_style, scene.wfc_door_arch_height, name,
-                uv_tile_size=scene.wfc_uv_tile_size,
+                uv_tile_size=door_uv,
             )
             if not round_mesh_data.vertices:
                 bpy.data.meshes.remove(round_mesh_data)
@@ -6876,7 +6890,7 @@ class OBJECT_OT_GenerateLevelDoors(bpy.types.Operator):
                     floor_cells, floor_room_ids, tile_size, level_height,
                     scene.wfc_door_height, scene.wfc_door_frame_thickness, name,
                     merge_distance=scene.wfc_door_merge_distance, z_offsets=z_offsets,
-                    stair_cells=stair_cells, uv_tile_size=scene.wfc_uv_tile_size,
+                    stair_cells=stair_cells, uv_tile_size=door_uv,
                     door_style=scene.wfc_door_style, arch_height=scene.wfc_door_arch_height,
                     entrance_cells=entrance_cells, exit_cells=exit_cells, skip_room_ids=round_room_ids,
                 )
@@ -6901,7 +6915,7 @@ class OBJECT_OT_GenerateLevelDoors(bpy.types.Operator):
                 walkable_cells, room_ids, tile_size, level_height,
                 scene.wfc_door_height, scene.wfc_door_frame_thickness, DOORS_OBJECT_NAME,
                 merge_distance=scene.wfc_door_merge_distance, z_offsets=z_offsets,
-                stair_cells=stair_cells, uv_tile_size=scene.wfc_uv_tile_size,
+                stair_cells=stair_cells, uv_tile_size=door_uv,
                 door_style=scene.wfc_door_style, arch_height=scene.wfc_door_arch_height,
                 entrance_cells=entrance_cells, exit_cells=exit_cells, skip_room_ids=round_room_ids,
             )
@@ -7411,6 +7425,68 @@ def get_or_create_tower_brick_material():
                              "TowerBrick.png", "3a3028")
 
 
+# Per-room brick tints as Hue/Saturation/Value adjustments of the brick albedo (a plain multiply cannot move
+# red-brown bricks toward blue or green): (hue, saturation, value) with Blender's convention, hue 0.5 = no shift.
+# Index 0 is the untinted brick used for corridors; rooms cycle through 1..N-1. The brick hue sits near 0.05,
+# so a hue parameter h shifts it by (h - 0.5).
+BRICK_TINTS = [
+    (0.50, 1.00, 1.00),   # 0 corridors / default
+    (0.53, 0.90, 1.25),   # 1 warm ochre
+    (0.05, 0.55, 1.05),   # 2 slate blue-grey
+    (0.75, 0.60, 1.00),   # 3 mossy green-grey
+    (0.44, 0.85, 1.00),   # 4 rosy red
+    (0.50, 0.70, 0.55),   # 5 dark umber
+    (0.52, 0.45, 1.35),   # 6 pale sandy
+]
+
+
+def brick_tint_slot(room_id):
+    """Material slot for a room's bricks: corridors (room_id < 0) stay untinted."""
+    return 0 if room_id < 0 else 1 + room_id % (len(BRICK_TINTS) - 1)
+
+
+def get_or_create_tower_brick_tint_material(index):
+    """The brick material with BRICK_TINTS[index] applied (Hue/Saturation node between the albedo image and the
+    shader). Index 0 is the plain brick material."""
+    if index == 0:
+        return get_or_create_tower_brick_material()
+    name = f"LA_Tower_Brick_Tint{index}"
+    existing = bpy.data.materials.get(name)
+    if existing is not None:
+        return existing
+    base = get_or_create_tower_brick_material()
+    mat = base.copy()
+    mat.name = name
+    hue, sat, val = BRICK_TINTS[index]
+    import colorsys
+    h0, s0, v0 = colorsys.rgb_to_hsv(*mat.diffuse_color[:3])
+    r, g, b = colorsys.hsv_to_rgb((h0 + hue - 0.5) % 1.0, max(0.0, min(1.0, s0 * sat)), max(0.0, min(1.0, v0 * val)))
+    mat.diffuse_color = (r, g, b, 1.0)
+    if mat.use_nodes and mat.node_tree is not None:
+        nodes, links = mat.node_tree.nodes, mat.node_tree.links
+        bsdf = next((n for n in nodes if n.type == 'BSDF_PRINCIPLED'), None)
+        tex = next((n for n in nodes if n.type == 'TEX_IMAGE' and n.image is not None and "Albedo" in n.image.name), None)
+        if bsdf is not None and tex is not None:
+            hs = nodes.new("ShaderNodeHueSaturation")
+            hs.inputs['Hue'].default_value = hue
+            hs.inputs['Saturation'].default_value = sat
+            hs.inputs['Value'].default_value = val
+            hs.inputs['Fac'].default_value = 1.0
+            links.new(tex.outputs['Color'], hs.inputs['Color'])
+            links.new(hs.outputs['Color'], bsdf.inputs['Base Color'])
+        elif bsdf is not None:
+            bsdf.inputs['Base Color'].default_value = (r, g, b, 1.0)
+    return mat
+
+
+def masonry_material_list(room_colors):
+    """Material slots for masonry meshes: [brick] + [stone], or with per-room colours
+    [tint0 .. tintN-1] + [stone] (see _TowerMesh.append's mat_map)."""
+    if room_colors:
+        return [get_or_create_tower_brick_tint_material(i) for i in range(len(BRICK_TINTS))] + [get_or_create_tower_stone_material()]
+    return [get_or_create_tower_brick_material(), get_or_create_tower_stone_material()]
+
+
 def get_or_create_tower_stone_material():
     return _masonry_material("LA_Tower_Stone", _tower_stone_images() if bpy.data.materials.get("LA_Tower_Stone") is None else None,
                              "TowerStone.png", "3a3632", roughness=0.85)
@@ -7460,7 +7536,7 @@ class _TowerMesh:
         self.mats.append(mat)
         self.smooth.append(smooth)
 
-    def append(self, other, rot=0.0, sx=1.0, sy=1.0, offset=(0.0, 0.0, 0.0)):
+    def append(self, other, rot=0.0, sx=1.0, sy=1.0, offset=(0.0, 0.0, 0.0), mat_map=None):
         """Appends another soup, rotated about Z by rot, then stretched by
         (sx, sy) along X/Y (an ellipse from a circle), then moved. Both
         operations have a positive determinant, so outward-facing winding
@@ -7473,7 +7549,7 @@ class _TowerMesh:
         for ids in other.faces:
             self.faces.append([i + base for i in ids])
         self.uvs.extend(other.uvs)
-        self.mats.extend(other.mats)
+        self.mats.extend([mat_map.get(m, m) for m in other.mats] if mat_map else other.mats)
         self.smooth.extend(other.smooth)
 
     def to_mesh(self, name):
@@ -9425,6 +9501,9 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
         radius_row.prop(scene, "wfc_wall_corner_radius", text="Radius")
         col.separator()
         col.prop(scene, "wfc_wall_style", text="Wall Style")
+        colors_row = col.row(align=True)
+        colors_row.enabled = scene.wfc_wall_style == 'MASONRY' or scene.wfc_round_wall_style == 'MASONRY'
+        colors_row.prop(scene, "wfc_masonry_room_colors", text="Room Brick Colors")
         wall_ruin_row = col.row(align=True)
         wall_ruin_row.enabled = scene.wfc_wall_style == 'MASONRY'
         wall_ruin_row.prop(scene, "wfc_wall_ruin", text="Wall Ruin")
@@ -9911,6 +9990,12 @@ def register():
         default='BOXES',
         description="How ordinary room/corridor walls are built"
     )
+    bpy.types.Scene.wfc_masonry_room_colors = BoolProperty(
+        name="Room Brick Colors", default=True,
+        description="Masonry walls (ordinary and Round rooms): every room gets its own brick tint (warm ochre, "
+                    "slate, moss, rose, umber, sand) so rooms read apart; corridors keep the plain brick. A wall "
+                    "run belongs to the room on its inner side. Off = one brick colour everywhere"
+    )
     bpy.types.Scene.wfc_wall_ruin = FloatProperty(
         name="Wall Ruin", default=0.0, min=0.0, max=1.0, subtype='FACTOR',
         description="Masonry walls only: how ruined the walls are (jagged stepped tops, breaches). Doorways stay "
@@ -10289,6 +10374,7 @@ def unregister():
     del bpy.types.Scene.wfc_wall_corner_rounding
     del bpy.types.Scene.wfc_wall_corner_radius
     del bpy.types.Scene.wfc_wall_style
+    del bpy.types.Scene.wfc_masonry_room_colors
     del bpy.types.Scene.wfc_wall_ruin
     del bpy.types.Scene.wfc_window_chance
     del bpy.types.Scene.wfc_window_width

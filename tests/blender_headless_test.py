@@ -2112,7 +2112,7 @@ for wall_h, wall_t, heights_m, ruin_r in ((0.61, 0.02, (0.3,), 0.0), (3.0, 0.25,
         if not ring_objs:
             continue
         masonry_seen += 1
-        masonry_style_ok = masonry_style_ok and all(len(o.data.materials) == 2 and len(o.data.uv_layers) == 1 for o in ring_objs)
+        masonry_style_ok = masonry_style_ok and all(len(o.data.materials) == len(addon.BRICK_TINTS) + 1 and len(o.data.uv_layers) == 1 for o in ring_objs)
         masonry_style_ok = masonry_style_ok and not [o for o in bpy.data.objects if o.name.startswith(addon.DOORS_ROUND_OBJECT_NAME)]
         bp = bpy.data.objects[addon.BLUEPRINT_OBJECT_NAME]
         ts_m, fh_m = scene.wfc_tile_size, addon._fine_level_height(scene)
@@ -2809,7 +2809,7 @@ for mseed in (3, 7):
         tag = f"Masonry walls (seed {mseed}, ruin {ruin_w})"
         check(f"{tag}: Walls FINISHED", result == {'FINISHED'}, str(result))
         wobjs = [o for o in bpy.data.objects if o.name.startswith(addon.WALLS_OBJECT_NAME) and not o.name.startswith(addon.WALLS_ROUND_OBJECT_NAME)]
-        check(f"{tag}: one wall object, two materials, UVs, no bevel", len(wobjs) == 1 and len(wobjs[0].data.materials) == 2
+        check(f"{tag}: one wall object, two materials, UVs, no bevel", len(wobjs) == 1 and len(wobjs[0].data.materials) == len(addon.BRICK_TINTS) + 1
               and len(wobjs[0].data.uv_layers) == 1 and not wobjs[0].modifiers)
         wo = wobjs[0]
         bp_m = bpy.data.objects[addon.BLUEPRINT_OBJECT_NAME]
@@ -2867,6 +2867,60 @@ for mseed in (3, 7):
             check(f"{tag}: the first face met from inside faces into the room", back_bad == 0, str(back_bad))
             win_o = bpy.data.objects.get(addon.WINDOWS_OBJECT_NAME)
             check(f"{tag}: windows were cut and framed", win_o is not None and len(win_o.data.vertices) > 0)
+# Room brick colours + stone door frames (Masonry walls).
+scene.wfc_wall_style = 'MASONRY'
+scene.wfc_masonry_room_colors = True
+scene.wfc_window_chance = 0.0
+scene.wfc_wall_ruin = 0.0
+scene.wfc_seed = 3
+bpy.ops.object.generate_game_blueprint()
+bpy.ops.object.generate_level_walls()
+bpy.ops.object.generate_level_doors()
+wall_c = [o for o in bpy.data.objects if o.name.startswith(addon.WALLS_OBJECT_NAME) and not o.name.startswith(addon.WALLS_ROUND_OBJECT_NAME)][0]
+tint_mats = [m for m in wall_c.data.materials]
+check("Room colors: one material per tint plus stone, tints are distinct materials",
+      len(tint_mats) == len(addon.BRICK_TINTS) + 1 and len({m.name for m in tint_mats}) == len(tint_mats), str([m.name for m in tint_mats]))
+check("Room colors: a tinted brick material runs the albedo through a Hue/Saturation node set to its tint",
+      all(any(n.type == 'HUE_SAT' and abs(n.inputs['Hue'].default_value - addon.BRICK_TINTS[i + 1][0]) < 1e-4 for n in m.node_tree.nodes)
+          for i, m in enumerate(tint_mats[1:len(addon.BRICK_TINTS)])))
+bp_c = bpy.data.objects[addon.BLUEPRINT_OBJECT_NAME]
+ts_c, fh_c = scene.wfc_tile_size, addon._fine_level_height(scene)
+walk_c, ex_c = addon._read_blueprint_points(bp_c, ts_c, fh_c, ("room_id",))
+meta_c = json.loads(bp_c.get("gla_room_meta", "[]"))
+round_c = {i for i, r in enumerate(meta_c) if r['shape'] == 'ROUND'}
+tree_c = _BVH.FromObject(wall_c, bpy.context.evaluated_depsgraph_get())
+slots_seen, wrong, tested = set(), 0, 0
+for cell in walk_c:
+    rid = ex_c["room_id"].get(cell, -1)
+    if rid in round_c:
+        continue
+    x, y, z = cell
+    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        if (x + dx, y + dy, z) in walk_c:
+            continue
+        h = tree_c.ray_cast(Vector((x * ts_c, y * ts_c, z * fh_c + 0.5)), Vector((dx, dy, 0)), ts_c * 0.7)
+        if h[0] is None:
+            continue
+        tested += 1
+        slot = wall_c.data.polygons[h[2]].material_index
+        slots_seen.add(slot)
+        wrong += slot != addon.brick_tint_slot(rid)
+check("Room colors: the inner face of every wall carries its room's tint slot (corridors untinted)", tested > 25 and wrong == 0, f"{wrong}/{tested}")
+check("Room colors: more than one tint is actually used in a level", len(slots_seen) >= 3, str(sorted(slots_seen)))
+scene.wfc_masonry_room_colors = False
+bpy.ops.object.generate_level_walls()
+wall_n = [o for o in bpy.data.objects if o.name.startswith(addon.WALLS_OBJECT_NAME) and not o.name.startswith(addon.WALLS_ROUND_OBJECT_NAME)][0]
+check("Room colors off: two materials again (brick, stone)", len(wall_n.data.materials) == 2)
+scene.wfc_masonry_room_colors = True
+doors_m = [o for o in bpy.data.objects if o.name.startswith(addon.DOORS_OBJECT_NAME) and "_Panel_" not in o.name and not o.name.startswith(addon.DOORS_ROUND_OBJECT_NAME)]
+check("Stone frames: with Masonry walls the door frame object uses the dressed-stone material in its ordinary slot",
+      len(doors_m) >= 1 and all(o.data.materials[0].name == "LA_Tower_Stone" for o in doors_m), str([o.data.materials[0].name for o in doors_m]))
+panels_m = [o for o in bpy.data.objects if "_Panel_" in o.name and o.name.startswith(addon.DOORS_OBJECT_NAME)]
+check("Stone frames: the swinging panels stay wood", len(panels_m) >= 1 and all(o.data.materials[0].name == "LA_Door" for o in panels_m))
+scene.wfc_wall_style = 'BOXES'
+bpy.ops.object.generate_level_doors()
+doors_b = [o for o in bpy.data.objects if o.name.startswith(addon.DOORS_OBJECT_NAME) and "_Panel_" not in o.name and not o.name.startswith(addon.DOORS_ROUND_OBJECT_NAME)]
+check("Stone frames: Boxes walls keep wooden door frames", all(o.data.materials[0].name == "LA_Door" for o in doors_b))
 scene.wfc_wall_style = 'BOXES'
 scene.wfc_wall_ruin = 0.0
 scene.wfc_window_chance = 0.0

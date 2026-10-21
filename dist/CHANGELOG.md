@@ -3,6 +3,20 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.39.0
+
+- **Room Brick Colors** (Walls tab, on by default with Masonry): every room gets its own brick tint -- warm
+  ochre, slate blue-grey, mossy green, rosy red, dark umber, pale sand -- while corridors keep the plain brick, so
+  rooms read apart at a glance. Applies to masonry Round-room rings and to ordinary masonry walls (a wall run belongs
+  to the room on its inner side; runs are split where the room changes). The tint is a Hue/Saturation node between the
+  albedo image and the shader (a plain colour multiply cannot move red-brown bricks toward blue or green), so it
+  survives glTF export as a colour-adjusted material. Off = one brick colour, two material slots as before.
+- **Stone door frames** with Masonry walls: the door frame object uses the dressed-stone material (UVs at the
+  masonry scale) while the swinging panels stay wood. Boxes walls keep wooden frames.
+- Tests: material slots (one per tint plus stone), Hue/Saturation node per tint, the inner face of every wall carries
+  its room's slot (corridors untinted), several tints used in one level, colours off = two slots, stone frames /
+  wooden panels / wooden frames with Boxes.
+
 ## 0.38.0
 
 - **New: Masonry walls for ordinary rooms and corridors** (Walls tab, "Wall Style": Boxes (default) / Masonry).
