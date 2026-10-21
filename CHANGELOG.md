@@ -3,6 +3,19 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.38.0
+
+- **New: Masonry walls for ordinary rooms and corridors** (Walls tab, "Wall Style": Boxes (default) / Masonry).
+  Every straight run of exposed wall edges becomes one smooth brick-textured wall with a dressed-stone cap,
+  scattered proud stones and, where Window Chance put a window, a real stone-framed opening plus the existing
+  frame and glass. Corners close without overlapping caps (the horizontal run reaches half a thickness past the
+  corner, the vertical run stops half a thickness short), doorway jambs get end caps, and nothing blocks a doorway.
+  "Wall Ruin" (0..1) breaks these walls down like the tower's and the castle's. Masonry ignores Organic
+  Irregularity and the corner-rounding Bevel; collision and glTF export include it like any other wall object.
+- Tests: across 2 seeds x intact/ruined: no passage between adjacent walkable cells is blocked (0.3 m and 1.2 m
+  rays), every exposed edge is walled, diagonal rays out of every convex corner hit a wall, the first face met from
+  inside faces into the room, windows are cut and framed.
+
 ## 0.37.0
 
 - **Export Package per Floor** (Export tab; or "One package per floor" in the Game Package dialog). Writes

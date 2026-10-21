@@ -81,7 +81,8 @@ be pressed afterward, same as any other setting. The steps build on each other's
    (via a Geometry Nodes modifier). Optional continuous room elevation and Corridor Stairs are
    both configured here too, before generating.
 2. **Step 2: Generate Walls** — builds wall geometry from the blueprint's layout. Optional
-   "Per Floor" grouping splits walls into one object per floor.
+   "Per Floor" grouping splits walls into one object per floor. **Wall Style: Masonry** builds brick-textured
+   walls with stone caps and framed windows (plus a Wall Ruin slider); windows can be cut through any room wall.
 3. **Step 3: Generate Stairs** — builds stair geometry (stepped stairs or a smooth ramp).
    "Per Floor" or "Per Stair" grouping controls how many separate objects you get.
 4. **Step 4: Generate Doors** — door frames at every point a corridor enters a room or two rooms

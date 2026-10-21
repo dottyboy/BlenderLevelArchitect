@@ -33,7 +33,7 @@ from bpy_extras.io_utils import ExportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 37, 0),
+    "version": (0, 38, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -4421,6 +4421,109 @@ def _build_round_room_walls_mesh(
     return mesh_data
 
 
+def _build_masonry_wall_mesh(
+    walkable_cells, tile_size, level_height, wall_height, wall_thickness, z_offsets=None,
+    forced_wall_edges=None, skip_cells=None, window_edges=None, window_width=1.0, window_sill=1.0,
+    window_height=1.0, ruin=0.0, seed=1, name="Walls",
+):
+    """Ordinary level walls (the exposed edges of rooms and corridors) as
+    brick-textured masonry: every straight run of exposed edges becomes one
+    _WallRunBuilder wall (smooth textured skins, dressed-stone caps, proud
+    stones, stone frames around windows, optional ruin). Same run merging as
+    _build_wall_mesh's merged path (a run ends where the exposed edge ends or
+    the cell elevation changes). Corners: a run end that meets a perpendicular
+    exposed edge is extended by half the thickness and left open (the two
+    runs overlap and close the corner); any other end is a doorway jamb and
+    gets an end cap. Returns (mesh, accepted_window_edges) -- a window whose
+    opening the builder could not fit (too tall for the wall) is dropped, so
+    the caller builds frames/glass only for the accepted ones. Material slots:
+    0 brick, 1 dressed stone."""
+    walkable = set(walkable_cells)
+    z_offsets = z_offsets or {}
+    forced = forced_wall_edges or set()
+    skip = skip_cells or set()
+    window_edges = window_edges or set()
+    ht = wall_thickness / 2.0
+    edges = []
+    for cell in sorted(walkable):
+        if cell in skip:
+            continue
+        x, y, z = cell
+        for d in HORIZONTAL_NEIGHBORS:
+            if (x + d[0], y + d[1], z) not in walkable or (cell, d) in forced:
+                edges.append((cell, d))
+    # which wall axes touch each corner point (in half-tile units)
+    axes = {}
+    for (x, y, z), (dx, dy) in edges:
+        if dx != 0:
+            for sy in (-1, 1):
+                axes.setdefault((2 * x + dx, 2 * y + sy, z), set()).add('v')
+        else:
+            for sx in (-1, 1):
+                axes.setdefault((2 * x + sx, 2 * y + dy, z), set()).add('h')
+    # merge into runs
+    lines = {}
+    for (x, y, z), d in edges:
+        key = ('h', y * 2 + d[1], d, z) if d[0] == 0 else ('v', x * 2 + d[0], d, z)
+        lines.setdefault(key, []).append((x if d[0] == 0 else y, z_offsets.get((x, y, z), 0.0), (x, y, z)))
+    big = _TowerMesh()
+    accepted = set()
+    seq = 0
+    for key, items in lines.items():
+        axis, line2, d, z = key
+        items.sort()
+        i = 0
+        while i < len(items):
+            j = i
+            while j + 1 < len(items) and items[j + 1][0] == items[j][0] + 1 and items[j + 1][1] == items[i][1]:
+                j += 1
+            run = items[i:j + 1]
+            i = j + 1
+            p0, p1, off = run[0][0], run[-1][0], run[0][1]
+            length = (p1 - p0 + 1) * tile_size
+            theta = math.atan2(d[0], -d[1])  # local -y must point along d (outward)
+            ux, uy = math.cos(theta), math.sin(theta)
+            if axis == 'h':
+                line = line2 * 0.5 * tile_size
+                start = ((p0 - 0.5) * tile_size, line) if ux > 0 else ((p1 + 0.5) * tile_size, line)
+                s_key = (2 * p0 - 1, line2, z) if ux > 0 else (2 * p1 + 1, line2, z)
+                e_key = (2 * p1 + 1, line2, z) if ux > 0 else (2 * p0 - 1, line2, z)
+                perp = 'v'
+            else:
+                line = line2 * 0.5 * tile_size
+                start = (line, (p0 - 0.5) * tile_size) if uy > 0 else (line, (p1 + 0.5) * tile_size)
+                s_key = (line2, 2 * p0 - 1, z) if uy > 0 else (line2, 2 * p1 + 1, z)
+                e_key = (line2, 2 * p1 + 1, z) if uy > 0 else (line2, 2 * p0 - 1, z)
+                perp = 'h'
+            corner_s = perp in axes.get(s_key, ())
+            corner_e = perp in axes.get(e_key, ())
+            # At a corner the horizontal-axis run reaches half a thickness past the corner point (covering the
+            # corner square) and the vertical-axis run stops half a thickness short (abutting the other's
+            # skin), so no two caps ever overlap (coincident faces would also self-shadow in a renderer).
+            sgn = 1.0 if axis == 'h' else -1.0
+            ext_s = sgn * ht if corner_s else 0.0
+            ext_e = sgn * ht if corner_e else 0.0
+            wb = _WallRunBuilder(
+                length + ext_s + ext_e, wall_height, wall_thickness, battlements=False, seed=seed + seq,
+                stones=int(length * wall_height * 0.2), ruin=ruin, plinth=False, rubble=False,
+                end_caps=(not corner_s, not corner_e),
+            )
+            seq += 1
+            for _, _, cell in run:
+                if (cell, d) in window_edges:
+                    pos = (cell[0] if axis == 'h' else cell[1])
+                    local = (pos - p0 + 0.5) * tile_size if (ux > 0 if axis == 'h' else uy > 0) else (p1 - pos + 0.5) * tile_size
+                    w = min(window_width, tile_size - 0.2)
+                    sill = max(0.0, min(window_sill, wall_height - 0.2))
+                    top = min(sill + window_height, wall_height - 0.1)
+                    if wb.add_opening(local + ext_s, w, sill, top - sill, 'rect'):
+                        accepted.add((cell, d))
+            wb.geometry()
+            sx, sy = start[0] - ux * ext_s, start[1] - uy * ext_s
+            big.append(wb.mb, rot=theta, offset=(sx, sy, z * level_height + off))
+    return big.to_mesh(name), accepted
+
+
 def _build_wall_mesh(
     walkable_cells, tile_size, level_height, wall_height, wall_thickness, cap_top, name,
     organic_amount=0.0, z_offsets=None, forced_wall_edges=None, uv_tile_size=1.0, skip_cells=None,
@@ -6399,6 +6502,31 @@ class OBJECT_OT_GenerateLevelWalls(bpy.types.Operator):
             window_edges=window_edges, window_width=scene.wfc_window_width,
             window_sill=scene.wfc_window_sill, window_height=scene.wfc_window_height,
         )
+        masonry_walls = scene.wfc_wall_style == 'MASONRY'
+        accepted_windows = set()
+
+        def _walls_mesh(cells, mesh_name, organic):
+            if masonry_walls:
+                mesh, ok = _build_masonry_wall_mesh(
+                    cells, tile_size, level_height, scene.wfc_wall_height, scene.wfc_wall_thickness,
+                    z_offsets=z_offsets, forced_wall_edges=forced_wall_edges, skip_cells=skip_cells,
+                    ruin=scene.wfc_wall_ruin, seed=scene.wfc_seed, name=mesh_name, **window_kwargs,
+                )
+                accepted_windows.update(ok)
+                return mesh
+            return _build_wall_mesh(
+                cells, tile_size, level_height, scene.wfc_wall_height, scene.wfc_wall_thickness,
+                scene.wfc_wall_cap_top, mesh_name, organic_amount=organic, z_offsets=z_offsets,
+                forced_wall_edges=forced_wall_edges, uv_tile_size=scene.wfc_uv_tile_size,
+                skip_cells=skip_cells, **window_kwargs,
+            )
+
+        def _wall_materials(mesh_data):
+            if masonry_walls:
+                mesh_data.materials.append(get_or_create_tower_brick_material())
+                mesh_data.materials.append(get_or_create_tower_stone_material())
+            else:
+                mesh_data.materials.append(wall_material)
 
         if scene.wfc_simple_materials:
             wall_material = get_or_create_simple_wall_material()
@@ -6457,20 +6585,16 @@ class OBJECT_OT_GenerateLevelWalls(bpy.types.Operator):
                 cells_by_floor.setdefault(cell[2] // sub_levels, set()).add(cell)
             for floor_idx in sorted(cells_by_floor):
                 name = f"{WALLS_OBJECT_NAME}_Floor{floor_idx}"
-                wall_mesh_data = _build_wall_mesh(
-                    cells_by_floor[floor_idx], tile_size, level_height,
-                    scene.wfc_wall_height, scene.wfc_wall_thickness, scene.wfc_wall_cap_top,
-                    name, organic_amount=organic_amount, z_offsets=z_offsets,
-                    forced_wall_edges=forced_wall_edges, uv_tile_size=scene.wfc_uv_tile_size,
-                    skip_cells=skip_cells, **window_kwargs,
-                )
+                wall_mesh_data = _walls_mesh(cells_by_floor[floor_idx], name, organic_amount)
                 if not wall_mesh_data.vertices:
                     bpy.data.meshes.remove(wall_mesh_data)
                 else:
                     obj = bpy.data.objects.new(name, wall_mesh_data)
                     context.collection.objects.link(obj)
-                    wall_mesh_data.materials.append(wall_material)
+                    _wall_materials(wall_mesh_data)
                     _add_viewport_color_attribute(wall_mesh_data)
+                    if masonry_walls:
+                        obj["gla_masonry_ring"] = True
                     created.append(obj)
 
                 meta_for_floor = [r for r in room_meta if r['z'] // sub_levels == floor_idx]
@@ -6478,17 +6602,13 @@ class OBJECT_OT_GenerateLevelWalls(bpy.types.Operator):
                 if ring_obj is not None:
                     created.append(ring_obj)
         else:
-            wall_mesh_data = _build_wall_mesh(
-                walkable_cells, tile_size, level_height,
-                scene.wfc_wall_height, scene.wfc_wall_thickness, scene.wfc_wall_cap_top,
-                WALLS_OBJECT_NAME, organic_amount=organic_amount, z_offsets=z_offsets,
-                forced_wall_edges=forced_wall_edges, uv_tile_size=scene.wfc_uv_tile_size,
-                skip_cells=skip_cells, **window_kwargs,
-            )
+            wall_mesh_data = _walls_mesh(walkable_cells, WALLS_OBJECT_NAME, organic_amount)
             obj = bpy.data.objects.new(WALLS_OBJECT_NAME, wall_mesh_data)
             context.collection.objects.link(obj)
-            wall_mesh_data.materials.append(wall_material)
+            _wall_materials(wall_mesh_data)
             _add_viewport_color_attribute(wall_mesh_data)
+            if masonry_walls:
+                obj["gla_masonry_ring"] = True
             created.append(obj)
 
             ring_obj = _add_round_ring(WALLS_ROUND_OBJECT_NAME, room_meta)
@@ -6503,6 +6623,8 @@ class OBJECT_OT_GenerateLevelWalls(bpy.types.Operator):
 
         # Rounding is applied before the window object is added on purpose:
         # frames/glass are separate geometry and must stay crisp.
+        if masonry_walls:
+            window_edges = accepted_windows  # only the openings the masonry builder could actually cut
         if window_edges:
             win_mesh = _build_window_mesh(
                 window_edges, tile_size, level_height, scene.wfc_wall_thickness,
@@ -7636,8 +7758,9 @@ class _WallRunBuilder:
             pts = [(xb, -hy, lo), (xb, -hy, hi), (xb, hy, hi), (xb, hy, lo)]
             self._quad('step', pts, (1.0 if lower_is_cb else -1.0, 0.0, 0.0), 0,
                        [(0.0, lo / self.tile_h), (0.0, hi / self.tile_h), (self.t / self.tile_w, hi / self.tile_h), (self.t / self.tile_w, lo / self.tile_h)])
-        if self.end_caps:
-            for x, nx in ((0.0, -1.0), (self.L, 1.0)):
+        caps = tuple(self.end_caps) if isinstance(self.end_caps, (tuple, list)) else (bool(self.end_caps),) * 2
+        for (x, nx), cap in zip(((0.0, -1.0), (self.L, 1.0)), caps):
+            if cap:
                 c = cols[0] if x == 0.0 else cols[-1]
                 top = c['gap']['spring'] if c['gap'] is not None else c['top']
                 pts = [(x, -hy, 0.0), (x, -hy, top), (x, hy, top), (x, hy, 0.0)]
@@ -9301,6 +9424,10 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
         radius_row.enabled = scene.wfc_wall_corner_rounding
         radius_row.prop(scene, "wfc_wall_corner_radius", text="Radius")
         col.separator()
+        col.prop(scene, "wfc_wall_style", text="Wall Style")
+        wall_ruin_row = col.row(align=True)
+        wall_ruin_row.enabled = scene.wfc_wall_style == 'MASONRY'
+        wall_ruin_row.prop(scene, "wfc_wall_ruin", text="Wall Ruin")
         col.prop(scene, "wfc_round_wall_style", text="Round Rooms")
         ruin_row = col.row(align=True)
         ruin_row.enabled = scene.wfc_round_wall_style == 'MASONRY'
@@ -9773,6 +9900,22 @@ def register():
         description="Bevel width for Round Corners -- Blender's own Clamp Overlap keeps an "
                     "oversized radius from self-intersecting on a thin wall"
     )
+    bpy.types.Scene.wfc_wall_style = EnumProperty(
+        name="Wall Style",
+        items=[
+            ('BOXES', "Boxes", "Plain merged boxes along every exposed edge (default, unchanged)"),
+            ('MASONRY', "Masonry", "Brick-textured walls: one smooth textured wall per straight run, dressed-stone "
+                                   "caps and window frames, scattered proud stones, optional ruin. Corners overlap "
+                                   "and close; doorway jambs get end caps. Ignores Organic Irregularity"),
+        ],
+        default='BOXES',
+        description="How ordinary room/corridor walls are built"
+    )
+    bpy.types.Scene.wfc_wall_ruin = FloatProperty(
+        name="Wall Ruin", default=0.0, min=0.0, max=1.0, subtype='FACTOR',
+        description="Masonry walls only: how ruined the walls are (jagged stepped tops, breaches). Doorways stay "
+                    "passable. 0 = intact"
+    )
     bpy.types.Scene.wfc_window_chance = FloatProperty(
         name="Window Chance", default=0.0, min=0.0, max=1.0, subtype='FACTOR',
         description="Chance that each exposed room-wall edge gets a real window opening (cut "
@@ -10145,6 +10288,8 @@ def unregister():
     del bpy.types.Scene.wfc_wall_grouping
     del bpy.types.Scene.wfc_wall_corner_rounding
     del bpy.types.Scene.wfc_wall_corner_radius
+    del bpy.types.Scene.wfc_wall_style
+    del bpy.types.Scene.wfc_wall_ruin
     del bpy.types.Scene.wfc_window_chance
     del bpy.types.Scene.wfc_window_width
     del bpy.types.Scene.wfc_window_sill

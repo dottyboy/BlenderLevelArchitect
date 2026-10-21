@@ -2784,6 +2784,93 @@ with tempfile.TemporaryDirectory() as tmp_f:
     check("Per-floor package: glb files are real", all(os.path.getsize(os.path.join(tmp_f, f"deep_f{k}.glb")) > 5_000 for k in (0, 1)))
 check("Per-floor package: whole-level package still works with the cache (floors 0 and 1 present)", len(pkg_whole["floors"]) == 2)
 
+# Masonry walls for ordinary room/corridor walls.
+from mathutils.bvhtree import BVHTree as _BVH
+scene.wfc_width, scene.wfc_length, scene.wfc_height = 14, 14, 1
+scene.wfc_rooms_min, scene.wfc_rooms_max = 5, 7
+scene.wfc_room_size_min, scene.wfc_room_size_max = 3, 5
+scene.wfc_room_shape = 'MIXED'
+scene.wfc_sub_levels_per_floor = 1
+scene.wfc_level_height = 4.5
+scene.wfc_tile_size = 3.0
+scene.wfc_wall_height, scene.wfc_wall_thickness = 3.0, 0.3
+scene.wfc_wall_grouping = 'SINGLE' if 'SINGLE' in [i.identifier for i in bpy.types.Scene.bl_rna.properties['wfc_wall_grouping'].enum_items] else scene.wfc_wall_grouping
+scene.wfc_organic_amount = 0.0
+scene.wfc_window_chance, scene.wfc_window_width, scene.wfc_window_sill, scene.wfc_window_height = 0.5, 1.0, 1.0, 1.0
+scene.wfc_round_wall_style = 'MASONRY'
+scene.wfc_wall_style = 'MASONRY'
+scene.wfc_random_seed = False
+for mseed in (3, 7):
+    scene.wfc_seed = mseed
+    for ruin_w in (0.0, 1.0):
+        scene.wfc_wall_ruin = ruin_w
+        bpy.ops.object.generate_game_blueprint()
+        result = bpy.ops.object.generate_level_walls()
+        tag = f"Masonry walls (seed {mseed}, ruin {ruin_w})"
+        check(f"{tag}: Walls FINISHED", result == {'FINISHED'}, str(result))
+        wobjs = [o for o in bpy.data.objects if o.name.startswith(addon.WALLS_OBJECT_NAME) and not o.name.startswith(addon.WALLS_ROUND_OBJECT_NAME)]
+        check(f"{tag}: one wall object, two materials, UVs, no bevel", len(wobjs) == 1 and len(wobjs[0].data.materials) == 2
+              and len(wobjs[0].data.uv_layers) == 1 and not wobjs[0].modifiers)
+        wo = wobjs[0]
+        bp_m = bpy.data.objects[addon.BLUEPRINT_OBJECT_NAME]
+        ts_m, fh_m = scene.wfc_tile_size, addon._fine_level_height(scene)
+        walk_m, ex_m = addon._read_blueprint_points(bp_m, ts_m, fh_m, ("room_id",))
+        round_ids = {i for i, r in enumerate(json.loads(bp_m.get("gla_room_meta", "[]"))) if r['shape'] == 'ROUND'}
+        ring_cells = {c for c, rid in ex_m["room_id"].items() if rid in round_ids}
+        deps_m = bpy.context.evaluated_depsgraph_get()
+        tree_m = _BVH.FromObject(wo, deps_m)
+        ring_objs_m = [o for o in bpy.data.objects if o.name.startswith(addon.WALLS_ROUND_OBJECT_NAME)]
+        trees_all = [tree_m] + [_BVH.FromObject(o, deps_m) for o in ring_objs_m]
+        blocked = leaks = checked_edges = pairs_m = back_bad = corner_leaks = corners_m = 0
+        for cell in walk_m:
+            x, y, z = cell
+            if cell in ring_cells:
+                continue
+            ox, oy = x * ts_m, y * ts_m
+            exposed_dirs = []
+            for dx, dy in HORIZONTAL_NEIGHBORS if False else ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                nb = (x + dx, y + dy, z)
+                if nb in walk_m:
+                    if dx > 0 or dy > 0:
+                        pairs_m += 1
+                        for zr in (0.3, 1.2):
+                            o = Vector((ox, oy, z * fh_m + zr))
+                            if any(t.ray_cast(o, Vector((dx, dy, 0)), ts_m * 0.98)[0] is not None for t in trees_all):
+                                blocked += 1
+                                break
+                else:
+                    exposed_dirs.append((dx, dy))
+                    if nb in ring_cells:
+                        continue
+                    checked_edges += 1
+                    o = Vector((ox, oy, z * fh_m + 0.5))
+                    h = tree_m.ray_cast(o, Vector((dx, dy, 0)), ts_m * 0.7)
+                    if h[0] is None and not any(t.ray_cast(o, Vector((dx, dy, 0)), ts_m * 0.7)[0] is not None for t in trees_all):
+                        leaks += 1
+                    elif h[0] is not None and h[1].dot(Vector((dx, dy, 0))) > -0.0 and ruin_w == 0.0:
+                        back_bad += 1   # the first face met must look back into the room
+            if len(exposed_dirs) >= 2:
+                for i_a in range(len(exposed_dirs)):
+                    for i_b in range(i_a + 1, len(exposed_dirs)):
+                        a_, b_ = exposed_dirs[i_a], exposed_dirs[i_b]
+                        if a_[0] * b_[0] + a_[1] * b_[1] != 0:
+                            continue
+                        corners_m += 1
+                        d_ = Vector((a_[0] + b_[0], a_[1] + b_[1], 0.0)).normalized()
+                        o = Vector((ox, oy, z * fh_m + 0.5))
+                        if not any(t.ray_cast(o, d_, ts_m * 1.0)[0] is not None for t in trees_all):
+                            corner_leaks += 1
+        check(f"{tag}: no walkable passage is blocked by a wall", pairs_m > 25 and blocked == 0, f"{blocked}/{pairs_m}")
+        check(f"{tag}: every exposed room/corridor edge is walled (nothing leaks at 0.5 m)", checked_edges > 25 and leaks == 0, f"{leaks}/{checked_edges}")
+        check(f"{tag}: corners are closed (diagonal rays out of every convex corner hit a wall)", corners_m > 5 and corner_leaks == 0, f"{corner_leaks}/{corners_m}")
+        if ruin_w == 0.0:
+            check(f"{tag}: the first face met from inside faces into the room", back_bad == 0, str(back_bad))
+            win_o = bpy.data.objects.get(addon.WINDOWS_OBJECT_NAME)
+            check(f"{tag}: windows were cut and framed", win_o is not None and len(win_o.data.vertices) > 0)
+scene.wfc_wall_style = 'BOXES'
+scene.wfc_wall_ruin = 0.0
+scene.wfc_window_chance = 0.0
+
 # glTF round trip embeds the packed textures.
 with tempfile.TemporaryDirectory() as tmp:
     path = os.path.join(tmp, "tower.glb")

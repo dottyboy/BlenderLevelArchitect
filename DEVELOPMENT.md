@@ -4,7 +4,7 @@ Internal dev-facing doc: what's built, what's known-broken, what's next. Not for
 (see `dist/README.md` for that). Source of truth for the addon's actual behavior is always
 `levelArchitect_v2.py` — this file can drift out of date; the code can't.
 
-Current version: **0.37.0** (see `bl_info` in the source file).
+Current version: **0.38.0** (see `bl_info` in the source file).
 
 §2 (Development tree) was condensed 2026-08-21 — dropped the blow-by-blow investigation
 narrative and per-run stress-test numbers from older, fully-resolved entries, kept every
@@ -753,6 +753,17 @@ GN complexity there specifically.
       too zoomed-out to show doorway-level detail) confirmed the frame visibly follows the wall's
       curve right at the opening, not standing at a mismatched straight angle against it.
 
+- [x] **Masonry level walls (0.38.0).** `_build_masonry_wall_mesh` reuses `_WallRunBuilder` per merged run of exposed edges
+      (same merge rule as the boxes path: consecutive cells, equal elevation offset, same direction and line). Local frame
+      -> world: rotation theta = atan2(dx, -dy) so local -y points outward; start point from the run's low/high cell
+      depending on the sign of u. Corner detection from a map of half-tile corner points to the axes of the exposed edge
+      segments meeting there. The first version extended BOTH runs at a corner by half a thickness: the overlapping
+      coplanar caps self-shadowed to black squares in Cycles (and would z-fight anywhere); now only the horizontal-axis
+      run extends and the vertical one is trimmed. Windows: `add_opening` may reject an opening that does not fit under
+      the wall top, so the builder returns the accepted window edges and the frame/glass object is built for those only.
+      Not done: masonry for stair/corridor-stair forced walls beyond the same path, per-room brick colour, doors set
+      into masonry with stone frames (door frames are still the old boxes), props placed against the textured walls
+      are unchanged.
 - [x] **Per-floor packages (0.37.0).** Floors are separate locations on the engine side, which avoids a y-aware walker,
       occlusion of upper floors and picking planes: each floor's glb holds only its objects (`_Floor<k>` name match;
       torch mesh left out, lights/props come from the JSON), stairs become fade links. Stair geometry used: a stair
