@@ -4,7 +4,7 @@ Internal dev-facing doc: what's built, what's known-broken, what's next. Not for
 (see `dist/README.md` for that). Source of truth for the addon's actual behavior is always
 `levelArchitect_v2.py` — this file can drift out of date; the code can't.
 
-Current version: **0.39.0** (see `bl_info` in the source file).
+Current version: **0.40.0** (see `bl_info` in the source file).
 
 §2 (Development tree) was condensed 2026-08-21 — dropped the blow-by-blow investigation
 narrative and per-run stress-test numbers from older, fully-resolved entries, kept every
@@ -753,6 +753,10 @@ GN complexity there specifically.
       too zoomed-out to show doorway-level detail) confirmed the frame visibly follows the wall's
       curve right at the opening, not standing at a mismatched straight angle against it.
 
+- [x] **Tower / castle brick colour (0.40.0).** `_remap_soup_materials` for a single soup (tower), `mat_map` per part for the
+      castle (`part_map`: one tint, or Mixed = walls 1, keep 5, towers 2/3/4/6 by index). Any direct `poly(..., mat)` call
+      outside the builders (the courtyard slab) must use the stone slot of the list in use -- slot 1 means "tint 1" once the
+      8-slot list is active.
 - [x] **Room brick colours + stone door frames (0.39.0).** `_TowerMesh.append(..., mat_map)` remaps the builders' slot 0
       (brick) / 1 (stone) per room: slot = `brick_tint_slot(room_id)` (0 for corridors, 1 + rid % (N-1) for rooms), stone
       is slot N. Material list = `masonry_material_list(room_colors)`. The first idea, multiplying the albedo by an RGB

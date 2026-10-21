@@ -3,6 +3,15 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.40.0
+
+- **Brick Color for the Round Tower and the Castle** (Tower and Castle tabs). Pick Plain or one of the room tints
+  (warm ochre, slate, moss, rose, dark umber, pale sand); the castle also offers **Mixed** -- walls ochre, keep umber,
+  and each corner tower its own tint (slate / moss / rose / sand). Plain keeps the old two-material setup, a tint
+  uses the same material list as Room Brick Colors. Fixed on the way: the castle's courtyard slab would have taken a
+  brick tint instead of the stone material.
+- Tests: tower Plain/Ochre material slots, castle Plain/Slate/Mixed slot sets.
+
 ## 0.39.0
 
 - **Room Brick Colors** (Walls tab, on by default with Masonry): every room gets its own brick tint -- warm

@@ -33,7 +33,7 @@ from bpy_extras.io_utils import ExportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 39, 0),
+    "version": (0, 40, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -7440,6 +7440,18 @@ BRICK_TINTS = [
 ]
 
 
+BRICK_COLOR_ITEMS = [
+    ('PLAIN', "Plain", "The plain brick colour"),
+    ('OCHRE', "Warm Ochre", ""),
+    ('SLATE', "Slate", ""),
+    ('MOSS', "Moss", ""),
+    ('ROSE', "Rose", ""),
+    ('UMBER', "Dark Umber", ""),
+    ('SAND', "Pale Sand", ""),
+]
+BRICK_COLOR_INDEX = {key: i for i, (key, _, _) in enumerate(BRICK_COLOR_ITEMS)}
+
+
 def brick_tint_slot(room_id):
     """Material slot for a room's bricks: corridors (room_id < 0) stay untinted."""
     return 0 if room_id < 0 else 1 + room_id % (len(BRICK_TINTS) - 1)
@@ -7897,6 +7909,13 @@ class _WallRunBuilder:
         self._stones(stones)
         self._rubble()
         return self.mb
+
+
+def _remap_soup_materials(soup, brick_slot):
+    """Point a finished soup's brick faces (slot 0) at BRICK tint slot `brick_slot` and its stone faces (slot 1)
+    at the stone slot of masonry_material_list(True)."""
+    stone = len(BRICK_TINTS)
+    soup.mats = [brick_slot if m == 0 else stone for m in soup.mats]
 
 
 class _TowerBuilder:
@@ -8498,12 +8517,16 @@ class OBJECT_OT_GenerateLevelTower(bpy.types.Operator):
             stair_start_deg=scene.wfc_tower_door_angle + 60.0,
         )
         _tower_openings_from_settings(builder, scene)
-        mesh = builder.build(TOWER_OBJECT_NAME)
+        tint = BRICK_COLOR_INDEX[scene.wfc_tower_brick_color]
+        builder.geometry()
+        if tint:
+            _remap_soup_materials(builder.mb, tint)
+        mesh = builder.mb.to_mesh(TOWER_OBJECT_NAME)
         obj = bpy.data.objects.new(TOWER_OBJECT_NAME, mesh)
         context.collection.objects.link(obj)
         obj.location = scene.cursor.location
-        mesh.materials.append(get_or_create_tower_brick_material())
-        mesh.materials.append(get_or_create_tower_stone_material())
+        for mat_ in masonry_material_list(bool(tint)):
+            mesh.materials.append(mat_)
         _add_viewport_color_attribute(mesh)
         for o in context.selected_objects:
             o.select_set(False)
@@ -8537,7 +8560,7 @@ def _castle_wall_openings(wb, gate, wall_h, kind_gate='arch'):
 
 
 def _build_castle_mesh(width, depth, wall_h, wall_t, tower_r, tower_h, gate, keep, ruin, detail, seed,
-                       tower_wall=0.55, interior=True):
+                       tower_wall=0.55, interior=True, brick_color='PLAIN'):
     """A walled castle assembled from the Round Tower and straight wall run
     builders: four corner towers, four curtain walls whose ends are buried in
     the tower masonry, a gate arch in the south wall, arrow slits, an
@@ -8546,12 +8569,24 @@ def _build_castle_mesh(width, depth, wall_h, wall_t, tower_r, tower_h, gate, kee
     Ruin amount is shared by all parts (each part gets its own seed)."""
     big = _TowerMesh()
     W, D = width, depth
+    # brick colour: one tint for the whole castle, or MIXED = walls, keep and each tower get their own
+    mixed = brick_color == 'MIXED'
+    base_tint = 0 if mixed else BRICK_COLOR_INDEX.get(brick_color, 0)
+
+    def part_map(kind, i):
+        if mixed:
+            tint = (2, 3, 4, 6)[i % 4] if kind == 'tower' else (1 if kind == 'wall' else 5)
+        else:
+            tint = base_tint
+        return {0: tint, 1: len(BRICK_TINTS)} if (mixed or base_tint) else None
+
     stones_scale = {'LOW': 0.0, 'MEDIUM': 1.0, 'HIGH': 3.0}.get(detail, 1.0)
     tower_h = max(tower_h, wall_h + 3.0)
     hy = wall_t / 2.0
     # -- courtyard
     for pts in ([(-W / 2, -D / 2, 0.0), (W / 2, -D / 2, 0.0), (W / 2, D / 2, 0.0), (-W / 2, D / 2, 0.0)],):
-        big.poly('yard', pts, [(p[0] / TOWER_TILE_W, p[1] / TOWER_TILE_W) for p in pts], (0.0, 0.0, 1.0), 1)
+        big.poly('yard', pts, [(p[0] / TOWER_TILE_W, p[1] / TOWER_TILE_W) for p in pts], (0.0, 0.0, 1.0),
+                 len(BRICK_TINTS) if (mixed or base_tint) else 1)
     # -- corner towers: a floor exactly at the wall-walk height, doors out onto both walls
     hs_wall = wall_h - 1.0
     corners = [(-W / 2, -D / 2), (W / 2, -D / 2), (W / 2, D / 2), (-W / 2, D / 2)]
@@ -8571,7 +8606,7 @@ def _build_castle_mesh(width, depth, wall_h, wall_t, tower_r, tower_h, gate, kee
         for k in range(tb.n_storeys):
             tb.add_opening((m + 180.0 + (40.0 if k % 2 else -40.0)) % 360.0, 0.28, tb.levels[k] + 1.2, 1.3, 'rect')
         tb.geometry(ground=True)
-        big.append(tb.mb, rot=tb.seam, offset=(cx, cy, 0.0))
+        big.append(tb.mb, rot=tb.seam, offset=(cx, cy, 0.0), mat_map=part_map('tower', i))
     # -- curtain walls
     xe = math.sqrt(max((tower_r - tower_wall / 2.0) ** 2 - hy * hy, 0.1))
     sides = [
@@ -8585,7 +8620,7 @@ def _build_castle_mesh(width, depth, wall_h, wall_t, tower_r, tower_h, gate, kee
                              stones=int(length * wall_h * 0.35 * stones_scale))
         _castle_wall_openings(wb, has_gate, wall_h)
         wb.geometry()
-        big.append(wb.mb, rot=rot, offset=(start[0], start[1], 0.0))
+        big.append(wb.mb, rot=rot, offset=(start[0], start[1], 0.0), mat_map=part_map('wall', 0))
     # -- keep
     if keep:
         ks = max(6.0, min(W, D) * 0.38)
@@ -8602,7 +8637,7 @@ def _build_castle_mesh(width, depth, wall_h, wall_t, tower_r, tower_h, gate, kee
             else:
                 wb.add_opening(wb.L / 2.0, 0.3, kh * 0.45, 1.5, 'rect')
             wb.geometry()
-            big.append(wb.mb, rot=rot, offset=(cx - dx * kt / 2.0, cy - dy * kt / 2.0, 0.0))
+            big.append(wb.mb, rot=rot, offset=(cx - dx * kt / 2.0, cy - dy * kt / 2.0, 0.0), mat_map=part_map('keep', 0))
     return big
 
 
@@ -8626,14 +8661,14 @@ class OBJECT_OT_GenerateLevelCastle(bpy.types.Operator):
             scene.wfc_castle_width, scene.wfc_castle_depth, scene.wfc_castle_wall_height,
             scene.wfc_castle_wall_thickness, scene.wfc_castle_tower_radius, scene.wfc_castle_tower_height,
             scene.wfc_castle_gate, scene.wfc_castle_keep, scene.wfc_castle_ruin,
-            scene.wfc_tower_detail, scene.wfc_seed,
+            scene.wfc_tower_detail, scene.wfc_seed, brick_color=scene.wfc_castle_brick_color,
         )
         mesh = soup.to_mesh(CASTLE_OBJECT_NAME)
         obj = bpy.data.objects.new(CASTLE_OBJECT_NAME, mesh)
         context.collection.objects.link(obj)
         obj.location = scene.cursor.location
-        mesh.materials.append(get_or_create_tower_brick_material())
-        mesh.materials.append(get_or_create_tower_stone_material())
+        for mat_ in masonry_material_list(scene.wfc_castle_brick_color != 'PLAIN'):
+            mesh.materials.append(mat_)
         _add_viewport_color_attribute(mesh)
         for o in context.selected_objects:
             o.select_set(False)
@@ -9592,6 +9627,7 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
         row.prop(scene, "wfc_castle_tower_radius", text="Tower R")
         row.prop(scene, "wfc_castle_tower_height", text="Tower H")
         col.prop(scene, "wfc_tower_detail", text="Brick Detail")
+        col.prop(scene, "wfc_castle_brick_color", text="Brick Color")
         col.separator()
         col.prop(scene, "wfc_castle_gate", text="Gate")
         col.prop(scene, "wfc_castle_keep", text="Keep")
@@ -9611,6 +9647,7 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
         row.prop(scene, "wfc_tower_height", text="Height")
         col.prop(scene, "wfc_tower_wall", text="Wall Thickness")
         col.prop(scene, "wfc_tower_detail", text="Brick Detail")
+        col.prop(scene, "wfc_tower_brick_color", text="Brick Color")
         col.separator()
         col.prop(scene, "wfc_tower_ruin", text="Ruin")
         battle_row = col.row(align=True)
@@ -10279,6 +10316,15 @@ def register():
         name="Ruin", default=0.0, min=0.0, max=1.0, subtype='FACTOR',
         description="How ruined every part of the castle is (towers, walls, keep). 0 = intact"
     )
+    bpy.types.Scene.wfc_tower_brick_color = EnumProperty(
+        name="Brick Color", items=BRICK_COLOR_ITEMS, default='PLAIN',
+        description="Tint of the tower's bricks (the same tints as Room Brick Colors); Plain = the original brick"
+    )
+    bpy.types.Scene.wfc_castle_brick_color = EnumProperty(
+        name="Brick Color", items=BRICK_COLOR_ITEMS + [('MIXED', "Mixed", "Walls, keep and each tower get their own tint")],
+        default='PLAIN',
+        description="Tint of the castle's bricks: one tint for everything, or Mixed (walls ochre, keep umber, towers slate/moss/rose/sand)"
+    )
     bpy.types.Scene.wfc_tower_ruin = FloatProperty(
         name="Ruin", default=0.0, min=0.0, max=1.0, subtype='FACTOR',
         description="How ruined the tower is: the top breaks down to a jagged edge that steps along "
@@ -10423,6 +10469,8 @@ def unregister():
     del bpy.types.Scene.wfc_castle_gate
     del bpy.types.Scene.wfc_castle_keep
     del bpy.types.Scene.wfc_castle_ruin
+    del bpy.types.Scene.wfc_tower_brick_color
+    del bpy.types.Scene.wfc_castle_brick_color
     del bpy.types.Scene.wfc_tower_ruin
     del bpy.types.Scene.wfc_tower_interior
     del bpy.types.Scene.wfc_tower_stair_width

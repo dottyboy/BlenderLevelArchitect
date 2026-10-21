@@ -2925,6 +2925,35 @@ scene.wfc_wall_style = 'BOXES'
 scene.wfc_wall_ruin = 0.0
 scene.wfc_window_chance = 0.0
 
+# Brick colours for the tower and the castle.
+scene.cursor.location = (0.0, 120.0, 0.0)
+nt = len(addon.BRICK_TINTS)
+scene.wfc_tower_brick_color = 'PLAIN'
+bpy.ops.object.generate_level_tower()
+check("Tower colour: Plain keeps two material slots", len(bpy.data.objects[addon.TOWER_OBJECT_NAME].data.materials) == 2)
+scene.wfc_tower_brick_color = 'OCHRE'
+bpy.ops.object.generate_level_tower()
+tw = bpy.data.objects[addon.TOWER_OBJECT_NAME]
+slots_tw = {p_.material_index for p_ in tw.data.polygons}
+check("Tower colour: Ochre uses the ochre tint slot for brick and the stone slot, nothing else",
+      len(tw.data.materials) == nt + 1 and slots_tw == {addon.BRICK_COLOR_INDEX['OCHRE'], nt}, str(slots_tw))
+scene.wfc_tower_brick_color = 'PLAIN'
+for choice, expect in (('PLAIN', None), ('SLATE', {addon.BRICK_COLOR_INDEX['SLATE'], nt}), ('MIXED', 'many')):
+    scene.wfc_castle_brick_color = choice
+    check(f"Castle colour {choice}: FINISHED", bpy.ops.object.generate_level_castle() == {'FINISHED'})
+    cc = bpy.data.objects[addon.CASTLE_OBJECT_NAME]
+    sl = {p_.material_index for p_ in cc.data.polygons}
+    if expect is None:
+        check("Castle colour Plain: two material slots", len(cc.data.materials) == 2 and sl <= {0, 1})
+    elif expect == 'many':
+        bricks = sl - {nt}
+        check("Castle colour Mixed: several different brick tints in one castle", len(bricks) >= 4 and len(cc.data.materials) == nt + 1, str(sorted(sl)))
+    else:
+        check("Castle colour Slate: every brick face carries the slate tint", sl == expect, str(sl))
+scene.wfc_castle_brick_color = 'PLAIN'
+bpy.ops.object.generate_level_tower()
+tower = bpy.data.objects[addon.TOWER_OBJECT_NAME]
+
 # glTF round trip embeds the packed textures.
 with tempfile.TemporaryDirectory() as tmp:
     path = os.path.join(tmp, "tower.glb")
