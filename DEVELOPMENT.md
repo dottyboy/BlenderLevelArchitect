@@ -4,7 +4,7 @@ Internal dev-facing doc: what's built, what's known-broken, what's next. Not for
 (see `dist/README.md` for that). Source of truth for the addon's actual behavior is always
 `levelArchitect_v2.py` — this file can drift out of date; the code can't.
 
-Current version: **0.27.0** (see `bl_info` in the source file).
+Current version: **0.28.0** (see `bl_info` in the source file).
 
 §2 (Development tree) was condensed 2026-08-21 — dropped the blow-by-blow investigation
 narrative and per-run stress-test numbers from older, fully-resolved entries, kept every
@@ -752,6 +752,17 @@ GN complexity there specifically.
       render (not one of the regular `generate_test_blends.py` scenarios, whose top-down framing is
       too zoomed-out to show doorway-level detail) confirmed the frame visibly follows the wall's
       curve right at the opening, not standing at a mismatched straight angle against it.
+
+- [x] **Round Tower interior (0.28.0).** `_TowerBuilder._slab/_stairs`. Storey height = shell height / int(shell
+      height / 3), so the top slab is the roof platform. One full turn of stairs per storey, a wedge block per
+      step (0.3 m thick so consecutive steps overlap into a solid soffit), starting at door angle + 60 deg
+      snapped to the 64-segment slab grid. Each slab is a polar mesh: solid inner disc, outer stair lane open
+      over the last 2.2 m of climb (angles computed from the step index, hole edges get their own faces
+      pointing into the hole). Everything stays shared-vertex per group; verified with ray casts (step tops,
+      headroom, slab heights). Decision on the stairs' start angle: a step above the door's inner face
+      is fine because 2.5 m of headroom > 2 m player height, so no special-casing is needed.
+      Open: step vs. slit-window overlap, a railing/newel, interior props/lights, doors between storeys,
+      the same masonry method for ruins/castles/fortresses and for Round rooms in generated levels.
 
 - [x] **Round Tower (0.27.0).** Replaces the "brick-by-brick + modifier" idea after a prototype showed
       it costs ~8 400 vertices for one 9 m tower. Section 7 of `levelArchitect_v2.py`: `_TowerBuilder`

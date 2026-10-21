@@ -32,7 +32,7 @@ from bpy_extras.io_utils import ExportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 27, 0),
+    "version": (0, 28, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -7030,8 +7030,13 @@ class _TowerBuilder:
 
     DETAIL_STONES = {'LOW': 0, 'MEDIUM': 70, 'HIGH': 320}
 
-    def __init__(self, radius, height, wall, battlements=True, detail='MEDIUM', seed=1):
+    def __init__(self, radius, height, wall, battlements=True, detail='MEDIUM', seed=1,
+                 interior=False, stair_width=1.0, stair_start_deg=0.0):
         self.R, self.H, self.wall = radius, height, wall
+        self.interior = interior
+        self.stair_w = stair_width
+        # snapped to the 64-segment slab grid so the slab hole ends exactly where a stair arrives
+        self.stair_a0 = round(math.radians(stair_start_deg) / (TOWER_TAU / 64.0)) * (TOWER_TAU / 64.0)
         self.tile_w, self.tile_h = TOWER_TILE_W, TOWER_ROWS * TOWER_ROW_H
         self.Ko = max(1, round(TOWER_TAU * radius / self.tile_w))
         self.Ki = max(1, round(TOWER_TAU * (radius - wall) / self.tile_w))
@@ -7040,6 +7045,10 @@ class _TowerBuilder:
         self.rng = random.Random(seed)
         self.mb = _TowerMesh()
         self.Hs = height - (1.0 if battlements else 0.0)  # shell height (battlements sit on top)
+        # Storeys are >= 3 m and divide the shell height exactly, so the top
+        # storey's slab is the roof platform right behind the battlements.
+        self.n_storeys = max(1, int(self.Hs // 3.0))
+        self.sh = self.Hs / self.n_storeys
         self.openings = []
 
     # -- mapping helpers
@@ -7238,6 +7247,73 @@ class _TowerBuilder:
             uvs = [(p[0] / self.tile_w, p[1] / self.tile_w) for p in pts]
             self.mb.poly('floor', pts, uvs, (0.0, 0.0, 1.0), 1, False)
 
+    # -- interior: floor slabs + one full turn of spiral stairs per storey
+    SLAB_T = 0.25
+    SLAB_SEGS = 64
+
+    def _slab(self, z, hole=None):
+        """Floor/roof slab, top face at z. hole = (first_seg, last_seg) slab
+        segments whose outer band (the stair lane) is left open, else solid
+        to the wall. The inner disc is always solid."""
+        Ri = self.R - self.wall + 0.02
+        rb = max(0.3, self.R - self.wall - self.stair_w) if hole is not None else Ri
+        n, t = self.SLAB_SEGS, self.SLAB_T
+        grp = 'slab%d' % len(self.mb.faces)
+        up, down = (0.0, 0.0, 1.0), (0.0, 0.0, -1.0)
+        c = _cyl_point
+
+        def uv(p):
+            return (p[0] / self.tile_w, p[1] / self.tile_w)
+
+        def in_hole(i):
+            if hole is None:
+                return False
+            a, b = hole
+            i %= n
+            return (a <= i <= b) if a <= b else (i >= a or i <= b)
+
+        for i in range(n):
+            a0, a1 = TOWER_TAU * i / n, TOWER_TAU * (i + 1) / n
+            for zz, nrm in ((z, up), (z - t, down)):
+                pts = [(0.0, 0.0, zz), c(a0, rb, zz), c(a1, rb, zz)]
+                self.mb.poly(grp, pts, [uv(p) for p in pts], nrm, 1)
+            if in_hole(i):
+                am = (a0 + a1) / 2.0
+                pts = [c(a0, rb, z), c(a1, rb, z), c(a1, rb, z - t), c(a0, rb, z - t)]
+                self.mb.poly(grp, pts, [uv(p) for p in pts], (math.cos(am), math.sin(am), 0.0), 1)
+                for nb, a_edge, sgn in ((i - 1, a0, 1.0), (i + 1, a1, -1.0)):
+                    if not in_hole(nb):
+                        # where the solid band begins; this face looks into the hole
+                        pts = [c(a_edge, rb, z), c(a_edge, Ri, z), c(a_edge, Ri, z - t), c(a_edge, rb, z - t)]
+                        self.mb.poly(grp, pts, [uv(p) for p in pts],
+                                     (-math.sin(a_edge) * sgn, math.cos(a_edge) * sgn, 0.0), 1)
+                continue
+            if rb < Ri:
+                for zz, nrm in ((z, up), (z - t, down)):
+                    pts = [c(a0, rb, zz), c(a1, rb, zz), c(a1, Ri, zz), c(a0, Ri, zz)]
+                    self.mb.poly(grp, pts, [uv(p) for p in pts], nrm, 1)
+
+    def _stairs(self):
+        r0 = max(0.3, self.R - self.wall - self.stair_w)
+        r1 = self.R - self.wall + 0.02
+        steps = max(12, round(self.sh / 0.18))
+        rise = self.sh / steps
+        n = self.SLAB_SEGS
+        seg = TOWER_TAU / n
+        # the slab above is open over every step whose top is within 2.2 m of it
+        j_hole = next(j for j in range(steps) if (j + 1) * rise > self.sh - 2.2)
+        hole_segs = max(1, int(math.ceil((steps - j_hole) / steps * n)))
+        a0_seg = int(round(self.stair_a0 / seg)) % n
+        hole = ((a0_seg - hole_segs) % n, (a0_seg - 1) % n)
+        self.stair_hole = hole
+        for k in range(self.n_storeys):
+            for j in range(steps):
+                a = self.stair_a0 + TOWER_TAU * j / steps
+                b = self.stair_a0 + TOWER_TAU * (j + 1) / steps
+                top = k * self.sh + (j + 1) * rise
+                self._wedge(a, b, r0, r1, top - 0.30, top)
+            self._slab((k + 1) * self.sh, hole)
+
     def build(self, name):
         self._shell(True)
         self._shell(False)
@@ -7248,6 +7324,8 @@ class _TowerBuilder:
         self._battlements()
         self._stones(self.DETAIL_STONES.get(self.detail, 70))
         self._ground()
+        if self.interior:
+            self._stairs()
         return self.mb.to_mesh(name)
 
 
@@ -7256,14 +7334,13 @@ def _tower_openings_from_settings(builder, scene):
     storey (3 m storeys), staggered per storey."""
     if scene.wfc_tower_door:
         builder.add_opening(scene.wfc_tower_door_angle, 1.3, 0.0, min(2.6, builder.Hs - 1.0), 'arch')
-    storeys = max(1, int(builder.H // 3.0))
     count = scene.wfc_tower_windows
-    for s in range(storeys):
+    for k in range(builder.n_storeys):
         if count <= 0:
             break
-        sill = s * 3.0 + 1.2
-        for k in range(count):
-            deg = scene.wfc_tower_door_angle + 360.0 * (k + 0.25 + 0.5 * (s % 2)) / count
+        sill = k * builder.sh + 1.2
+        for i in range(count):
+            deg = scene.wfc_tower_door_angle + 360.0 * (i + 0.25 + 0.5 * (k % 2)) / count
             builder.add_opening(deg % 360.0, 0.28, sill, 1.3, 'rect')
 
 
@@ -7287,6 +7364,9 @@ class OBJECT_OT_GenerateLevelTower(bpy.types.Operator):
         builder = _TowerBuilder(
             radius, height, wall, battlements=scene.wfc_tower_battlements,
             detail=scene.wfc_tower_detail, seed=scene.wfc_seed,
+            interior=scene.wfc_tower_interior and radius - wall >= 1.6,
+            stair_width=scene.wfc_tower_stair_width,
+            stair_start_deg=scene.wfc_tower_door_angle + 60.0,
         )
         _tower_openings_from_settings(builder, scene)
         mesh = builder.build(TOWER_OBJECT_NAME)
@@ -7300,9 +7380,13 @@ class OBJECT_OT_GenerateLevelTower(bpy.types.Operator):
             o.select_set(False)
         obj.select_set(True)
         context.view_layer.objects.active = obj
+        note = ""
+        if scene.wfc_tower_interior and not builder.interior:
+            note = " (interior skipped: inner radius under 1.6 m)"
         self.report(
             {'INFO'},
-            f"Tower generated: {len(mesh.vertices)} vertices, {len(builder.openings)} openings."
+            f"Tower generated: {len(mesh.vertices)} vertices, {len(builder.openings)} openings, "
+            f"{builder.n_storeys} storeys{note}."
         )
         _update_debug_snapshot(context, "Round Tower")
         return {'FINISHED'}
@@ -7803,6 +7887,10 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
         door_row.enabled = scene.wfc_tower_door
         door_row.prop(scene, "wfc_tower_door_angle", text="Door Angle")
         col.prop(scene, "wfc_tower_windows", text="Windows / Storey")
+        col.prop(scene, "wfc_tower_interior", text="Floors + Spiral Stairs")
+        stair_row = col.row(align=True)
+        stair_row.enabled = scene.wfc_tower_interior
+        stair_row.prop(scene, "wfc_tower_stair_width", text="Stair Width")
         layout.label(text="Built at the 3D cursor.")
         layout.separator()
         _step_button(
@@ -8368,6 +8456,16 @@ def register():
         name="Windows per Storey", default=2, min=0, max=8,
         description="Slit windows around each 3 m storey (staggered per storey)"
     )
+    bpy.types.Scene.wfc_tower_interior = BoolProperty(
+        name="Floors + Spiral Stairs", default=True,
+        description="Floor slabs every >= 3 m (the top one is the roof platform behind the "
+                    "battlements) joined by one full turn of stone spiral stairs per storey, hugging "
+                    "the inner wall. Skipped automatically when the inner radius is under 1.6 m"
+    )
+    bpy.types.Scene.wfc_tower_stair_width = FloatProperty(
+        name="Stair Width", default=1.0, min=0.7, max=2.0, unit='LENGTH',
+        description="Radial width of the spiral stair lane along the inner wall"
+    )
     bpy.types.Scene.wfc_debug_params = StringProperty(
         name="Debug Params", default="",
         description="Internal: snapshot of every wfc_* setting as of the most recent Step "
@@ -8479,6 +8577,8 @@ def unregister():
     del bpy.types.Scene.wfc_tower_door
     del bpy.types.Scene.wfc_tower_door_angle
     del bpy.types.Scene.wfc_tower_windows
+    del bpy.types.Scene.wfc_tower_interior
+    del bpy.types.Scene.wfc_tower_stair_width
     del bpy.types.Scene.wfc_debug_params
     del bpy.types.Scene.wfc_export_binary
     del bpy.types.Scene.wfc_export_include_lights

@@ -3,6 +3,19 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.28.0
+
+- **Round Tower interiors.** New "Floors + Spiral Stairs" option (on by default) and "Stair Width".
+  The tower is split into storeys of at least 3 m that divide the shell height exactly, so the top
+  slab is the roof platform right behind the battlements. Floor slabs (with thickness) separate the
+  storeys, joined by one full turn of stone spiral stairs per storey hugging the inner wall
+  (~0.18 m risers). Each slab is open over the stair lane exactly where a climber would otherwise
+  hit their head (the last 2.2 m of the climb) and solid everywhere else. Windows now align to the
+  storeys. Towers with an inner radius under 1.6 m skip the interior instead of failing.
+- Verified with ray casts: every step's top is at its expected height, 2 m of headroom above every
+  step, correct slab heights. Not handled yet: a step can sit in front of a slit window's inner
+  side, and there is no railing on the open side of the stairs.
+
 ## 0.27.0
 
 - **New: Round Tower** (new Tower tab, built at the 3D cursor). Instead of modelling every brick

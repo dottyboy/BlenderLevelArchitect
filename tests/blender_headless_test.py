@@ -2247,8 +2247,8 @@ for detail in ('LOW', 'MEDIUM', 'HIGH'):
     counts[detail] = len(tower.data.vertices)
 check("Tower: vertex budget grows with detail (Low < Medium < High)",
       counts['LOW'] < counts['MEDIUM'] < counts['HIGH'], str(counts))
-check("Tower: Medium stays under 3500 vertices (old brick-by-brick: ~8400)", counts['MEDIUM'] < 3500, str(counts))
-check("Tower: Low stays under 1500 vertices", counts['LOW'] < 1500, str(counts))
+check("Tower: Medium (with interior) stays under 3500 vertices (old brick-by-brick shell alone: ~8400)", counts['MEDIUM'] < 3500, str(counts))
+check("Tower: Low (with interior) stays under 2000 vertices", counts['LOW'] < 2000, str(counts))
 
 scene.wfc_tower_detail = 'MEDIUM'
 bpy.ops.object.generate_level_tower()
@@ -2306,6 +2306,45 @@ solid = tower.ray_cast(Vector((-6.0, 0.0, 1.0)), Vector((1, 0, 0)), distance=12.
 check("Tower: ray at a solid wall section hits it from outside", solid[0] and solid[1].x < -2.9, str(solid[:2]))
 battle = tower.ray_cast(Vector((0, -6.0, 8.5)), Vector((0, 1, 0)), distance=12.0)
 check("Tower: battlements exist (rays at the crenel height hit some merlon)", battle[0] or True)
+
+# Interior: roof platform, spiral stairs that are actually climbable, headroom, hole.
+Hs_ = 8.0  # 9 m tower minus 1 m battlements
+roof_hit = tower.ray_cast(Vector((0, 0, 20.0)), Vector((0, 0, -1)), distance=30.0)
+check("Tower interior: roof platform sits at the shell top", roof_hit[0] and abs(roof_hit[1].z - Hs_) < 0.01, str(roof_hit[:2]))
+floor2 = tower.ray_cast(Vector((0, 0, 7.5)), Vector((0, 0, -1)), distance=10.0)
+check("Tower interior: first-floor slab at half height", floor2[0] and abs(floor2[1].z - 4.0) < 0.01, str(floor2[:2]))
+steps_, sh_ = 22, 4.0
+rise_ = sh_ / steps_
+a0_ = math.radians(round((270.0 + 60.0) % 360.0 / 5.625) * 5.625)
+r_mid = 2.45 - 0.5
+bad_climb = bad_head = 0
+for storey in (0, 1):
+    for j in range(steps_):
+        ang = a0_ + math.tau * (j + 0.5) / steps_
+        px, py = r_mid * math.cos(ang), r_mid * math.sin(ang)
+        top_ = storey * sh_ + (j + 1) * rise_
+        down = tower.ray_cast(Vector((px, py, top_ + 0.6)), Vector((0, 0, -1)), distance=2.0)
+        if not (down[0] and abs(down[1].z - top_) < 0.02):
+            bad_climb += 1
+        up = tower.ray_cast(Vector((px, py, top_ + 0.05)), Vector((0, 0, 1)), distance=2.0)
+        if up[0]:
+            bad_head += 1
+check("Tower interior: every spiral step top is at the expected height (no gaps, no overlaps)", bad_climb == 0, f"{bad_climb}/44")
+check("Tower interior: 2 m of headroom above every step", bad_head == 0, f"{bad_head}/44")
+scene.wfc_tower_interior = False
+bpy.ops.object.generate_level_tower()
+no_int = len(bpy.data.objects[addon.TOWER_OBJECT_NAME].data.vertices)
+check("Tower interior: switching it off drops the floors and stairs", no_int < counts['MEDIUM'] - 500, f"{no_int} vs {counts['MEDIUM']}")
+scene.wfc_tower_interior = True
+bpy.ops.object.generate_level_tower()
+tower = bpy.data.objects[addon.TOWER_OBJECT_NAME]
+scene.wfc_tower_radius, scene.wfc_tower_wall = 2.0, 0.55
+bpy.ops.object.generate_level_tower()
+small = len(bpy.data.objects[addon.TOWER_OBJECT_NAME].data.vertices)
+check("Tower interior: a too-narrow tower skips the stairs instead of failing", small > 0)
+scene.wfc_tower_radius, scene.wfc_tower_wall = 3.0, 0.55
+bpy.ops.object.generate_level_tower()
+tower = bpy.data.objects[addon.TOWER_OBJECT_NAME]
 
 # glTF round trip embeds the packed textures.
 with tempfile.TemporaryDirectory() as tmp:
