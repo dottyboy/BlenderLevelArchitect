@@ -4,7 +4,7 @@ Internal dev-facing doc: what's built, what's known-broken, what's next. Not for
 (see `dist/README.md` for that). Source of truth for the addon's actual behavior is always
 `levelArchitect_v2.py` — this file can drift out of date; the code can't.
 
-Current version: **0.29.1** (see `bl_info` in the source file).
+Current version: **0.30.0** (see `bl_info` in the source file).
 
 §2 (Development tree) was condensed 2026-08-21 — dropped the blow-by-blow investigation
 narrative and per-run stress-test numbers from older, fully-resolved entries, kept every
@@ -752,6 +752,22 @@ GN complexity there specifically.
       render (not one of the regular `generate_test_blends.py` scenarios, whose top-down framing is
       too zoomed-out to show doorway-level detail) confirmed the frame visibly follows the wall's
       curve right at the opening, not standing at a mismatched straight angle against it.
+
+- [x] **Ruins (0.30.0).** `_TowerBuilder` got `ruin` and `rubble_outside`. Columns (`_build_columns`) are now built
+      once and shared by both skins, the caps and the end faces; each carries every opening that contains it
+      (`ops`, lowest sill first -- stacked windows used to be dropped because only the first matching opening
+      owned a column), its `gap` (an opening that became a breach) and `top`. `_ruin_top(t)` = smooth lattice
+      noise (48 + 12 point octaves, cosine interpolated, periodic in the WORLD angle so it survives the seam
+      rotation) plus notches, snapped down to whole brick courses (0.26 m) and clamped to >= 0.5 m. An opening
+      survives only if apex + 0.4 m fits under the local top, else it becomes a 'gap' whose height is the lower of
+      its two neighbouring column tops (so jambs never stand above the wall beside them); openings whose sill is
+      above the local top are dropped. `_caps_and_steps` draws the flat caps (stone, UV across the thickness)
+      and the vertical faces between columns of different height, facing the lower side. Pitfalls found: a
+      cap/step must be emitted per column, not per skin; stones must test the STANDING top (`_standing_top`), not
+      the raw noise, or they float across a breach; rubble must stay below 0.25 m or a 0.3 m passability ray hits
+      it. Open: ruins for plain rectangular walls (needs the masonry wall segment generalisation), partial
+      slab collapse inside ruined towers, moss/weathering in the texture, castles/fortresses as assemblies of
+      these parts.
 
 - [x] **Round rooms as masonry (0.29.0).** `_build_round_room_masonry_mesh` reuses `_TowerBuilder` per Round room:
       a circle of radius max(rx, ry) is built, rotated by a seam angle (middle of the widest solid stretch,

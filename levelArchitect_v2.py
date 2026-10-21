@@ -32,7 +32,7 @@ from bpy_extras.io_utils import ExportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 29, 1),
+    "version": (0, 30, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -4144,7 +4144,7 @@ def _round_room_opening_ranges(room, room_id, room_id_grid, walkable, tile_size,
 
 def _build_round_room_masonry_mesh(
     room_meta, room_id_grid, walkable_cells, tile_size, fine_level_height, wall_height,
-    wall_thickness, z_offsets, door_style, door_height, cap_top, seed, name,
+    wall_thickness, z_offsets, door_style, door_height, cap_top, seed, name, ruin=0.0,
 ):
     """Round room walls as brick-textured masonry (the Round Tower's shell
     method, see _TowerBuilder) instead of the n-gon ring of plain boxes: a
@@ -4197,7 +4197,7 @@ def _build_round_room_masonry_mesh(
         builder = _TowerBuilder(
             R, wall_height, wall_c, battlements=False, detail='MEDIUM', seed=seed + room_id,
             plinth=False, cap_top=cap_top, brick_cols=max(1, round(per / TOWER_TILE_W)),
-            stones=stones, seam=seam,
+            stones=stones, seam=seam, ruin=ruin, rubble_outside=False,
         )
         skip_room = False
         for t0, t1 in ranges:
@@ -6352,7 +6352,7 @@ class OBJECT_OT_GenerateLevelWalls(bpy.types.Operator):
                     meta_for_floor, room_id_grid, walkable_cells, tile_size, level_height,
                     scene.wfc_wall_height, scene.wfc_wall_thickness, z_offsets,
                     scene.wfc_door_style, scene.wfc_door_height, scene.wfc_wall_cap_top,
-                    scene.wfc_seed, name,
+                    scene.wfc_seed, name, ruin=scene.wfc_round_wall_ruin,
                 )
             else:
                 ring_mesh_data = _build_round_room_walls_mesh(
@@ -7226,8 +7226,18 @@ class _TowerBuilder:
 
     def __init__(self, radius, height, wall, battlements=True, detail='MEDIUM', seed=1,
                  interior=False, stair_width=1.0, stair_start_deg=0.0,
-                 plinth=True, cap_top=False, brick_cols=None, stones=None, seam=0.0):
+                 plinth=True, cap_top=False, brick_cols=None, stones=None, seam=0.0,
+                 ruin=0.0, rubble_outside=True):
         self.R, self.H, self.wall = radius, height, wall
+        self.ruin = max(0.0, min(1.0, ruin))
+        self.rubble_outside = rubble_outside
+        if self.ruin > 0.0:
+            battlements = False  # nothing crenellated survives a ruin
+        nr = random.Random(seed * 131 + 7)
+        self._lat1 = [nr.random() for _ in range(48)]
+        self._lat2 = [nr.random() for _ in range(12)]
+        self._notches = [(nr.uniform(0, TOWER_TAU), nr.uniform(0.35, 1.1) / max(radius, 1.0), nr.uniform(0.55, 1.0))
+                         for _ in range(1 + int(self.ruin * 3))]
         self.plinth = plinth
         self.cap_top = cap_top
         self.stones = stones            # None: from detail; else an explicit count
@@ -7337,21 +7347,94 @@ class _TowerBuilder:
         right = [(-x, z, -nx, nz) for x, z, nx, nz in reversed(left[:-1])]
         return left + right
 
+    # -- ruin profile: wall top height as a function of the world angle t
+    @staticmethod
+    def _lattice(vals, t):
+        n = len(vals)
+        u = (t % TOWER_TAU) / TOWER_TAU * n
+        i = int(u) % n
+        f = u - int(u)
+        f = (1.0 - math.cos(f * math.pi)) / 2.0
+        return vals[i] * (1.0 - f) + vals[(i + 1) % n] * f
+
+    def _ruin_top(self, t):
+        """Wall top at world angle t: smooth low-frequency noise plus a few deep
+        notches (breaches), snapped down to whole brick courses so the broken
+        edge steps like real masonry. Unruined walls return Hs."""
+        if self.ruin <= 0.0:
+            return self.Hs
+        v = 0.65 * self._lattice(self._lat1, t) + 0.35 * self._lattice(self._lat2, t * 1.7)
+        top = self.Hs * (1.0 - self.ruin * (0.12 + 0.88 * v))
+        for c, half, depth in self._notches:
+            d = abs(((t - c + math.pi) % TOWER_TAU) - math.pi)
+            if d < half:
+                top *= 1.0 - self.ruin * depth * (1.0 - d / half) ** 0.6
+        top = math.floor(top / TOWER_ROW_H) * TOWER_ROW_H
+        return max(0.5, min(self.Hs, top))
+
+    def _standing_top(self, a):
+        """Height of masonry actually standing at shell angle a (0 across a
+        breach whose sill is the ground). Needs self.columns."""
+        for c in self.columns:
+            if c['a0'] - 1e-9 <= a % TOWER_TAU <= c['a1'] + 1e-9:
+                if c['gap'] is not None:
+                    return c['gap']['sill']
+                return c['top']
+        return 0.0
+
+    def _build_columns(self):
+        """Angular columns shared by both skins, caps and steps. Each is a dict
+        with a0, a1, ops (every opening whose angular span contains it, lowest
+        first -- stacked windows share columns), gap (the opening that has
+        become a plain breach there, if any) and top."""
+        colw = 0.35 if self.ruin > 0.0 else 0.5
+        if self.ruin > 0.0:
+            # an opening whose sill is above the broken wall top there simply fell with it
+            self.openings = [o for o in self.openings if o['sill'] < self._ruin_top(o['ac'] + self.seam) - 0.3]
+        hard = {0.0, TOWER_TAU}
+        for o in self.openings:
+            hard.update((o['a0'], o['a1']))
+        hard = sorted(hard)
+        cols = []
+        for a0, a1 in zip(hard[:-1], hard[1:]):
+            ops = sorted((o for o in self.openings if o['a0'] - 1e-6 <= a0 and a1 <= o['a1'] + 1e-6),
+                         key=lambda o: o['sill'])
+            k = 1
+            if not ops:
+                k = max(1, round((a1 - a0) * self.R / colw))
+            else:
+                k = max(8 if o['kind'] == 'pointed' else 6 if o['kind'] == 'arch' else 1 for o in ops)
+            for i in range(k):
+                cols.append(dict(a0=a0 + (a1 - a0) * i / k, a1=a0 + (a1 - a0) * (i + 1) / k,
+                                 ops=ops, gap=None, top=self.Hs))
+        if self.ruin > 0.0:
+            for c in cols:
+                mid = (c['a0'] + c['a1']) / 2.0 + self.seam
+                c['top'] = self._ruin_top(mid)
+                need = max((o['apex'] + 0.4 for o in c['ops'] if o['kind'] != 'gap'), default=0.0)
+                c['top'] = max(c['top'], need) if need <= self.Hs else c['top']
+            for o in self.openings:
+                if o['kind'] != 'gap' and o['apex'] + 0.4 > self._ruin_top(o['ac'] + self.seam):
+                    o['kind'] = 'gap'  # arch/lintel did not survive: becomes a breach
+        for c in cols:
+            gaps = [o for o in c['ops'] if o['kind'] == 'gap']
+            c['gap'] = max(gaps, key=lambda o: o['sill']) if gaps else None
+        n = len(cols)
+        for o in self.openings:
+            if o['kind'] != 'gap':
+                continue
+            idx = [i for i, c in enumerate(cols) if o in c['ops']]
+            left, right = cols[(idx[0] - 1) % n], cols[(idx[-1] + 1) % n]
+            if self.ruin > 0.0:
+                h = min(left['top'], right['top'])
+                o['spring'] = o['apex'] = max(o['sill'] + 0.1, min(h, self.Hs))
+        self.columns = cols
+
     # -- smooth textured shell, outer or inner skin
     def _shell(self, outer):
         R = self.R if outer else self.R - self.wall
         K = self.Ko if outer else self.Ki
         group = 'out' if outer else 'in'
-        hard = {0.0, TOWER_TAU}
-        for o in self.openings:
-            hard.update((o['a0'], o['a1']))
-        hard = sorted(hard)
-        columns = []
-        for a0, a1 in zip(hard[:-1], hard[1:]):
-            op = next((o for o in self.openings if o['a0'] - 1e-6 <= a0 and a1 <= o['a1'] + 1e-6), None)
-            k = max(1, round((a1 - a0) * R / 0.5)) if op is None else (8 if op['kind'] == 'pointed' else 6 if op['kind'] == 'arch' else 1)
-            for i in range(k):
-                columns.append((a0 + (a1 - a0) * i / k, a0 + (a1 - a0) * (i + 1) / k, op))
 
         def face(az):
             pts = [_cyl_point(a, R, z) for a, z in az]
@@ -7361,20 +7444,23 @@ class _TowerBuilder:
             sgn = 1.0 if outer else -1.0
             self.mb.poly(group, pts, uvs, (cx * sgn, cy * sgn, 0.0), 0, True)
 
-        Hs = self.Hs
-        for a0, a1, op in columns:
-            if op is None:
-                face([(a0, 0), (a1, 0), (a1, Hs), (a0, Hs)])
-                continue
-            top = op['apex'] + (0.2 if self._curved(op) else 0.0)
-            if op['sill'] > 1e-6:
-                face([(a0, 0), (a1, 0), (a1, op['sill']), (a0, op['sill'])])
-            if self._curved(op):
-                h0 = self._arch_h(op, (a0 - op['ac']) * self.R)
-                h1 = self._arch_h(op, (a1 - op['ac']) * self.R)
-                face([(a0, h0), (a1, h1), (a1, top), (a0, top)])
-            if top < Hs - 1e-6:
-                face([(a0, top), (a1, top), (a1, Hs), (a0, Hs)])
+        for c in self.columns:
+            a0, a1, top_c = c['a0'], c['a1'], c['top']
+            z = 0.0
+            for op in c['ops']:
+                if op['sill'] > z + 1e-6:
+                    face([(a0, z), (a1, z), (a1, op['sill']), (a0, op['sill'])])
+                if op['kind'] == 'gap':
+                    z = None  # everything above a breach is gone
+                    break
+                top = op['apex'] + (0.2 if self._curved(op) else 0.0)
+                if self._curved(op):
+                    h0 = self._arch_h(op, (a0 - op['ac']) * self.R)
+                    h1 = self._arch_h(op, (a1 - op['ac']) * self.R)
+                    face([(a0, h0), (a1, h1), (a1, top), (a0, top)])
+                z = top
+            if z is not None and z < top_c - 1e-6:
+                face([(a0, z), (a1, z), (a1, top_c), (a0, top_c)])
 
     def _reveals(self):
         Ro, Ri = self.R, self.R - self.wall
@@ -7402,7 +7488,7 @@ class _TowerBuilder:
                     cur = (a, self._arch_h(o, (a - o['ac']) * self.R))
                     quad(prev, cur)
                     prev = cur
-            else:
+            elif o['kind'] != 'gap':
                 quad((a0, o['spring']), (a1, o['spring']))
             quad((a0, o['sill']), (a1, o['sill']))
 
@@ -7494,18 +7580,85 @@ class _TowerBuilder:
                    and o['sill'] - 0.5 < z < o['apex'] + 0.55 for o in self.openings):
                 continue
             wl, hh, pr = self.rng.uniform(0.45, 0.8), self.rng.uniform(0.2, 0.3), self.rng.uniform(0.025, 0.05)
+            if self.ruin > 0.0 and z + hh > min(self._standing_top(a + k * wl / 2 / Ro) for k in (-1, 0, 1)) - 0.05:
+                continue  # would float above the broken edge or across a breach
             self._wedge(a - wl / 2 / Ro, a + wl / 2 / Ro, Ro - 0.02, Ro + pr, z, z + hh)
 
-    def _cap(self):
-        """Flat stone cap across the wall top (rooms: no battlements)."""
+    def _caps_and_steps(self):
+        """Flat stone cap on every standing column plus the vertical end faces
+        where neighbouring columns differ in height (ruined edge) or meet a
+        breach. Used for ruins and for rooms with Cap Top."""
         Ro, Ri = self.R, self.R - self.wall
-        n = max(24, round(TOWER_TAU * Ro / 0.6))
-        z = self.Hs
-        for k in range(n):
-            a0, a1 = TOWER_TAU * k / n, TOWER_TAU * (k + 1) / n
+        cols = self.columns
+        n = len(cols)
+        for c in cols:
+            if c['gap'] is not None:
+                if c['gap']['sill'] > 1e-6:
+                    z = c['gap']['sill']
+                else:
+                    continue
+            else:
+                z = c['top']
+            a0, a1 = c['a0'], c['a1']
             pts = [_cyl_point(a0, Ro, z), _cyl_point(a1, Ro, z), _cyl_point(a1, Ri, z), _cyl_point(a0, Ri, z)]
-            uvs = [(self._u(a, self.Ko), 0.0) for a in (a0, a1, a1, a0)]
-            self.mb.poly('cap', pts, uvs, (0.0, 0.0, 1.0), 1)
+            vi = self.wall / self.tile_h  # cap: u along the wall, v across its thickness
+            self.mb.poly('cap', pts, [(self._u(a0, self.Ko), 0.0), (self._u(a1, self.Ko), 0.0), (self._u(a1, self.Ko), vi), (self._u(a0, self.Ko), vi)], (0.0, 0.0, 1.0), 1)
+        for i in range(n):
+            ca, cb = cols[i], cols[(i + 1) % n]
+            b = cb['a0']  # boundary angle (0 for the seam join)
+            ga = ca['gap'] is not None
+            gb = cb['gap'] is not None
+            if ga and gb:
+                continue
+            if ga or gb:
+                gap, other = (ca, cb) if ga else (cb, ca)
+                lo, hi = gap['gap']['spring'], other['top']
+                lower_is_cb = gb  # the face looks into the breach
+            else:
+                lo, hi = sorted((ca['top'], cb['top']))
+                lower_is_cb = cb['top'] < ca['top']
+            if hi - lo < 1e-4:
+                continue
+            pts = [_cyl_point(b, Ro, lo), _cyl_point(b, Ro, hi), _cyl_point(b, Ri, hi), _cyl_point(b, Ri, lo)]
+            direction = 1.0 if lower_is_cb else -1.0  # +tangent points toward the cb column
+            ui = self.wall / self.tile_w * self.Ko / max(1.0, self.Ko)  # u across the wall's thickness
+            u0 = self._u(b, self.Ko)
+            self.mb.poly('step', pts, [(u0, self._v(lo)), (u0, self._v(hi)), (u0 + ui, self._v(hi)), (u0 + ui, self._v(lo))],
+                         (-math.sin(b) * direction, math.cos(b) * direction, 0.0), 0)
+
+    def _rubble(self):
+        """Fallen blocks: yawed boxes scattered by the foot of the wall,
+        keeping clear of floor-level openings."""
+        if self.ruin <= 0.0:
+            return
+        n = int(self.ruin * TOWER_TAU * self.R * 1.2)
+        inside_ok = not self.interior and not self.rubble_outside
+        for _ in range(n):
+            a = self.rng.uniform(0.0, TOWER_TAU)
+            if self.rubble_outside:
+                r = self.R + self.rng.uniform(0.35, 2.2)
+            elif inside_ok:
+                r = self.R - self.wall - self.rng.uniform(0.25, 0.9)
+            else:
+                continue
+            if any(o['sill'] < 0.3 and abs(((a - o['ac'] + math.pi) % TOWER_TAU) - math.pi) * self.R < o['w'] / 2 + 0.7
+                   for o in self.openings):
+                continue
+            hx, hy, h = self.rng.uniform(0.12, 0.3), self.rng.uniform(0.1, 0.22), self.rng.uniform(0.1, 0.25)
+            yaw = self.rng.uniform(0.0, math.pi)
+            cx, cy = r * math.cos(a), r * math.sin(a)
+            c_, s_ = math.cos(yaw), math.sin(yaw)
+            corners = [(-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)]
+            bot = [(cx + lx * c_ - ly * s_, cy + lx * s_ + ly * c_, 0.0) for lx, ly in corners]
+            top = [(x, y, h) for x, y, _ in bot]
+            pts = bot + top
+            cen = (cx, cy, h / 2.0)
+            grp = 'rub%d' % len(self.mb.faces)
+            for f in ((4, 5, 6, 7), (0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)):
+                fp = [pts[i] for i in f]
+                fc = tuple(sum(p[k] for p in fp) / 4.0 for k in range(3))
+                uvs = [((p[0] + p[1]) / self.tile_w, p[2] / self.tile_h) for p in fp]
+                self.mb.poly(grp, fp, uvs, (fc[0] - cen[0], fc[1] - cen[1], fc[2] - cen[2]), 1)
 
     def _ground(self):
         Ri = self.R - self.wall
@@ -7575,15 +7728,19 @@ class _TowerBuilder:
         a0_seg = int(round(self.stair_a0 / seg)) % n
         hole = ((a0_seg - hole_segs) % n, (a0_seg - 1) % n)
         self.stair_hole = hole
+        tmin = min((c['top'] for c in self.columns if c['gap'] is None), default=self.Hs)
         for k in range(self.n_storeys):
+            if self.ruin > 0.0 and (k + 1) * self.sh > tmin + 0.3:
+                break  # floors above the lowest broken wall top have collapsed
             for j in range(steps):
                 a = self.stair_a0 + TOWER_TAU * j / steps
                 b = self.stair_a0 + TOWER_TAU * (j + 1) / steps
                 top = k * self.sh + (j + 1) * rise
-                self._wedge(a, b, r0, r1, top - 0.30, top)
+                self._wedge(a, b, r0, r1, 0.0 if k == 0 and j < 2 else top - 0.30, top)
             self._slab((k + 1) * self.sh, hole)
 
     def geometry(self, ground=True):
+        self._build_columns()
         self._shell(True)
         self._shell(False)
         self._reveals()
@@ -7591,8 +7748,9 @@ class _TowerBuilder:
             self._frames()
         self._rings()
         self._battlements()
-        if self.cap_top:
-            self._cap()
+        if self.cap_top or self.ruin > 0.0:
+            self._caps_and_steps()
+        self._rubble()
         self._stones(self.stones if self.stones is not None else self.DETAIL_STONES.get(self.detail, 70))
         if ground:
             self._ground()
@@ -7640,6 +7798,7 @@ class OBJECT_OT_GenerateLevelTower(bpy.types.Operator):
         builder = _TowerBuilder(
             radius, height, wall, battlements=scene.wfc_tower_battlements,
             detail=scene.wfc_tower_detail, seed=scene.wfc_seed,
+            ruin=scene.wfc_tower_ruin,
             interior=scene.wfc_tower_interior and radius - wall >= 1.6,
             stair_width=scene.wfc_tower_stair_width,
             stair_start_deg=scene.wfc_tower_door_angle + 60.0,
@@ -8082,6 +8241,9 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
         radius_row.prop(scene, "wfc_wall_corner_radius", text="Radius")
         col.separator()
         col.prop(scene, "wfc_round_wall_style", text="Round Rooms")
+        ruin_row = col.row(align=True)
+        ruin_row.enabled = scene.wfc_round_wall_style == 'MASONRY'
+        ruin_row.prop(scene, "wfc_round_wall_ruin", text="Ruin")
         col.separator()
         col.prop(scene, "wfc_window_chance", text="Window Chance")
         win_col = col.column(align=True)
@@ -8159,7 +8321,10 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
         col.prop(scene, "wfc_tower_wall", text="Wall Thickness")
         col.prop(scene, "wfc_tower_detail", text="Brick Detail")
         col.separator()
-        col.prop(scene, "wfc_tower_battlements", text="Battlements")
+        col.prop(scene, "wfc_tower_ruin", text="Ruin")
+        battle_row = col.row(align=True)
+        battle_row.enabled = scene.wfc_tower_ruin <= 0.0
+        battle_row.prop(scene, "wfc_tower_battlements", text="Battlements")
         col.prop(scene, "wfc_tower_door", text="Arched Door")
         door_row = col.row(align=True)
         door_row.enabled = scene.wfc_tower_door
@@ -8542,6 +8707,13 @@ def register():
         default='MASONRY',
         description="How the walls of Round rooms are built"
     )
+    bpy.types.Scene.wfc_round_wall_ruin = FloatProperty(
+        name="Ruin", default=0.0, min=0.0, max=1.0, subtype='FACTOR',
+        description="Masonry Round-room walls only: how ruined they are. Wall tops break down to a "
+                    "jagged edge that steps along whole brick courses, deep breaches open up (an arch "
+                    "or window whose top fell away becomes a plain gap), and fallen blocks lie against "
+                    "the inside of the wall. Doorways stay passable. 0 = intact (default)"
+    )
     bpy.types.Scene.wfc_organic_amount = FloatProperty(
         name="Organic Irregularity", default=0.0, min=0.0, max=0.3, unit='LENGTH',
         description="Jitters wall height/thickness, stair tread width, and ramp edges for a "
@@ -8747,6 +8919,13 @@ def register():
         name="Windows per Storey", default=2, min=0, max=8,
         description="Slit windows around each 3 m storey (staggered per storey)"
     )
+    bpy.types.Scene.wfc_tower_ruin = FloatProperty(
+        name="Ruin", default=0.0, min=0.0, max=1.0, subtype='FACTOR',
+        description="How ruined the tower is: the top breaks down to a jagged edge that steps along "
+                    "brick courses, breaches open, an arch or window whose top fell away becomes a "
+                    "gap, rubble lies around the base, and floors above the lowest broken wall top "
+                    "are gone. Battlements disappear. 0 = intact"
+    )
     bpy.types.Scene.wfc_tower_interior = BoolProperty(
         name="Floors + Spiral Stairs", default=True,
         description="Floor slabs every >= 3 m (the top one is the roof platform behind the "
@@ -8837,6 +9016,7 @@ def unregister():
     del bpy.types.Scene.wfc_window_sill
     del bpy.types.Scene.wfc_window_height
     del bpy.types.Scene.wfc_round_wall_style
+    del bpy.types.Scene.wfc_round_wall_ruin
     del bpy.types.Scene.wfc_organic_amount
     del bpy.types.Scene.wfc_uv_tile_size
     del bpy.types.Scene.wfc_stair_mesh_style
@@ -8869,6 +9049,7 @@ def unregister():
     del bpy.types.Scene.wfc_tower_door
     del bpy.types.Scene.wfc_tower_door_angle
     del bpy.types.Scene.wfc_tower_windows
+    del bpy.types.Scene.wfc_tower_ruin
     del bpy.types.Scene.wfc_tower_interior
     del bpy.types.Scene.wfc_tower_stair_width
     del bpy.types.Scene.wfc_debug_params

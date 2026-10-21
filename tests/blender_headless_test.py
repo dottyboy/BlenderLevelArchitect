@@ -2097,8 +2097,9 @@ scene.wfc_round_wall_style = 'MASONRY'
 scene.wfc_door_style = 'FLAT'
 masonry_seen = masonry_sealed = masonry_pairs = masonry_stair_hits = masonry_stairs_checked = masonry_stair_hits_tall = 0
 masonry_style_ok = True
-for wall_h, wall_t, heights_m in ((0.61, 0.02, (0.3,)), (3.0, 0.25, (0.3, 1.2))):
+for wall_h, wall_t, heights_m, ruin_r in ((0.61, 0.02, (0.3,), 0.0), (3.0, 0.25, (0.3, 1.2), 0.0), (3.0, 0.25, (0.3, 1.2), 1.0)):
   scene.wfc_wall_height, scene.wfc_wall_thickness = wall_h, wall_t
+  scene.wfc_round_wall_ruin = ruin_r
   for repro_seed in (405634, 111111, 222222, 333333, 444444):
     scene.wfc_seed = repro_seed
     for door_style in ('FLAT', 'ROUND', 'POINTED'):
@@ -2138,14 +2139,15 @@ for wall_h, wall_t, heights_m in ((0.61, 0.02, (0.3,)), (3.0, 0.25, (0.3, 1.2)))
                 masonry_stairs_checked += 1
                 ov = t.overlap(st_tree)
                 masonry_stair_hits += len(ov)
-check("Masonry rooms: Round rings exist in the test seeds", masonry_seen >= 18, str(masonry_seen))
+check("Masonry rooms: Round rings exist in the test seeds", masonry_seen >= 27, str(masonry_seen))
 check("Masonry rooms: rings carry brick+stone materials and a UV map, and no separate RoundDoors object exists", masonry_style_ok)
 check(
     "Masonry rooms: no walkable passage between two adjacent cells is blocked by a ring (every corridor/dead-corner opening is real)",
-    masonry_pairs > 600 and masonry_sealed == 0, f"{masonry_sealed}/{masonry_pairs} adjacent cell pairs blocked",
+    masonry_pairs > 900 and masonry_sealed == 0, f"{masonry_sealed}/{masonry_pairs} adjacent cell pairs blocked",
 )
 check("Masonry rooms: stairs never intersect a ring (both the 0.61 m repro config and full 3 m walls)", masonry_stair_hits == 0, f"{masonry_stair_hits} face overlaps over {masonry_stairs_checked} object pairs")
 scene.wfc_door_style = 'FLAT'
+scene.wfc_round_wall_ruin = 0.0
 
 # ==============================================================================
 # Presets -- Isometric / FPS-Immersive-Sim / Compact Roguelike / Megadungeon.
@@ -2349,7 +2351,7 @@ check("Tower: inner shell faces point inward", n_in > 20 and bad_in == 0, f"{bad
 floor_polys = [
     p for p in me.polygons
     if p.material_index == 1 and abs(p.normal.z) > 0.99 and all(abs(me.vertices[i].co.z) < 1e-4 for i in p.vertices)
-    and math.hypot(p.center.x, p.center.y) < R_in
+    and any(math.hypot(me.vertices[i].co.x, me.vertices[i].co.y) < 1e-6 for i in p.vertices)
 ]
 check("Tower: ground slab faces up", len(floor_polys) > 8 and all(p.normal.z > 0 for p in floor_polys))
 
@@ -2404,6 +2406,64 @@ bpy.ops.object.generate_level_tower()
 small = len(bpy.data.objects[addon.TOWER_OBJECT_NAME].data.vertices)
 check("Tower interior: a too-narrow tower skips the stairs instead of failing", small > 0)
 scene.wfc_tower_radius, scene.wfc_tower_wall = 3.0, 0.55
+bpy.ops.object.generate_level_tower()
+tower = bpy.data.objects[addon.TOWER_OBJECT_NAME]
+
+# Ruin: jagged stepped top, breaches, rubble; doorway stays passable; stays a valid mesh.
+scene.wfc_tower_detail = 'MEDIUM'
+scene.wfc_tower_interior = True
+scene.wfc_tower_height = 11.0
+intact = len(bpy.data.objects[addon.TOWER_OBJECT_NAME].data.vertices)
+tops_by_ruin = {}
+for ruin_amount in (0.3, 0.6, 1.0):
+    scene.wfc_tower_ruin = ruin_amount
+    result = bpy.ops.object.generate_level_tower()
+    check(f"Tower ruin {ruin_amount}: FINISHED", result == {'FINISHED'}, str(result))
+    rt = bpy.data.objects[addon.TOWER_OBJECT_NAME]
+    rme = rt.data
+    ring_tops = []
+    cap_bad = 0
+    for k in range(72):
+        ang = math.tau * (k + 0.5) / 72
+        hit = rt.ray_cast(Vector((2.75 * math.cos(ang), 2.75 * math.sin(ang), 30.0)), Vector((0, 0, -1)), distance=40.0)
+        ring_tops.append(hit[1].z if hit[0] else 0.0)
+        cap_bad += (not hit[0]) or hit[2].z < 0.9
+    tops_by_ruin[ruin_amount] = ring_tops
+    check(f"Tower ruin {ruin_amount}: wall top is broken (varied heights, lower than intact 11 m)",
+          max(ring_tops) - min(ring_tops) > 0.8 and sum(ring_tops) / len(ring_tops) < 10.5,
+          f"min={min(ring_tops):.2f} max={max(ring_tops):.2f}")
+    check(f"Tower ruin {ruin_amount}: nothing below the ground", min(v.co.z for v in rme.vertices) > -0.01)
+    check(f"Tower ruin {ruin_amount}: every wall top seen from above is an upward-facing cap", cap_bad == 0, f"{cap_bad} of 72 samples")
+    door_ray = rt.ray_cast(Vector((0, -6.0, 0.3)), Vector((0, 1, 0)), distance=12.0)
+    check(f"Tower ruin {ruin_amount}: the door still lets a ray in (first hit is the far wall)", door_ray[0] and door_ray[1].y > 1.5, str(door_ray[:2]))
+check("Tower ruin: more ruin means a lower average wall top",
+      sum(tops_by_ruin[1.0]) < sum(tops_by_ruin[0.6]) < sum(tops_by_ruin[0.3]),
+      str({k: round(sum(v) / len(v), 2) for k, v in tops_by_ruin.items()}))
+scene.wfc_tower_ruin = 0.6
+bpy.ops.object.generate_level_tower()
+a_verts = [tuple(round(c, 4) for c in v.co) for v in bpy.data.objects[addon.TOWER_OBJECT_NAME].data.vertices]
+bpy.ops.object.generate_level_tower()
+b_verts = [tuple(round(c, 4) for c in v.co) for v in bpy.data.objects[addon.TOWER_OBJECT_NAME].data.vertices]
+check("Tower ruin: same seed gives the same ruin", a_verts == b_verts)
+scene.wfc_tower_ruin = 0.0
+scene.wfc_tower_height = 9.0
+bpy.ops.object.generate_level_tower()
+tower = bpy.data.objects[addon.TOWER_OBJECT_NAME]
+# Stacked windows (3+ storeys share an angle) must each be cut: regression, only the lowest used to be.
+scene.wfc_tower_height = 13.0
+scene.wfc_tower_windows = 2
+bpy.ops.object.generate_level_tower()
+tall = bpy.data.objects[addon.TOWER_OBJECT_NAME]
+def _window_cut(z):
+    # a slit window of the 1st storey's angle (door 270 + 45 = 315 deg): a horizontal ray through its centre at height z must pass the wall
+    ang = math.radians(315.0)
+    o = Vector((6.0 * math.cos(ang), 6.0 * math.sin(ang), z))
+    return not tall.ray_cast(o, Vector((-math.cos(ang), -math.sin(ang), 0.0)), distance=3.2)[0] or tall.ray_cast(o, Vector((-math.cos(ang), -math.sin(ang), 0.0)), distance=3.2)[1].length > 2.6
+storeys_tall = max(1, int(12.0 // 3.0))
+sh_tall = 12.0 / storeys_tall
+check("Tower: the window of every storey at a shared angle is really cut (13 m tower)",
+      all(_window_cut(k * sh_tall + 1.85) for k in range(0, storeys_tall, 2)))
+scene.wfc_tower_height = 9.0
 bpy.ops.object.generate_level_tower()
 tower = bpy.data.objects[addon.TOWER_OBJECT_NAME]
 

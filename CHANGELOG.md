@@ -3,6 +3,21 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.30.0
+
+- **New: ruins.** A "Ruin" slider (0..1, default 0) on the Tower tab and, for Masonry Round rooms, on the
+  Walls tab. The wall top breaks down into a jagged edge that steps along whole brick courses (low-
+  frequency noise plus a few deep notches), flat stone caps and vertical end faces close the broken
+  edges, and fallen blocks lie around the base (outside for towers, inside against the wall for rooms,
+  always clear of doorways and low enough to step over). A window or arch whose top fell away becomes a
+  plain breach; windows above the broken top simply vanish. Battlements disappear, tower floors above the
+  lowest broken wall top are gone, and doorways stay passable. Seeded, so a ruin is reproducible.
+- **Fixed: stacked tower windows.** On towers of three or more storeys the windows of different storeys
+  share an angle, and only the lowest was actually cut through the wall. Every storey's window is cut now.
+- Tests: ruin profile (varied, lower with more ruin, deterministic), upward-facing caps, door ray,
+  no geometry below ground, stacked windows; Round-room passages with Ruin = 1 across 5 seeds x 3 door
+  styles (27 108 cell pairs).
+
 ## 0.29.1
 
 - **Fixed: masonry Round-room rings clipped stair runs at full wall height.** The "stair clips the
