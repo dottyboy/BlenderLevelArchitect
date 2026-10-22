@@ -9122,6 +9122,10 @@ def plan_validate(root):
             problem = plan_polygon_problem(fp)
             if problem:
                 errors.append("%s: %s" % (where, problem))
+        if node.get("type") == "block":
+            problem = _block_graph_problem(node.get("params") or {})
+            if problem:
+                errors.append("%s: %s" % (where, problem))
         for rule in (node.get("params") or {}).get("layout") or []:
             problem = _layout_rule_problem(rule)
             if problem:
@@ -9377,10 +9381,208 @@ def _expand_compound(node, seed):
     return out, warnings
 
 
+# ------------------------------------------------------------------------------
+# Blocks: a road graph plus lots along it. `params.road_graph` = {"nodes": {id: [x, y]},
+# "edges": [[a, b] | [a, b, {"width": w}]]} (straight edges, block-local metres). Buildings
+# are generated along both sides of every edge, their door turned toward the road, and
+# skipped where they would touch a road, another building or the block's footprint.
+#   lot_width, lot_depth, setback, lot_gap, skip_chance, road_width,
+#   fill: [{"kind": "house", "weight": 3, "params": {...},
+#           "size": {"width": [6, 9], "depth": [5, 7], "floors": [1, 2]}}]
+# A block with params.from / params.to (anchor references) and no road_graph becomes a straight road
+# between those two anchors. Dead ends of the graph get `road` anchors (id = node id).
+# ------------------------------------------------------------------------------
+PLAN_BLOCK_DEFAULTS = dict(lot_width=9.0, lot_depth=12.0, setback=1.5, lot_gap=1.0, skip_chance=0.1, road_width=5.0)
+PLAN_BLOCK_DEFAULT_FILL = [{"kind": "house", "weight": 1}]
+
+
+def plan_block_graph(node):
+    """(nodes {id: (x, y)}, edges [(a, b, width)]) from a block's road_graph; ([], []) when it has none."""
+    params = node.get("params") or {}
+    graph = params.get("road_graph")
+    if not graph:
+        return {}, []
+    width0 = float(params.get("road_width", PLAN_BLOCK_DEFAULTS["road_width"]))
+    nodes = {k: (float(v[0]), float(v[1])) for k, v in graph.get("nodes", {}).items()}
+    edges = []
+    for e in graph.get("edges", []):
+        opts = e[2] if len(e) > 2 and isinstance(e[2], dict) else {}
+        edges.append((e[0], e[1], float(opts.get("width", width0))))
+    return nodes, edges
+
+
+def _block_graph_problem(params):
+    graph = params.get("road_graph")
+    if graph is None:
+        return None
+    if not isinstance(graph, dict) or not isinstance(graph.get("nodes"), dict) or not isinstance(graph.get("edges"), list):
+        return "road_graph needs 'nodes' (object) and 'edges' (list)"
+    for k, v in graph["nodes"].items():
+        if not (isinstance(v, (list, tuple)) and len(v) == 2 and all(isinstance(c, (int, float)) and not isinstance(c, bool) for c in v)):
+            return "road_graph node %r must be [x, y]" % (k,)
+    for e in graph["edges"]:
+        if not isinstance(e, (list, tuple)) or len(e) < 2 or e[0] not in graph["nodes"] or e[1] not in graph["nodes"]:
+            return "road_graph edge %r refers to an unknown node" % (e,)
+        if e[0] == e[1]:
+            return "road_graph edge %r joins a node to itself" % (e,)
+        a, b = graph["nodes"][e[0]], graph["nodes"][e[1]]
+        if math.hypot(a[0] - b[0], a[1] - b[1]) < 1.0:
+            return "road_graph edge %r is shorter than 1 m" % (e,)
+        if len(e) > 2 and isinstance(e[2], dict):
+            w = e[2].get("width", 5.0)
+            if isinstance(w, bool) or not isinstance(w, (int, float)) or not 1.0 <= w <= 20.0:
+                return "road width must be 1..20 m"
+    for key, lo, hi in (("road_width", 1.0, 20.0), ("lot_width", 3.0, 30.0), ("lot_depth", 3.0, 40.0),
+                        ("setback", 0.0, 10.0), ("lot_gap", 0.0, 10.0), ("skip_chance", 0.0, 1.0)):
+        v = params.get(key)
+        if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi):
+            return "%s must be a number in %s..%s" % (key, lo, hi)
+    for rule in params.get("fill") or []:
+        if not isinstance(rule, dict) or not isinstance(rule.get("kind"), str):
+            return "each fill rule needs a string 'kind'"
+        w = rule.get("weight", 1)
+        if isinstance(w, bool) or not isinstance(w, (int, float)) or w < 0:
+            return "fill weight must be a number >= 0"
+        for key, rng_ in (rule.get("size") or {}).items():
+            if not (isinstance(rng_, (list, tuple)) and len(rng_) == 2 and rng_[0] <= rng_[1]):
+                return "fill size %r must be [min, max]" % (key,)
+    return None
+
+
+def _edge_rect(a, b, half_width):
+    """The road ribbon of one edge as a polygon (extended by half a width at both ends)."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    ln = math.hypot(dx, dy)
+    ux, uy = dx / ln, dy / ln
+    px, py = -uy * half_width, ux * half_width
+    ax, ay, bx, by = a[0] - ux * half_width, a[1] - uy * half_width, b[0] + ux * half_width, b[1] + uy * half_width
+    return [(ax + px, ay + py), (bx + px, by + py), (bx - px, by - py), (ax - px, ay - py)]
+
+
+def _anchor_world(root, resolved, ref):
+    """World (x, y, z) of the anchor a reference points at, or None."""
+    plan_path, anchor_id = plan_parse_ref(ref)
+    n = len(plan_path)
+    for node, path in plan_iter(root):
+        if path[-n:] == plan_path:
+            for anchor in node.get("anchors", []):
+                if anchor.get("id") == anchor_id:
+                    wx, wy, wz, wrot = resolved[path]["world"]
+                    c, s = math.cos(math.radians(wrot)), math.sin(math.radians(wrot))
+                    px, py = anchor["pos"][0], anchor["pos"][1]
+                    return (wx + px * c - py * s, wy + px * s + py * c, wz + (anchor["pos"][2] if len(anchor["pos"]) > 2 else 0.0))
+    return None
+
+
+def _expand_block(node, seed):
+    """(generated buildings, road-end anchors, warnings) for one block."""
+    params = node.get("params") or {}
+    nodes, edges = plan_block_graph(node)
+    if not edges:
+        return [], [], []
+    p = {**PLAN_BLOCK_DEFAULTS, **params}
+    fills = params.get("fill") or PLAN_BLOCK_DEFAULT_FILL
+    rng = random.Random(plan_child_seed(seed, "block"))
+    footprint = plan_footprint(node)
+    container = [tuple(q) for q in footprint] if footprint and not plan_polygon_problem(footprint) else None
+    roads = [_convex_hull(_edge_rect(nodes[a], nodes[b], w / 2.0)) for a, b, w in edges]
+    placed, out, warnings = [], [], []
+    used_ids = {c.get("id") for c in node.get("children", [])}
+    for child in node.get("children", []):
+        cfp = plan_footprint(child)
+        if cfp and not plan_polygon_problem(cfp):
+            t = child.get("transform") or {}
+            placed.append(_convex_hull(_poly_transform(cfp, t.get("x", 0.0), t.get("y", 0.0), t.get("rot", 0.0))))
+    weights = [max(0.0, float(r.get("weight", 1))) for r in fills]
+    total = tried = 0
+    for (a, b, w), _road in zip(edges, roads):
+        ax, ay = nodes[a]
+        bx, by = nodes[b]
+        L = math.hypot(bx - ax, by - ay)
+        ux, uy = (bx - ax) / L, (by - ay) / L
+        for side in (1.0, -1.0):
+            nx, ny = -uy * side, ux * side
+            u = p["lot_width"] / 2.0
+            while u + p["lot_width"] / 2.0 <= L + 1e-6:
+                total += 1
+                step = p["lot_width"] + p["lot_gap"]
+                rule = rng.choices(fills, weights=weights if sum(weights) > 0 else None)[0]
+                if rng.random() < p["skip_chance"]:
+                    u += step
+                    continue
+                bparams = dict(rule.get("params") or {})
+                for key, (lo, hi) in (rule.get("size") or {}).items():
+                    bparams[key] = rng.randint(int(lo), int(hi)) if key == "floors" else round(rng.uniform(lo, hi), 2)
+                proto = plan_node("proto", "building", rule["kind"], params=bparams)
+                base = plan_footprint(proto)
+                if not base:
+                    u += step
+                    continue
+                half_depth = max(abs(q[1]) for q in base)
+                off = w / 2.0 + p["setback"] + half_depth
+                cx, cy = ax + ux * u + nx * off, ay + uy * u + ny * off
+                rot = math.degrees(math.atan2(-ny, -nx)) + 90.0          # door (local -y) toward the road
+                poly = _convex_hull(_poly_transform(base, cx, cy, rot))
+                tried += 1
+                ok = (container is None or _inside_with_margin(poly, container, 0.5))
+                ok = ok and all(_convex_gap(poly, r_) > 0.4 for r_ in roads)
+                ok = ok and all(_convex_gap(poly, q) >= p["lot_gap"] for q in placed)
+                if ok:
+                    placed.append(poly)
+                    k = 1
+                    while "%s_%d" % (rule["kind"], k) in used_ids:
+                        k += 1
+                    cid = "%s_%d" % (rule["kind"], k)
+                    used_ids.add(cid)
+                    child = plan_node(cid, "building", rule["kind"], params=bparams,
+                                      transform={"x": round(cx, 3), "y": round(cy, 3), "z": 0.0, "rot": round(rot, 3)})
+                    child["generated"] = True
+                    out.append(child)
+                u += step
+    if total and len(out) < total * 0.3:
+        warnings.append("block: only %d of %d lots could be used" % (len(out), total))
+    degree = {}
+    for a, b, _w in edges:
+        degree[a] = degree.get(a, 0) + 1
+        degree[b] = degree.get(b, 0) + 1
+    anchors = []
+    have = {an.get("id") for an in node.get("anchors", [])}
+    for nid, d in degree.items():
+        if d == 1 and nid not in have:
+            (a, b, w) = next(e for e in edges if nid in (e[0], e[1]))
+            other = nodes[b if a == nid else a]
+            here = nodes[nid]
+            ang = math.degrees(math.atan2(here[1] - other[1], here[0] - other[0])) % 360.0
+            anchors.append({"id": nid, "kind": "road", "pos": [here[0], here[1], 0.0], "dir": round(ang, 3), "width": w, "level": 0})
+    return out, anchors, warnings
+
+
+def _plan_connect_roads(root):
+    """Turns blocks that only have from/to anchor references into straight two-node road graphs (block-local)."""
+    resolved = plan_resolve(root)
+    for node, path in plan_iter(root):
+        params = node.get("params") or {}
+        if node.get("type") != "block" or params.get("road_graph") or not params.get("from") or not params.get("to"):
+            continue
+        a = _anchor_world(root, resolved, params["from"])
+        b = _anchor_world(root, resolved, params["to"])
+        if a is None or b is None:
+            continue
+        wx, wy, wz, wrot = resolved[path]["world"]
+        c, s = math.cos(math.radians(-wrot)), math.sin(math.radians(-wrot))
+
+        def local(pt):
+            dx, dy = pt[0] - wx, pt[1] - wy
+            return [round(dx * c - dy * s, 4), round(dx * s + dy * c, 4)]
+        node["params"] = dict(params)
+        node["params"]["road_graph"] = {"nodes": {"from": local(a), "to": local(b)}, "edges": [["from", "to"]]}
+
+
 def plan_expand_layout(root):
     """A copy of the tree in which every compound's layout rules are replaced by the child plans they produce.
     Returns (expanded_root, warnings). Generated children carry "generated": true; the input is not modified."""
     root = json.loads(json.dumps(root))
+    _plan_connect_roads(root)
     resolved_seed = {}
     warnings = []
 
@@ -9388,6 +9590,9 @@ def plan_expand_layout(root):
         seed = node["seed"] if node.get("seed") is not None else (plan_child_seed(parent_seed, node["id"]) if parent_seed is not None else 0)
         resolved_seed[path] = seed
         generated, warn = _expand_compound(node, seed) if node.get("type") == "compound" else ([], [])
+        if node.get("type") == "block":
+            generated, road_anchors, warn = _expand_block(node, seed)
+            node["anchors"] = list(node.get("anchors", [])) + road_anchors
         warnings.extend("%s: %s" % ("/".join(path), w) for w in warn)
         node["children"] = node.get("children", []) + generated
         if generated and isinstance(node.get("params"), dict):
@@ -10026,6 +10231,26 @@ def _plan_build_compound(context, node, world, seed, path):
     return [_plan_add_mesh_object(context, soup, "Fence_" + node["id"], p["brick_color"], path, world)]
 
 
+def _build_road_mesh(nodes, edges):
+    """Flat stone ribbons, one per edge, a hair above the ground (each edge a touch higher so overlaps at
+    junctions do not fight); ends are extended by half a width so junctions and dead ends are covered."""
+    soup = _TowerMesh()
+    tile = TOWER_TILE_W
+    for i, (a, b, w) in enumerate(edges):
+        z = 0.03 + 0.002 * (i % 8)
+        quad = [(x, y, z) for x, y in _edge_rect(nodes[a], nodes[b], w / 2.0)]
+        soup.poly('road', quad, [(q[0] / tile, q[1] / tile) for q in quad], (0.0, 0.0, 1.0), 1)
+    return soup
+
+
+def _plan_build_block(context, node, world, seed, path):
+    """The road surface of a block (its buildings are separate child plans)."""
+    nodes, edges = plan_block_graph(node)
+    if not edges:
+        return []
+    return [_plan_add_mesh_object(context, _build_road_mesh(nodes, edges), "Road_" + node["id"], 'PLAIN', path, world)]
+
+
 def _plan_build_house(context, node, world, seed, path):
     where = "/".join(path)
     try:
@@ -10056,6 +10281,10 @@ def plan_build(context, root):
     for node, path in plan_iter(root):
         if node["type"] == "compound":
             if _plan_build_compound(context, node, resolved[path]["world"], resolved[path]["seed"], path):
+                built.append("/".join(path))
+            continue
+        if node["type"] == "block":
+            if _plan_build_block(context, node, resolved[path]["world"], resolved[path]["seed"], path):
                 built.append("/".join(path))
             continue
         if node["type"] != "building":
@@ -10095,6 +10324,24 @@ def plan_new_example(scene, kind, existing_ids):
             ]},
             anchors=[{"id": "gate", "kind": "gate", "pos": [0.0, -half_d, 0.0], "dir": 270.0, "width": 4.0, "level": 0}],
             children=[castle])
+    if kind == 'STREET':
+        return plan_node(
+            unique("street"), "block", "street", transform=transform,
+            params={"road_graph": {"nodes": {"west": [-36.0, 0.0], "east": [36.0, 0.0]}, "edges": [["west", "east"]]},
+                    "road_width": 5.0, "lot_width": 9.0, "lot_depth": 11.0, "skip_chance": 0.1,
+                    "fill": [{"kind": "house", "weight": 5, "size": {"width": [6.0, 9.0], "depth": [5.0, 7.0], "floors": [1, 2]}},
+                             {"kind": "stable", "weight": 1}, {"kind": "barn", "weight": 1}]})
+    if kind == 'BLOCK':
+        pts = {"sw": [-30, -30], "s": [0, -30], "se": [30, -30], "e": [30, 0], "ne": [30, 30], "n": [0, 30],
+               "nw": [-30, 30], "w": [-30, 0], "c": [0, 0]}
+        edges = [["sw", "s"], ["s", "se"], ["se", "e"], ["e", "ne"], ["ne", "n"], ["n", "nw"], ["nw", "w"], ["w", "sw"],
+                 ["w", "c"], ["c", "e"], ["s", "c"], ["c", "n"]]
+        return plan_node(
+            unique("block"), "block", "district", transform=transform,
+            params={"road_graph": {"nodes": pts, "edges": edges}, "road_width": 5.0, "lot_width": 8.0, "lot_depth": 10.0,
+                    "skip_chance": 0.08,
+                    "fill": [{"kind": "house", "weight": 6, "size": {"width": [6.0, 8.0], "depth": [5.0, 6.5], "floors": [1, 2]}},
+                             {"kind": "stable", "weight": 1}]})
     if kind == 'FARM':
         return plan_node(
             unique("farm"), "compound", "farm", transform=transform,
@@ -10148,7 +10395,8 @@ class OBJECT_OT_PlanCreate(bpy.types.Operator):
 
     kind: EnumProperty(items=[('TOWER', "Tower", ""), ('CASTLE', "Castle", ""), ('GROUNDS', "Castle Grounds", ""),
                               ('HOUSE', "House", ""), ('CHAPEL', "Chapel", ""), ('STABLE', "Stable", ""),
-                              ('FORTRESS', "Fortress", ""), ('FARM', "Farm", ""), ('HAMLET', "Hamlet", "")])
+                              ('FORTRESS', "Fortress", ""), ('FARM', "Farm", ""), ('HAMLET', "Hamlet", ""),
+                              ('STREET', "Street", ""), ('BLOCK', "Block", "")])
 
     def execute(self, context):
         plan = plan_new_example(context.scene, self.kind, set(plan_list_ids()))
@@ -11496,7 +11744,7 @@ class VIEW3D_PT_GLAPlans(bpy.types.Panel):
         for kind, label in (('HOUSE', "House"), ('CHAPEL', "Chapel"), ('STABLE', "Stable")):
             row.operator("object.gla_plan_create", text=label).kind = kind
         row = layout.row(align=True)
-        for kind, label in (('FARM', "Farm"), ('HAMLET', "Hamlet")):
+        for kind, label in (('FARM', "Farm"), ('HAMLET', "Hamlet"), ('STREET', "Street"), ('BLOCK', "Block")):
             row.operator("object.gla_plan_create", text=label).kind = kind
         for plan_id in plan_list_ids():
             box = layout.box()

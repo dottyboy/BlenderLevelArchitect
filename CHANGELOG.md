@@ -3,6 +3,17 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## Unreleased — plans (M4)
+
+- **Blocks and streets.** A `block` plan carries a road graph (`params.road_graph`: nodes and straight edges with optional
+  widths); the road surface is built as flat stone ribbons and buildings are generated along both sides of every edge
+  (`lot_width`, `lot_depth`, `setback`, `lot_gap`, `skip_chance`, weighted `fill` rules with `size` ranges for width, depth
+  and floors). Doors face the road; buildings are skipped where they would touch a road, another building or the block's
+  footprint. Dead ends of the graph get `road` anchors.
+- **Connecting roads.** A block with `params.from` / `params.to` (anchor references, e.g. `"farm/gate"`) and no graph becomes a
+  straight road between those two anchors, wherever the plans are placed or rotated.
+- New **Street** (72 m street with houses, stables and barns on both sides) and **Block** (a grid of streets) examples.
+
 ## Unreleased — plans (M3)
 
 - **Wooden fence** (`fence: "wood"`): posts about every 2 m and two rails along the footprint, an open gap with taller gate posts at

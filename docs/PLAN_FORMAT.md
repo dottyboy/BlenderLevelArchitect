@@ -58,7 +58,7 @@ Generated buildings add their own anchors (their doors) back into the data, so l
 | building / tower | `radius`, `height`, `wall`, `door`, `door_angle`, `windows`, `interior`, `stair_width`, `rail`, `lights`, `props`, `battlements`, `ruin`, `brick_color` |
 | building / house, chapel, stable, barn | `width`, `depth`, `wall_height`, `floors`, `wall_thickness`, `roof` (GABLE / FLAT / NONE), `roof_pitch`, `door` (S/E/N/W/NONE), `door_style`, `door_width/height`, `windows`, `window_kind/width/height/sill`, `brick_color`, `ruin`, `detail` (defaults per kind in `PLAN_HOUSE_DEFAULTS`) |
 | compound | `fence` (`none` / `stone` / `wood`), `fence_height`, `fence_thickness`, `gate_height`, `layout` rules: list of `{ "kind": "barn", "count": [1,2], "near": "free" / "wall" / "ring" (with `"ring": [inner, outer]`), "at": "corners", "min_gap": 3, "params": {} }`, `layout_target` (child id, default: the first castle), `layout_margin`, `corridor_width` |
-| block | `road_graph` (nodes + edges with width), `lot_depth`, `lot_width`, `fill` rules per building kind |
+| block | `road_graph` (`{nodes: {id: [x, y]}, edges: [[a, b], [a, b, {width}]]}`), `road_width`, `lot_width`, `lot_depth`, `setback`, `lot_gap`, `skip_chance`, `fill` rules (`kind`, `weight`, `params`, `size` ranges); or `from` / `to` anchor references for a straight connecting road |
 | settlement | `blocks`, `squares`, `walls`, `main_roads`, `density` |
 | terrain | section 5 |
 

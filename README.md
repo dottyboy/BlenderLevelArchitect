@@ -90,7 +90,7 @@ in the .blend and as `.plan.json`, are fully seeded, and can place buildings for
 * **Compound plans**: a footprint with a stone enclosure and gate, and `layout` rules ("1 chapel on the wall, 1-2 stables, 3 houses")
   that place buildings without overlap, keep the way from the gate to the castle free and turn doors toward it.
 * In Blender: sidebar **Level Architect > Plans (experimental)** — pick Tower, Castle, Grounds, Fortress, Farm, Hamlet, House, Chapel or
-  Stable at the 3D cursor, then **Build**. Format: [docs/PLAN_FORMAT.md](docs/PLAN_FORMAT.md); roadmap towards farms, villages,
+  Stable, Street or Block at the 3D cursor, then **Build**. Format: [docs/PLAN_FORMAT.md](docs/PLAN_FORMAT.md); roadmap towards farms, villages,
   towns, culture styles and biomes: [docs/WORLD_GENERATOR_PLAN.md](docs/WORLD_GENERATOR_PLAN.md).
 
 ## Install

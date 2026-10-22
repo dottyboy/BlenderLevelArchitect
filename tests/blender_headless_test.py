@@ -3991,6 +3991,106 @@ check("Panel: Farm and Hamlet buttons create plans",
       bpy.ops.object.gla_plan_create(kind='FARM') == {'FINISHED'} and bpy.ops.object.gla_plan_create(kind='HAMLET') == {'FINISHED'})
 
 # ==============================================================================
+print("\n--- Plans: blocks, streets and connecting roads ---")
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+scene.cursor.location = (0.0, 0.0, 0.0)
+street = addon.plan_new_example(scene, 'STREET', set())
+exp, warns = addon.plan_expand_layout(street)
+exp2, _ = addon.plan_expand_layout(street)
+gen = [c for c in exp["children"] if c.get("generated")]
+check("Street: the stored plan is not modified by expansion", not street["children"])
+check("Street: deterministic", exp == exp2)
+check("Street: a 72 m street gets many buildings on both sides", len(gen) >= 10, str(len(gen)) + str(warns))
+check("Street: houses on both sides of the road", any(c["transform"]["y"] > 0 for c in gen) and any(c["transform"]["y"] < 0 for c in gen))
+nodes, edges = addon.plan_block_graph(street)
+roads = [addon._convex_hull(addon._edge_rect(nodes[a], nodes[b], w / 2.0)) for a, b, w in edges]
+polys = [addon._convex_hull(_world_poly(c)) for c in gen]
+check("Street: no building touches the road", all(addon._convex_gap(p_, r) > 0.4 for p_ in polys for r in roads))
+gaps = [addon._convex_gap(a, b) for i, a in enumerate(polys) for b in polys[i + 1:]]
+check("Street: buildings keep the lot gap from each other", min(gaps) >= 1.0 - 1e-6, str(min(gaps)))
+
+
+def _door_points_at_road(child, road_y=0.0, tol=1.5):
+    t = child["transform"]
+    face = math.radians(t["rot"] - 90.0)
+    depth = addon.plan_footprint(addon.plan_node("x", "building", child["kind"], params=child["params"]))
+    half = max(abs(q[1]) for q in depth)
+    px = t["x"] + math.cos(face) * (half + 1.5 + 2.5)
+    py = t["y"] + math.sin(face) * (half + 1.5 + 2.5)
+    return abs(py - road_y) < tol
+check("Street: every door faces the road", all(_door_points_at_road(c) for c in gen))
+check("Street: dead ends get road anchors", {a["id"] for a in exp["anchors"] if a["kind"] == "road"} == {"west", "east"})
+check("Street: the sizes vary", len({c["params"].get("width") for c in gen if c["kind"] == "house"}) > 3)
+res = addon.plan_build(bpy.context, street)
+check("Street: builds the road and every building", len(res["built"]) == 1 + len(gen), str(res["built"][:3]))
+rd = next(o for o in bpy.data.objects if o.name.startswith("PB_" + street["id"] + "_Road") and o.type == 'MESH')
+bpy.context.view_layer.update()
+hit = _ray((0.0, 0.0, 3.0), (0.0, 0.0, -1.0))
+check("Street: the road surface is just above the ground", hit is not None and 0.0 < hit.z < 0.1, str(hit))
+x0, x1 = min((rd.matrix_world @ v.co).x for v in rd.data.vertices), max((rd.matrix_world @ v.co).x for v in rd.data.vertices)
+check("Street: the road ribbon spans the graph plus half a width at each end", abs((x1 - x0) - 77.0) < 0.2, str(x1 - x0))
+# district
+block = addon.plan_new_example(scene, 'BLOCK', set())
+exp, warns = addon.plan_expand_layout(block)
+gen = [c for c in exp["children"] if c.get("generated")]
+nodes, edges = addon.plan_block_graph(block)
+roads = [addon._convex_hull(addon._edge_rect(nodes[a], nodes[b], w / 2.0)) for a, b, w in edges]
+polys = [addon._convex_hull(_world_poly(c)) for c in gen]
+check("Block: a grid of streets gets many buildings", len(gen) >= 20, str(len(gen)) + str(warns))
+check("Block: nothing on a road, nothing overlapping",
+      all(addon._convex_gap(p_, r) > 0.4 for p_ in polys for r in roads)
+      and min(addon._convex_gap(a, b) for i, a in enumerate(polys) for b in polys[i + 1:]) >= 1.0 - 1e-6)
+check("Block: a closed grid has no dead-end anchors", not [a for a in exp["anchors"] if a["kind"] == "road"])
+check("Block: builds", len(addon.plan_build(bpy.context, block)["built"]) == 1 + len(gen))
+# graph validation
+for bad_graph, label in (({"nodes": {"a": [0, 0]}, "edges": [["a", "b"]]}, "unknown node"),
+                         ({"nodes": {"a": [0, 0], "b": [0.2, 0]}, "edges": [["a", "b"]]}, "too short"),
+                         ({"nodes": {"a": [0, 0]}, "edges": [["a", "a"]]}, "self loop"),
+                         ({"nodes": {"a": [0]}, "edges": []}, "bad coordinates"),
+                         ({"nodes": {"a": [0, 0], "b": [9, 0]}, "edges": [["a", "b", {"width": 99}]]}, "huge width")):
+    bad = addon.plan_node("g", "block", "street", params={"road_graph": bad_graph})
+    check("Block: invalid graph refused - " + label, bool(addon.plan_validate(bad)[0]))
+bad = addon.plan_node("g", "block", "street", params={"road_graph": {"nodes": {"a": [0, 0], "b": [9, 0]}, "edges": [["a", "b"]]},
+                                                      "fill": [{"kind": "house", "weight": -1}]})
+check("Block: negative fill weight refused", bool(addon.plan_validate(bad)[0]))
+# rotation of a block turns everything
+street["transform"]["rot"] = 90.0
+addon.plan_build(bpy.context, street)
+bpy.context.view_layer.update()
+x0, x1, y0, y1, z0, z1 = _bounds_of(street["id"])
+check("Block: a rotated street now runs along y", (y1 - y0) > (x1 - x0) + 30.0, str((x1 - x0, y1 - y0)))
+street["transform"]["rot"] = 0.0
+# connecting road between two anchors
+sitea = addon.plan_node("sa", "compound", "yard", footprint=[[-5, -5], [5, -5], [5, 5], [-5, 5]],
+                        transform={"x": 0.0, "y": 0.0, "z": 0.0, "rot": 0.0},
+                        anchors=[{"id": "gate", "kind": "gate", "pos": [5.0, 0.0, 0.0], "dir": 0.0, "width": 3.0}])
+siteb = addon.plan_node("sb", "compound", "yard", footprint=[[-5, -5], [5, -5], [5, 5], [-5, 5]],
+                        transform={"x": 60.0, "y": 20.0, "z": 0.0, "rot": 180.0},
+                        anchors=[{"id": "gate", "kind": "gate", "pos": [5.0, 0.0, 0.0], "dir": 0.0, "width": 3.0}])
+link = addon.plan_node("link", "block", "road", params={"from": "sa/gate", "to": "sb/gate", "road_width": 4.0,
+                                                        "skip_chance": 1.0})
+world = addon.plan_node("world", "settlement", "pair", children=[sitea, siteb, link])
+check("Connect: the plan is valid", addon.plan_validate(world)[0] == [], str(addon.plan_validate(world)))
+exp, _ = addon.plan_expand_layout(world)
+g = exp["children"][2]["params"]["road_graph"]
+check("Connect: the road runs from the first gate to the second gate in world space",
+      g["nodes"]["from"] == [5.0, 0.0] and all(abs(a - b) < 1e-3 for a, b in zip(g["nodes"]["to"], [55.0, 20.0])), str(g))
+res = addon.plan_build(bpy.context, world)
+check("Connect: the plan builds the road between the sites", "world/link" in res["built"], str(res["built"]))
+lk = next(o for o in bpy.data.objects if o.name.startswith("PB_world.link_Road"))
+bpy.context.view_layer.update()
+xs = [(lk.matrix_world @ v.co).x for v in lk.data.vertices]
+check("Connect: the ribbon covers from x = 5 to x = 55 (plus half a width)", min(xs) < 4.0 and max(xs) > 56.0, str((min(xs), max(xs))))
+broken = addon.plan_node("lk2", "block", "road", params={"from": "sa/gate", "to": "sb/nothing"})
+check("Connect: a missing target anchor is a validation error",
+      bool(addon.plan_validate(addon.plan_node("w2", "settlement", "pair", children=[sitea, siteb, broken]))[0]))
+check("Panel: Street and Block buttons create plans",
+      bpy.ops.object.gla_plan_create(kind='STREET') == {'FINISHED'} and bpy.ops.object.gla_plan_create(kind='BLOCK') == {'FINISHED'})
+
+# ==============================================================================
 print()
 if failures:
     print(f"{len(failures)} CHECK(S) FAILED:")
