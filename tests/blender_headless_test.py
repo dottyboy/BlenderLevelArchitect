@@ -3461,6 +3461,159 @@ check("Plan store: nothing left after clearing",
 del farm, farm2
 
 # ==============================================================================
+print("\n--- Plans: building plans match the panel buttons ---")
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+
+
+def _plan_signature(objs):
+    sig = []
+    for o in objs:
+        if o.type == 'MESH':
+            mw = o.matrix_world
+            tot = [0.0, 0.0, 0.0]
+            for v in o.data.vertices:
+                w = mw @ v.co
+                tot[0] += w.x
+                tot[1] += w.y
+                tot[2] += w.z
+            sig.append(("MESH", len(o.data.vertices), len(o.data.polygons), len(o.data.materials),
+                        tuple(round(c, 2) for c in tot)))
+        elif o.type == 'LIGHT':
+            sig.append(("LIGHT", tuple(round(c, 3) for c in o.matrix_world.translation)))
+    return sorted(sig)
+
+
+def _plan_objs(plan_id, path=None):
+    return [o for o in bpy.data.objects if o.name.startswith("PB_" + (path or plan_id))]
+
+
+scene.wfc_seed = 321
+scene.cursor.location = (40.0, -25.0, 2.0)
+scene.wfc_tower_props = True
+scene.wfc_tower_lights = True
+scene.wfc_tower_ruin = 0.0
+scene.wfc_castle_keep = True
+scene.wfc_castle_hall_props = True
+scene.wfc_castle_ruin = 0.0
+# panel tower
+bpy.ops.object.generate_level_tower()
+panel_tower = _plan_signature([o for o in bpy.data.objects if o.name.startswith(("Procedural_Level_Tower",
+                                                                               "Procedural_Level_LanternLight",
+                                                                               "Procedural_Level_InteriorProps"))])
+# a plan with the same parameters, same seed, same position
+tower_plan = addon.plan_node("tw", "building", "tower", seed=321, transform={"x": 40.0, "y": -25.0, "z": 2.0, "rot": 0.0},
+                             params=addon.plan_default_params(scene, addon.PLAN_TOWER_PARAMS))
+addon.plan_write_to_blend(scene, tower_plan)
+res = addon.plan_build(bpy.context, addon.plan_read_from_blend("tw"))
+check("Plan build: tower plan builds", res["built"] == ["tw"] and not res["skipped"])
+check("Plan build: tower matches the panel's output (meshes, props, lanterns)",
+      _plan_signature(_plan_objs("tw")) == panel_tower, "%s vs %s" % (_plan_signature(_plan_objs("tw"))[:2], panel_tower[:2]))
+check("Plan build: the panel's own tower survived the plan build",
+      any(o.name.startswith("Procedural_Level_Tower") for o in bpy.data.objects))
+check("Plan build: scene settings are restored afterwards",
+      scene.wfc_seed == 321 and tuple(scene.cursor.location) == (40.0, -25.0, 2.0))
+check("Plan build: built objects are in a Built_ collection",
+      bpy.data.collections.get("Built_tw") is not None and all(o.users_collection[0].name == "Built_tw"
+                                                                for o in _plan_objs("tw")))
+n_before = len(bpy.data.objects)
+addon.plan_build(bpy.context, addon.plan_read_from_blend("tw"))
+check("Plan build: rebuilding replaces, never duplicates", len(bpy.data.objects) == n_before)
+# castle
+for o in [o for o in bpy.data.objects if o.name.startswith("Procedural_Level_")]:
+    bpy.data.objects.remove(o, do_unlink=True)
+bpy.ops.object.generate_level_castle()
+panel_castle = _plan_signature([o for o in bpy.data.objects if o.name.startswith(("Procedural_Level_Castle",
+                                                                                "Procedural_Level_HallProps"))])
+castle_plan = addon.plan_node("ca", "building", "castle", seed=321, transform={"x": 40.0, "y": -25.0, "z": 2.0, "rot": 0.0},
+                              params=addon.plan_default_params(scene, addon.PLAN_CASTLE_PARAMS))
+addon.plan_write_to_blend(scene, castle_plan)
+addon.plan_build(bpy.context, addon.plan_read_from_blend("ca"))
+check("Plan build: castle matches the panel's output (walls, towers, hall furniture)",
+      _plan_signature(_plan_objs("ca")) == panel_castle)
+# nesting: grounds with a castle and a watchtower
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+scene.cursor.location = (0.0, 0.0, 0.0)
+grounds = addon.plan_new_example(scene, 'GROUNDS', set())
+check("Plan build: example grounds has a castle and a watchtower",
+      [c["id"] for c in grounds["children"]] == ["castle", "watchtower"])
+addon.plan_write_to_blend(scene, grounds)
+res = addon.plan_build(bpy.context, addon.plan_read_from_blend(grounds["id"]))
+check("Plan build: nested plan builds every building", len(res["built"]) == 2, str(res))
+tower_objs = [o for o in bpy.data.objects if o.name.startswith("PB_%s.watchtower" % grounds["id"]) and o.type == 'MESH']
+castle_objs = [o for o in bpy.data.objects if o.name.startswith("PB_%s.castle" % grounds["id"]) and o.type == 'MESH']
+check("Plan build: both buildings exist as separate meshes", bool(tower_objs) and bool(castle_objs))
+tx = sum((o.matrix_world @ v.co).x for o in tower_objs[:1] for v in o.data.vertices) / max(1, len(tower_objs[0].data.vertices))
+check("Plan build: the watchtower sits at its plan offset (x about %.0f)" % (scene.wfc_castle_width / 2 + 12.0),
+      abs(tx - (scene.wfc_castle_width / 2 + 12.0)) < 1.0, str(tx))
+# rotation of the compound turns the watchtower around the origin
+grounds["transform"]["rot"] = 90.0
+addon.plan_write_to_blend(scene, grounds)
+addon.plan_build(bpy.context, addon.plan_read_from_blend(grounds["id"]))
+tower_objs = [o for o in bpy.data.objects if o.name.startswith("PB_%s.watchtower" % grounds["id"]) and o.type == 'MESH']
+ty = sum((o.matrix_world @ v.co).y for o in tower_objs[:1] for v in o.data.vertices) / max(1, len(tower_objs[0].data.vertices))
+check("Plan build: a rotated compound turns its children (watchtower now on +y)",
+      abs(ty - (scene.wfc_castle_width / 2 + 12.0)) < 1.0, str(ty))
+# unbuildable kinds are skipped, not fatal; bad plans refused
+mixed = addon.plan_node("mix", "compound", "yard", footprint=[[-30, -30], [30, -30], [30, 30], [-30, 30]],
+                        children=[addon.plan_node("hut", "building", "house", footprint=[[-2, -2], [2, -2], [2, 2], [-2, 2]]),
+                                  addon.plan_node("tow", "building", "tower", params={"radius": 3.0})])
+res = addon.plan_build(bpy.context, mixed)
+check("Plan build: a kind without a builder is skipped with a reason, the rest builds",
+      res["built"] == ["mix/tow"] and res["skipped"][0][0] == "mix/hut")
+try:
+    addon.plan_build(bpy.context, addon.plan_node("x", "building", "tower", footprint=[[0, 0]]))
+    refused = False
+except addon.PlanError:
+    refused = True
+check("Plan build: an invalid plan is refused before anything is built", refused)
+out_of_range = addon.plan_node("oor", "building", "tower", params={"radius": 0.1})
+try:
+    addon.plan_build(bpy.context, out_of_range)
+    refused = False
+except addon.PlanError as exc:
+    refused = "radius" in str(exc) and "oor" in str(exc)
+check("Plan build: an out-of-range parameter is refused, not silently clamped", refused)
+bad_enum = addon.plan_node("be", "building", "tower", params={"brick_color": "PURPLE"})
+try:
+    addon.plan_build(bpy.context, bad_enum)
+    refused = False
+except addon.PlanError as exc:
+    refused = "brick_color" in str(exc)
+check("Plan build: an unknown enum value is refused", refused)
+tiny = addon.plan_node("tn", "building", "tower", params={"radius": 1.6, "wall": 1.4})
+try:
+    addon.plan_build(bpy.context, tiny)
+    refused = False
+except addon.PlanError as exc:
+    refused = "tn" in str(exc)
+check("Plan build: a builder refusal surfaces as a PlanError naming the plan", refused)
+# operators
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+check("Plan ops: create a castle plan", bpy.ops.object.gla_plan_create(kind='CASTLE') == {'FINISHED'}
+      and addon.plan_list_ids() == ["castle_1"])
+check("Plan ops: ids stay unique", bpy.ops.object.gla_plan_create(kind='CASTLE') == {'FINISHED'}
+      and addon.plan_list_ids() == ["castle_1", "castle_2"])
+check("Plan ops: build", bpy.ops.object.gla_plan_build(plan_id="castle_1") == {'FINISHED'}
+      and bpy.data.collections.get("Built_castle_1") is not None)
+check("Plan ops: remove deletes the plan and what it built",
+      bpy.ops.object.gla_plan_remove(plan_id="castle_1") == {'FINISHED'}
+      and bpy.data.collections.get("Built_castle_1") is None and addon.plan_list_ids() == ["castle_2"])
+check("Plan ops: grounds and tower kinds create",
+      bpy.ops.object.gla_plan_create(kind='GROUNDS') == {'FINISHED'} and bpy.ops.object.gla_plan_create(kind='TOWER') == {'FINISHED'})
+check("Plan ops: the Plans sub-panel draws",
+      (lambda: [addon.VIEW3D_PT_GLAPlans.draw(types.SimpleNamespace(layout=_FakeLayout({"props": [], "ops": [], "sections": []}, False)),
+                                              bpy.context)] and True)())
+
+# ==============================================================================
 print()
 if failures:
     print(f"{len(failures)} CHECK(S) FAILED:")

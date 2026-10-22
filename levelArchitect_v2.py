@@ -28,7 +28,7 @@ from bpy.props import (
     BoolProperty, CollectionProperty, EnumProperty, FloatProperty, FloatVectorProperty,
     IntProperty, StringProperty,
 )
-from bpy_extras.io_utils import ExportHelper
+from bpy_extras.io_utils import ExportHelper, ImportHelper
 
 bl_info = {
     "name": "Game Level Architect",
@@ -9254,6 +9254,268 @@ def plan_load_file(scene, filepath):
     return root
 
 
+# ------------------------------------------------------------------------------
+# Building plans. M1: the Tower and the Castle are wrapped, not rewritten -- a
+# plan's params are written to the scene settings the existing operator reads,
+# the operator runs at the plan's world position, and everything it made is moved
+# into the plan's Built_ collection. The output is therefore identical to
+# pressing the panel button with the same settings (tests compare both).
+# ------------------------------------------------------------------------------
+PLAN_TOWER_PARAMS = {
+    "radius": "wfc_tower_radius", "height": "wfc_tower_height", "wall": "wfc_tower_wall",
+    "battlements": "wfc_tower_battlements", "detail": "wfc_tower_detail", "brick_color": "wfc_tower_brick_color",
+    "ruin": "wfc_tower_ruin", "door": "wfc_tower_door", "door_angle": "wfc_tower_door_angle",
+    "windows": "wfc_tower_windows", "interior": "wfc_tower_interior", "stair_width": "wfc_tower_stair_width",
+    "rail": "wfc_tower_stair_rail", "lights": "wfc_tower_lights", "props": "wfc_tower_props",
+}
+PLAN_CASTLE_PARAMS = {
+    "width": "wfc_castle_width", "depth": "wfc_castle_depth", "wall_height": "wfc_castle_wall_height",
+    "wall_thickness": "wfc_castle_wall_thickness", "tower_radius": "wfc_castle_tower_radius",
+    "tower_height": "wfc_castle_tower_height", "detail": "wfc_tower_detail",
+    "brick_color": "wfc_castle_brick_color", "gate": "wfc_castle_gate", "keep": "wfc_castle_keep",
+    "hall_props": "wfc_castle_hall_props", "ruin": "wfc_castle_ruin",
+}
+PLAN_SHARED_SCENE_PROPS = ("wfc_seed", "wfc_torch_light_energy", "wfc_torch_light_color", "wfc_torch_light_radius",
+                           "wfc_uv_tile_size")
+
+
+def plan_default_params(scene, mapping):
+    """The scene's current values for a kind's parameters (JSON-safe), used when a plan is created."""
+    out = {}
+    for key, prop in mapping.items():
+        value = getattr(scene, prop)
+        out[key] = value if isinstance(value, (bool, int, float, str)) else list(value)
+    return out
+
+
+def _plan_stash(prefixes):
+    """Parks objects the wrapped operator would delete (it clears by name prefix) so a plan build
+    never destroys a tower or castle made from the panel; returns a function that restores them."""
+    parked = []
+    for prefix in prefixes:
+        for obj in _objects_matching_prefix(prefix):
+            parked.append((obj, obj.name))
+            obj.name = "zz_stash_" + obj.name
+    def restore():
+        for obj, name in parked:
+            obj.name = name
+    return restore
+
+
+def _plan_check_param(scene, where, key, prop, value):
+    """Refuses a value the matching scene property would silently clamp or reject."""
+    rna = scene.bl_rna.properties[prop]
+    if rna.type in ('INT', 'FLOAT'):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise PlanError("%s: params.%s must be a number" % (where, key))
+        if value < rna.hard_min or value > rna.hard_max:
+            raise PlanError("%s: params.%s = %s is outside %s..%s" % (where, key, value, rna.hard_min, rna.hard_max))
+    elif rna.type == 'ENUM':
+        if value not in {item.identifier for item in rna.enum_items}:
+            raise PlanError("%s: params.%s = %r is not one of %s" % (
+                where, key, value, ", ".join(i.identifier for i in rna.enum_items)))
+    elif rna.type == 'BOOLEAN' and not isinstance(value, bool):
+        raise PlanError("%s: params.%s must be true or false" % (where, key))
+
+
+def _plan_run_scene_operator(context, node, world, seed, path, op, mapping, prefixes):
+    scene = context.scene
+    wx, wy, wz, wrot = world
+    watched = list(dict.fromkeys(list(mapping.values()) + list(PLAN_SHARED_SCENE_PROPS)))
+    saved = {prop: getattr(scene, prop) for prop in watched}
+    saved_cursor = tuple(scene.cursor.location)
+    before = set(bpy.data.objects.keys())
+    restore = _plan_stash(prefixes)
+    try:
+        for key, prop in mapping.items():
+            if key in node.get("params", {}):
+                _plan_check_param(scene, "/".join(path), key, prop, node["params"][key])
+                setattr(scene, prop, node["params"][key])
+        scene.wfc_seed = int(seed) % 1_000_000
+        scene.cursor.location = (wx, wy, wz)
+        try:
+            result = op()
+        except RuntimeError as exc:
+            raise PlanError("%s: %s" % ("/".join(path), exc))
+        if 'FINISHED' not in result:
+            raise PlanError("%s: the %s builder refused these parameters." % ("/".join(path), node.get("kind")))
+    finally:
+        restore()
+        for prop, value in saved.items():
+            setattr(scene, prop, value)
+        scene.cursor.location = saved_cursor
+    new_objects = [bpy.data.objects[n] for n in bpy.data.objects.keys() if n not in before]
+    built = bpy.data.collections.new(PLAN_BUILT_PREFIX + _plan_key(path))
+    scene.collection.children.link(built)
+    pivot = bpy.data.objects.new("PlanBuilt_" + _plan_key(path), None)
+    pivot.empty_display_type = 'PLAIN_AXES'
+    pivot.location = (wx, wy, wz)
+    built.objects.link(pivot)
+    for obj in new_objects:
+        for coll in list(obj.users_collection):
+            coll.objects.unlink(obj)
+        built.objects.link(obj)
+        obj.name = "PB_%s_%s" % (_plan_key(path), obj.name)
+        obj.parent = pivot
+        obj.matrix_parent_inverse = pivot.matrix_world.inverted()
+    pivot.rotation_euler = (0.0, 0.0, math.radians(wrot))
+    return new_objects
+
+
+def _plan_build_tower(context, node, world, seed, path):
+    return _plan_run_scene_operator(
+        context, node, world, seed, path, bpy.ops.object.generate_level_tower, PLAN_TOWER_PARAMS,
+        (TOWER_OBJECT_NAME, TOWER_LIGHT_PREFIX, INTERIOR_PROPS_OBJECT_NAME))
+
+
+def _plan_build_castle(context, node, world, seed, path):
+    return _plan_run_scene_operator(
+        context, node, world, seed, path, bpy.ops.object.generate_level_castle, PLAN_CASTLE_PARAMS,
+        (CASTLE_OBJECT_NAME, HALL_PROPS_OBJECT_NAME))
+
+
+PLAN_BUILDERS = {"tower": _plan_build_tower, "castle": _plan_build_castle}
+
+
+def plan_build(context, root):
+    """Validates and builds a plan tree. Returns {'built': [paths], 'skipped': [(path, why)], 'warnings': [...]}.
+    Raises PlanError on validation errors or a builder failure. Rebuilding replaces the earlier result."""
+    errors, warnings = plan_validate(root)
+    if errors:
+        raise PlanError("Plan has errors: " + "; ".join(errors))
+    resolved = plan_resolve(root)
+    plan_clear_built(root["id"])
+    built, skipped = [], []
+    for node, path in plan_iter(root):
+        if node["type"] != "building":
+            continue
+        fn = PLAN_BUILDERS.get(node.get("kind"))
+        if fn is None:
+            skipped.append(("/".join(path), "no builder for kind %r yet" % node.get("kind")))
+            continue
+        info = resolved[path]
+        fn(context, node, info["world"], info["seed"], path)
+        built.append("/".join(path))
+    return {"built": built, "skipped": skipped, "warnings": warnings}
+
+
+def plan_new_example(scene, kind, existing_ids):
+    """A starter plan at the 3D cursor: 'tower', 'castle', or 'grounds' (a compound holding a castle and a tower)."""
+    def unique(base):
+        n = 1
+        while "%s_%d" % (base, n) in existing_ids:
+            n += 1
+        return "%s_%d" % (base, n)
+    cx, cy, cz = scene.cursor.location
+    transform = {"x": round(cx, 3), "y": round(cy, 3), "z": round(cz, 3), "rot": 0.0}
+    if kind == 'TOWER':
+        return plan_node(unique("tower"), "building", "tower", transform=transform,
+                         params=plan_default_params(scene, PLAN_TOWER_PARAMS))
+    castle = plan_node("castle", "building", "castle", params=plan_default_params(scene, PLAN_CASTLE_PARAMS))
+    if kind == 'CASTLE':
+        castle["id"] = unique("castle")
+        castle["transform"] = transform
+        return castle
+    w = scene.wfc_castle_width
+    watch = plan_node("watchtower", "building", "tower", transform={"x": w / 2 + 12.0, "y": 0.0, "z": 0.0, "rot": 0.0},
+                      params=plan_default_params(scene, PLAN_TOWER_PARAMS))
+    half_w, half_d = w / 2 + 20.0, scene.wfc_castle_depth / 2 + 15.0
+    grounds = plan_node(unique("grounds"), "compound", "castle_grounds", transform=transform,
+                        footprint=[[-half_w, -half_d], [half_w, -half_d], [half_w, half_d], [-half_w, half_d]],
+                        children=[castle, watch])
+    return grounds
+
+
+class OBJECT_OT_PlanCreate(bpy.types.Operator):
+    """Creates a starter plan at the 3D cursor from the current Tower/Castle settings."""
+    bl_idname = "object.gla_plan_create"
+    bl_label = "New Plan"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    kind: EnumProperty(items=[('TOWER', "Tower", ""), ('CASTLE', "Castle", ""), ('GROUNDS', "Castle Grounds", "")])
+
+    def execute(self, context):
+        plan = plan_new_example(context.scene, self.kind, set(plan_list_ids()))
+        plan_write_to_blend(context.scene, plan)
+        self.report({'INFO'}, "Created plan '%s'." % plan["id"])
+        return {'FINISHED'}
+
+
+class OBJECT_OT_PlanBuild(bpy.types.Operator):
+    """Builds (or rebuilds) a stored plan."""
+    bl_idname = "object.gla_plan_build"
+    bl_label = "Build Plan"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    plan_id: StringProperty()
+
+    def execute(self, context):
+        try:
+            result = plan_build(context, plan_read_from_blend(self.plan_id))
+        except PlanError as exc:
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+        for path, why in result["skipped"]:
+            self.report({'WARNING'}, "%s skipped: %s" % (path, why))
+        for line in result["warnings"]:
+            self.report({'WARNING'}, line)
+        self.report({'INFO'}, "Built %d part(s)." % len(result["built"]))
+        return {'FINISHED'}
+
+
+class OBJECT_OT_PlanRemove(bpy.types.Operator):
+    """Removes a stored plan and everything built from it."""
+    bl_idname = "object.gla_plan_remove"
+    bl_label = "Remove Plan"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    plan_id: StringProperty()
+
+    def execute(self, context):
+        plan_clear_built(self.plan_id)
+        plan_clear_stored(self.plan_id)
+        return {'FINISHED'}
+
+
+class OBJECT_OT_PlanSave(bpy.types.Operator, ExportHelper):
+    """Writes a stored plan to a .plan.json file."""
+    bl_idname = "object.gla_plan_save"
+    bl_label = "Save Plan"
+    filename_ext = ".json"
+    filter_glob: StringProperty(default="*.json", options={'HIDDEN'})
+    plan_id: StringProperty(options={'HIDDEN'})
+
+    def invoke(self, context, event):
+        self.filepath = self.plan_id + ".plan.json"
+        return super().invoke(context, event)
+
+    def execute(self, context):
+        try:
+            revision = plan_save_file(self.plan_id, self.filepath)
+        except (PlanError, OSError) as exc:
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+        self.report({'INFO'}, "Saved revision %d." % revision)
+        return {'FINISHED'}
+
+
+class OBJECT_OT_PlanLoad(bpy.types.Operator, ImportHelper):
+    """Loads a .plan.json into this file (replacing a stored plan with the same id)."""
+    bl_idname = "object.gla_plan_load"
+    bl_label = "Load Plan"
+    filename_ext = ".json"
+    filter_glob: StringProperty(default="*.json", options={'HIDDEN'})
+
+    def execute(self, context):
+        try:
+            root = plan_load_file(context.scene, self.filepath)
+        except (PlanError, OSError) as exc:
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+        self.report({'INFO'}, "Loaded plan '%s'." % root["id"])
+        return {'FINISHED'}
+
+
 # ==============================================================================
 # 8. GAME PACKAGE EXPORT (glb + JSON description)
 # ==============================================================================
@@ -10478,6 +10740,30 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
         collision_row.enabled = bpy.data.objects.get(BLUEPRINT_OBJECT_NAME) is not None
 
 
+class VIEW3D_PT_GLAPlans(bpy.types.Panel):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Level Architect'
+    bl_label = "Plans (experimental)"
+    bl_parent_id = "VIEW3D_PT_GameLevelArchitect"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text="New plan at the 3D cursor:")
+        row = layout.row(align=True)
+        for kind, label in (('TOWER', "Tower"), ('CASTLE', "Castle"), ('GROUNDS', "Grounds")):
+            row.operator("object.gla_plan_create", text=label).kind = kind
+        for plan_id in plan_list_ids():
+            box = layout.box()
+            box.label(text=plan_id, icon='OUTLINER_COLLECTION')
+            row = box.row(align=True)
+            row.operator("object.gla_plan_build", text="Build", icon='PLAY').plan_id = plan_id
+            row.operator("object.gla_plan_save", text="Save", icon='EXPORT').plan_id = plan_id
+            row.operator("object.gla_plan_remove", text="", icon='TRASH').plan_id = plan_id
+        layout.operator("object.gla_plan_load", text="Load Plan...", icon='IMPORT')
+
+
 # ==============================================================================
 # 5. REGISTRATION
 # ==============================================================================
@@ -10491,6 +10777,11 @@ classes = (
     OBJECT_OT_GenerateLevelDoors,
     OBJECT_OT_GenerateLevelProps,
     OBJECT_OT_GenerateAllSteps,
+    OBJECT_OT_PlanCreate,
+    OBJECT_OT_PlanBuild,
+    OBJECT_OT_PlanRemove,
+    OBJECT_OT_PlanSave,
+    OBJECT_OT_PlanLoad,
     OBJECT_OT_GenerateLevelTower,
     OBJECT_OT_GenerateLevelCastle,
     OBJECT_OT_ExportGamePackage,
@@ -10503,6 +10794,7 @@ classes = (
     OBJECT_OT_FloorProfileAdd,
     OBJECT_OT_FloorProfileRemove,
     VIEW3D_PT_GameLevelArchitect,
+    VIEW3D_PT_GLAPlans,
 )
 
 

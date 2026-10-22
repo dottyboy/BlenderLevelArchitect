@@ -32,7 +32,8 @@ the .blend and as `<name>.plan.json`. Nothing here changes generator code yet; t
 }
 ```
 
-* `footprint` is optional for `terrain` and `settlement`; required for `building` and `compound`.
+* `footprint` is optional for `terrain` and `settlement`; required for `building` and `compound`, except for kinds that derive one from their params (`castle`: width x depth, `tower`: circle of `radius`).
+* Building seeds: the builder receives `effective_seed % 1,000,000`, because the existing builders take the scene seed (0-999,999).
 * `levels` lets a plan exist at several heights: floors of a building, terraces of a castle, a bridge. A level can carry
   its own `footprint`; otherwise it uses the plan's.
 * Children must lie inside the parent's footprint unless the parent's `params.allow_outside` is true (validation warning, not error).
@@ -88,7 +89,7 @@ building plans are a thin wrapper over the existing builders.
 
 ## 6. Storage
 
-**In the .blend:** one *Collection* per plan, named `Plan_<id>`, nested like the plan tree.
+**In the .blend:** one *Collection* per plan, named `Plan_<path>` (ids from the root joined by `.`, e.g. `Plan_farm.barn.silo`), nested like the plan tree.
 The root of each collection is an Empty `PlanRoot_<id>` with custom property `gla_plan` (the node's JSON, children
 excluded; children live in the nested collections). Optional helper objects:
 a footprint mesh/curve (`PlanFootprint_<id>`) the user can edit by hand, anchor empties (`PlanAnchor_<id>_<anchor>`).

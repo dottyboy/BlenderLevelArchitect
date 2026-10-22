@@ -3,6 +3,17 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## Unreleased — plans (M1)
+
+- **Plans, experimental.** A new collapsed *Plans (experimental)* sub-panel: create a starter plan at the 3D cursor
+  (Tower, Castle, or Castle Grounds = a compound holding a castle and a watchtower), Build, Save to `.plan.json`, Load,
+  Remove. Plans follow the `gla-plan/1` format (docs/PLAN_FORMAT.md): nested nodes with derived seeds, local transforms,
+  anchors and validation; stored in the .blend as `Plan_<path>` collections and as JSON files with revisions.
+- Building plans wrap the existing Tower and Castle builders, so output is identical to the panel buttons (tests compare
+  vertex counts, positions, props and lanterns). Out-of-range or unknown parameter values are refused instead of clamped.
+  A plan build never touches a tower or castle made from the panel.
+- Kinds without a builder yet (house, barn, chapel...) are skipped with a message; compounds only place their children for now.
+
 ## 0.43.0 — panel reorganisation
 
 - **Calmer panel layout, no behaviour change.** Setup: *Rooms* is split into *Rooms* and *Floors & Elevation*;
