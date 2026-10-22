@@ -333,7 +333,7 @@ elif JOB == "biomes_still":
         plan = la.plan_new_example(sc, 'TERRAIN', set())
         plan["children"][2]["transform"]["z"] = 4.0          # the watchtower on its own height
         if biome == "mountain":
-            plan["params"]["amplitude"] = 12.0
+            plan["params"]["amplitude"] = 16.0
         la.plan_build(bpy.context, plan)
         camera((-15, -165, 62), (0, -30, 0), lens=30)
         render("biome_" + biome)

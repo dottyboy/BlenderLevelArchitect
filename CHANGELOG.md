@@ -3,6 +3,13 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.52.0 — plans: bridges, ridged biomes
+
+- **Bridges**: where a block's road crosses a river the road no longer dams it; the river wins under the road and a stone bridge (deck, parapets, end posts)
+  is built along the road across the crossing (`PB_<id>.bridges`).
+- **Ridged relief** (`params.ridged`, 0..1; a *Ridged* input on the modifier): crest-like ridges — dunes in the desert, sharper peaks in the mountains.
+  Mountains are greyer with snow only on the highest tops; desert hollows are sand coloured.
+
 ## 0.51.0 — plans: polish round 3
 
 - **Edit parameters in the panel**: an *Edit a parameter* box in the Plans panel — Node (empty = the plan, or an id like `farm` / `land/hamlet`),

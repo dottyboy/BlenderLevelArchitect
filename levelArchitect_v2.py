@@ -33,7 +33,7 @@ from bpy_extras.io_utils import ExportHelper, ImportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 51, 0),
+    "version": (0, 52, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -11583,9 +11583,9 @@ PLAN_BIOMES = {
                             dict(kind="tree", per_ha=30, crown="ROUND", leaf=["GREEN", "DARK", "AUTUMN"], height=(5.0, 9.0), slope=0.25, cluster=(55.0, 0.4)),
                             dict(kind="bush", per_ha=30, leaf=["DARK", "GREEN"], slope=0.3),
                             dict(kind="rock", per_ha=4, slope=0.6)]),
-    "desert": dict(label="Desert", amplitude=5.0, feature=90.0, detail=2.0, rough=0.35, base=0.0, sea=-6.0, island=0.0,
+    "desert": dict(label="Desert", ridged=0.85, amplitude=5.0, feature=90.0, detail=2.0, rough=0.35, base=0.0, sea=-6.0, island=0.0,
                    water=False, rock=(0.52, 0.40, 0.30), earth=(0.55, 0.44, 0.28),
-                   ramp=[(0.0, (0.45, 0.36, 0.22)), (0.07, (0.78, 0.64, 0.40)), (0.5, (0.84, 0.68, 0.40)),
+                   ramp=[(0.0, (0.66, 0.54, 0.34)), (0.07, (0.78, 0.64, 0.40)), (0.5, (0.84, 0.68, 0.40)),
                          (0.8, (0.72, 0.50, 0.30)), (1.0, (0.60, 0.42, 0.28))],
                    scatter=[dict(kind="cactus", per_ha=5, slope=0.2, cluster=(60.0, 0.4)),
                             dict(kind="rock", per_ha=6, slope=0.7)]),
@@ -11595,10 +11595,10 @@ PLAN_BIOMES = {
                          (0.5, (0.72, 0.74, 0.76)), (0.8, (0.9, 0.92, 0.95)), (1.0, (0.95, 0.96, 1.0))],
                    scatter=[dict(kind="tree", per_ha=6, crown="CONE", leaf=["DARK"], height=(3.0, 5.0), slope=0.2, cluster=(50.0, 0.5)),
                             dict(kind="rock", per_ha=10, slope=0.7)]),
-    "mountain": dict(label="Mountains", amplitude=18.0, feature=110.0, detail=5.0, rough=0.5, base=0.0, sea=-14.0, island=0.0,
+    "mountain": dict(label="Mountains", ridged=0.5, amplitude=26.0, feature=110.0, detail=5.0, rough=0.5, base=0.0, sea=-20.0, island=0.0,
                      water=True, rock=(0.40, 0.38, 0.36), earth=(0.30, 0.26, 0.2),
                      ramp=[(0.0, (0.20, 0.16, 0.10)), (0.06, (0.28, 0.30, 0.15)), (0.22, (0.20, 0.30, 0.12)),
-                           (0.45, (0.35, 0.32, 0.28)), (0.7, (0.5, 0.48, 0.46)), (0.88, (0.92, 0.93, 0.97)), (1.0, (1.0, 1.0, 1.0))],
+                           (0.45, (0.33, 0.30, 0.26)), (0.72, (0.44, 0.42, 0.40)), (0.92, (0.62, 0.63, 0.66)), (1.0, (0.93, 0.94, 0.97))],
                      scatter=[dict(kind="tree", per_ha=22, crown="CONE", leaf=["DARK", "DARK", "GREEN"], height=(6.0, 10.0), slope=0.3, alt=(0.0, 0.42), cluster=(60.0, 0.4)),
                               dict(kind="rock", per_ha=14, slope=1.0, alt=(0.0, 0.85))]),
     "island": dict(label="Island", amplitude=4.0, feature=50.0, detail=3.0, rough=0.45, base=1.0, sea=-2.2, island=1.0,
@@ -11623,7 +11623,7 @@ def plan_terrain_params(params):
     """Terrain defaults + the biome's numbers + the node's own params, validated. Raises PlanError."""
     params = dict(params or {})
     merged = {**PLAN_TERRAIN_DEFAULTS, **{k: v for k, v in params.items() if k in PLAN_TERRAIN_DEFAULTS or k in PLAN_TERRAIN_OPTIONAL
-                                          or k in ("water", "rivers", "region_biome", "region_scale", "region_bias", "region_blend")}}
+                                          or k in ("water", "rivers", "ridged", "region_biome", "region_scale", "region_bias", "region_blend")}}
     if merged["biome"] not in PLAN_BIOMES:
         raise PlanError("params.biome = %r is not one of %s" % (merged["biome"], ", ".join(PLAN_BIOMES)))
     for key, (lo, hi) in {**PLAN_TERRAIN_RANGES, **{k: v for k, v in PLAN_TERRAIN_OPTIONAL.items() if k in params}}.items():
@@ -11642,6 +11642,9 @@ def plan_terrain_params(params):
     merged["sea_level"] = float(params.get("sea_level", spec["sea"]))
     merged["island"] = float(params.get("island", spec["island"]))
     merged["water"] = bool(params.get("water", spec["water"]))
+    merged["ridged"] = float(params.get("ridged", spec.get("ridged", 0.0)))
+    if not 0.0 <= merged["ridged"] <= 1.0:
+        raise PlanError("params.ridged = %r is outside 0.0..1.0" % (merged["ridged"],))
     rivers = params.get("rivers", "auto")
     if rivers not in ("auto", "none"):
         if not isinstance(rivers, list):
@@ -11735,7 +11738,8 @@ def _terrain_pads(root, resolved, tpath):
                 a, b = graph["nodes"][a_id], graph["nodes"][b_id]
                 pa = to_local(wx + a[0] * cr - a[1] * sr, wy + a[0] * sr + a[1] * cr)
                 pb = to_local(wx + b[0] * cr - b[1] * sr, wy + b[0] * sr + b[1] * cr)
-                pads.append(("capsule", (pa, pb, half, height + zs.get(a_id, 0.0), height + zs.get(b_id, 0.0)), 0.0))
+                pads.append(("capsule", (pa, pb, half, height + zs.get(a_id, 0.0), height + zs.get(b_id, 0.0),
+                                         float(params.get("road_width", 5.0)) / 2.0), 0.0))
             done.append(path)
             continue
         fp = plan_footprint({**node, "style": plan_pick_style(info["style"], info["seed"])})
@@ -11745,7 +11749,7 @@ def _terrain_pads(root, resolved, tpath):
     return pads
 
 
-def _terrain_pad_weights(X, Y, pads, margin, inner=1.2):
+def _terrain_pad_weights(X, Y, pads, margin, inner=1.2, suppress=None):
     """(pad_w, pad_h) arrays: 1 inside a pad (and `inner` metres beyond), easing to 0 over `margin` metres; heights of
     overlapping pads are blended by weight."""
     import numpy as np
@@ -11758,6 +11762,8 @@ def _terrain_pad_weights(X, Y, pads, margin, inner=1.2):
             height = geom[3] + (geom[4] - geom[3]) * along                 # a sloping path: linear between its ends
         t = np.clip((d - inner) / margin, 0.0, 1.0)
         w = 1.0 - t * t * (3.0 - 2.0 * t)
+        if suppress is not None and kind == "capsule" and len(geom) == 6:
+            w = w * (1.0 - suppress)                                 # a road gives way to a river (the bridge spans it)
         wsum += w
         hsum += w * height
         wmax = np.maximum(wmax, w)
@@ -11778,9 +11784,11 @@ def _terrain_arrays(tp, pads, river_pads=()):
     xs, ys = np.linspace(-w / 2.0, w / 2.0, nx + 1), np.linspace(-d / 2.0, d / 2.0, ny + 1)
     X, Y = np.meshgrid(xs, ys)
     X, Y = X.ravel(), Y.ravel()
-    pad_w, pad_h = _terrain_pad_weights(X, Y, pads, max(tp["pad_margin"], tp["amplitude"] * 0.9), inner=1.2 + 0.75 * res)
+    rw = rh = None
     if river_pads:
         rw, rh = _terrain_pad_weights(X, Y, river_pads, max(4.0, tp["river_bank"]), inner=0.0)
+    pad_w, pad_h = _terrain_pad_weights(X, Y, pads, max(tp["pad_margin"], tp["amplitude"] * 0.9), inner=1.2 + 0.75 * res, suppress=rw)
+    if river_pads:
         total = pad_w + (1.0 - pad_w) * rw
         pad_h = np.where(total > 1e-9, (pad_w * pad_h + (1.0 - pad_w) * rw * rh) / np.maximum(total, 1e-9), pad_h)
         pad_w = 1.0 - (1.0 - pad_w) * (1.0 - rw)
@@ -11876,6 +11884,60 @@ def _terrain_river_paths(tp, pads, seed):
     return [{"path": _chaikin(best), "width": 7.0}]
 
 
+def _terrain_bridges(pads, rivers):
+    """[(start, end, z_start, z_end, half_width)] for every stretch where a block's road crosses a river (terrain coordinates)."""
+    import numpy as np
+    out = []
+    for kind, g, _h in pads:
+        if kind != "capsule" or len(g) != 6:
+            continue
+        a, b, _half, ha, hb, road_half = g
+        length = math.hypot(b[0] - a[0], b[1] - a[1])
+        if length < 1.0:
+            continue
+        n = int(length / 0.5) + 1
+        t = np.linspace(0.0, 1.0, n)
+        X, Y = a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t
+        inside = np.zeros(n, dtype=bool)
+        for river in rivers:
+            pts = river["pts"]
+            for q in range(len(pts) - 1):
+                inside |= _np_capsule_dist(X, Y, pts[q], pts[q + 1], river["width"] / 2.0 + 0.5) < 0.0
+        i = 0
+        while i < n:
+            if inside[i]:
+                j = i
+                while j + 1 < n and inside[j + 1]:
+                    j += 1
+                t0 = max(0.0, (t[i] * length - 3.0) / length)
+                t1 = min(1.0, (t[j] * length + 3.0) / length)
+                out.append(((a[0] + (b[0] - a[0]) * t0, a[1] + (b[1] - a[1]) * t0), (a[0] + (b[0] - a[0]) * t1, a[1] + (b[1] - a[1]) * t1),
+                            ha + (hb - ha) * t0, ha + (hb - ha) * t1, road_half))
+                i = j + 1
+            else:
+                i += 1
+    return out
+
+
+def _build_bridge_mesh(spans):
+    """A stone deck with low parapets for each crossing: boxes laid along the road (local coordinates)."""
+    soup = _TowerMesh()
+    for (a, b, za, zb, half) in spans:
+        L = math.hypot(b[0] - a[0], b[1] - a[1])
+        rot = math.atan2(b[1] - a[1], b[0] - a[0])
+        z0 = min(za, zb)
+        piece = _TowerMesh()
+        thick = 0.5 + abs(zb - za)
+        _soup_box(piece, L / 2.0, 0.0, -0.5, L, 2 * half + 0.6, thick, 1)
+        for side in (1.0, -1.0):
+            _soup_box(piece, L / 2.0, side * (half + 0.15), thick - 0.5, L, 0.3, 0.9, 0)
+        for end in (0.0, L):
+            for side in (1.0, -1.0):
+                _soup_box(piece, end, side * (half + 0.15), thick - 0.5, 0.5, 0.5, 1.1, 1)
+        soup.append(piece, rot=rot, offset=(a[0], a[1], z0))
+    return soup
+
+
 def _terrain_river_profile(path, sampler, sea):
     """Bed heights along the path: the terrain's own height, forced never to rise downstream (the water must run downhill),
     then eased and lowered a little so the bed sits in a channel."""
@@ -11913,7 +11975,7 @@ def _terrain_node_group(name, tp):
                                    ("Seed", float(tp["noise_seed"]), 0.0, 10000.0), ("Base", tp["base"], -100.0, 100.0),
                                    ("Sea Level", tp["sea_level"], -200.0, 200.0), ("Island", tp["island"], 0.0, 1.0),
                                    ("Skirt Depth", max(tp["amplitude"], tp["amplitude_b"]) * 1.5 + 8.0, 0.0, 400.0),
-                                   ("Amplitude B", tp["amplitude_b"], 0.0, 200.0), ("Feature Size B", tp["feature_b"], 5.0, 600.0),
+                                   ("Ridged", tp["ridged"], 0.0, 1.0), ("Amplitude B", tp["amplitude_b"], 0.0, 200.0), ("Feature Size B", tp["feature_b"], 5.0, 600.0),
                                    ("Base B", tp["base_b"], -100.0, 100.0), ("Sea Level B", tp["sea_b"], -200.0, 200.0)):
         sock = iface.new_socket(name=label, in_out='INPUT', socket_type='NodeSocketFloat')
         sock.default_value = default
@@ -11993,7 +12055,9 @@ def _terrain_node_group(name, tp):
     links.new(inv, noise.inputs["Scale"])
     links.new(gin.outputs["Detail"], noise.inputs["Detail"])
     links.new(gin.outputs["Roughness"], noise.inputs["Roughness"])
-    centred = math_('SUBTRACT', noise.outputs["Fac"], 0.5, -900, 250)
+    smooth_c = math_('SUBTRACT', noise.outputs["Fac"], 0.5, -900, 330)
+    crest = math_('SUBTRACT', math_('SUBTRACT', 1.0, math_('MULTIPLY', math_('ABSOLUTE', smooth_c, None, -1000, 420), 2.6, -900, 420), -800, 420), 0.85, -700, 420)
+    centred = math_('ADD', smooth_c, math_('MULTIPLY', math_('SUBTRACT', crest, smooth_c, -700, 330), gin.outputs["Ridged"], -600, 330), -600, 250)
     doubled = math_('MULTIPLY', centred, 6.0, -750, 250)
     scaled = math_('MULTIPLY', doubled, amp, -600, 250)
     based = math_('ADD', scaled, base_l, -450, 250)
@@ -12306,7 +12370,7 @@ def _plan_build_terrain(context, root, resolved, node, path):
         return co.reshape(-1, 3)[:(nx + 1) * (ny + 1), 2].reshape(ny + 1, nx + 1).astype(float)
     heights = read_heights()
     sea = tp["sea_level"]
-    river_pads, river_soup, river_stats = [], _TowerMesh(), 0
+    river_pads, river_soup, river_stats, river_defs = [], _TowerMesh(), 0, []
     first = _terrain_sampler(heights, nx, ny, tp["width"], tp["depth"])
     for river in _terrain_river_paths(tp, pads, info["seed"]):
         pts, bed = _terrain_river_profile(river["path"], first, sea)
@@ -12321,6 +12385,8 @@ def _plan_build_terrain(context, root, resolved, node, path):
             river_soup.poly('river', [(ax + nxn, ay + nyn, za), (bx + nxn, by + nyn, zb), (bx - nxn, by - nyn, zb), (ax - nxn, ay - nyn, za)],
                             [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)], (0.0, 0.0, 1.0), 0)
         river_stats += 1
+        river_defs.append({"pts": pts, "width": river["width"]})
+    bridges = _terrain_bridges(pads, river_defs) if river_defs else []
     if river_pads:
         tp["river_bank"] = 8.0
         _n, _m, _X, _Y, pad_w, pad_h, edge, region = _terrain_arrays(tp, pads, river_pads)
@@ -12334,7 +12400,14 @@ def _plan_build_terrain(context, root, resolved, node, path):
         robj = bpy.data.objects.new(rmesh.name, rmesh)
         context.scene.collection.objects.link(robj)
         _plan_adopt_objects(context.scene, path + ("river",), info["world"], [robj])
-    stats = {"min": float(heights.min()), "max": float(heights.max()), "rivers": river_stats}
+        if bridges:
+            bmesh_ = _build_bridge_mesh(bridges).to_mesh("Bridges_" + node["id"])
+            for mat_ in plan_material_slots(None, 'PLAIN'):
+                bmesh_.materials.append(mat_)
+            bobj = bpy.data.objects.new(bmesh_.name, bmesh_)
+            context.scene.collection.objects.link(bobj)
+            _plan_adopt_objects(context.scene, path + ("bridges",), info["world"], [bobj])
+    stats = {"min": float(heights.min()), "max": float(heights.max()), "rivers": river_stats, "bridges": len(bridges)}
     if tp["water"] and heights.min() < sea - 0.2:
         w, d = tp["width"], tp["depth"]
         soup = _TowerMesh()

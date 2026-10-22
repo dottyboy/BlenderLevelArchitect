@@ -4959,6 +4959,36 @@ except RuntimeError:
 check("Edit: the operator refuses a value that breaks the plan", refused and addon.plan_read_from_blend(pid)["params"]["biome"] == "desert")
 
 # ==============================================================================
+print("\n--- Plans: bridges and ridged biomes ---")
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+street = addon.plan_node("lane", "block", "street", transform={"x": 0.0, "y": -10.0, "z": 1.0, "rot": 0.0},
+                         params={"road_graph": {"nodes": {"a": [-60.0, 0.0], "b": [70.0, 0.0]}, "edges": [["a", "b"]]}, "road_width": 5.0, "fill": []})
+bridge_plan = addon.plan_node("land", "terrain", "terrain", params={"biome": "meadow", "width": 160.0, "depth": 160.0, "resolution": 2.0, "scatter": 0.0,
+                              "rivers": [{"path": [[30.0, -80.0], [34.0, -30.0], [28.0, 20.0], [32.0, 80.0]], "width": 9.0}]}, children=[street])
+addon.plan_build(bpy.context, bridge_plan)
+bpy.context.view_layer.update()
+br = [o for o in bpy.data.objects if o.name.startswith("PB_land.bridges")]
+check("Bridges: a road crossing a river gets a bridge object", len(br) == 1)
+bxs = [v.co.x for v in br[0].data.vertices]
+check("Bridges: it spans the river (x around 30..34)", min(bxs) < 28.0 and max(bxs) > 36.0, "%.1f..%.1f" % (min(bxs), max(bxs)))
+check("Bridges: the deck is at the road's height (1.0 + a little)", max(v.co.z for v in br[0].data.vertices) > 1.5 and min(v.co.z for v in br[0].data.vertices) < 1.0)
+check("Bridges: the ground under the bridge is the river bed, well below the road", _terrain_z(31.5, -10.0) < -0.5, str(_terrain_z(31.5, -10.0)))
+check("Bridges: away from the river the ground is flat at the road's height (1.0)", abs(_terrain_z(-20.0, -10.0) - 1.0) < 0.1, str(_terrain_z(-20.0, -10.0)))
+addon.plan_build(bpy.context, {**bridge_plan, "params": {**bridge_plan["params"], "rivers": "none"}})
+check("Bridges: no river, no bridge", not any(o.name.startswith("PB_land.bridges") for o in bpy.data.objects))
+check("Ridged: deserts and mountains are ridged by default", addon.plan_terrain_params({"biome": "desert"})["ridged"] > 0.5 and addon.plan_terrain_params({"biome": "meadow"})["ridged"] == 0.0)
+try:
+    addon.plan_terrain_params({"ridged": 2.0})
+    check("Ridged: rejects out-of-range", False)
+except addon.PlanError:
+    check("Ridged: rejects out-of-range", True)
+addon.plan_build(bpy.context, {**bridge_plan, "params": {**bridge_plan["params"], "rivers": "none", "biome": "desert", "ridged": 1.0}})
+check("Ridged: the tree exposes a Ridged input", "Ridged" in {i.name for i in bpy.data.objects["PB_land_Terrain_land"].modifiers[0].node_group.interface.items_tree})
+
+# ==============================================================================
 print("\n--- Plans: walled town ---")
 for o in list(bpy.data.objects):
     bpy.data.objects.remove(o, do_unlink=True)

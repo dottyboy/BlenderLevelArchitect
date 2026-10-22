@@ -106,6 +106,8 @@ placed on it and the ground is flattened under them.
 * **Regions.** `"region_biome": "mountain"` (+ `region_scale` 30..600 m, `region_bias` -0.35..0.35, `region_blend` 0.02..0.5) lets a second biome
   take over where a noise mask is high. The mask is written as the `region` point attribute; the tree blends amplitude, feature size, base, palette
   and rock/earth colours, floors the second biome at the first one's water line, and scatter uses each biome's rules in proportion.
+* **Bridges.** Roads of blocks give way to a river (their pad weight fades inside the river's bank); each crossing gets a stone bridge along the road.
+* **Ridged.** `"ridged": 0..1` turns the noise into crest lines (desert 0.85, mountains 0.5, others 0).
 * Not yet: polygon-shaped biome regions blended across one terrain, terrain from a heightmap image, roads that curve with the ground.
 
 ### Block extras
