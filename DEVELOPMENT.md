@@ -1000,7 +1000,7 @@ GN complexity there specifically.
 
 ## 3. Known issues / things that need fixing
 
-- [ ] **`downgraded-32.hex` (the master palette source) has 32 colors, but only 31 made it into
+- [ ] **`docs/palette_downgraded-32.hex` (the master palette source) has 32 colors, but only 31 made it into
       `levelArchitect_v2.py`.** `b8b4b2` (line 13) isn't `FLOOR_RAMP_HEX`, `ROOM_POOL_HEX`,
       `WALL_HEX`, `STAIR_HEX`, `DOOR_HEX`, `ENTRANCE_HEX`, `EXIT_HEX`, `TORCH_HEX`, `TORCH_FLAME_HEX`,
       or `PROP_HEX` -- it never got assigned to anything. Every other line in the hex file maps 1:1
