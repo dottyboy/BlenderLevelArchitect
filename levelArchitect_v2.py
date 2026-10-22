@@ -9734,8 +9734,9 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
                 button_col = list_row.column(align=True)
                 button_col.operator("object.wfc_floor_profile_add", text="", icon='ADD')
                 button_col.operator("object.wfc_floor_profile_remove", text="", icon='REMOVE')
+        section = _section(layout, "LA_floors", "Floors & Elevation", 'SORTSIZE', default_closed=True)
+        if section:
             col = section.column(align=True)
-            col.separator()
             col.prop(scene, "wfc_sub_levels_per_floor", text="Sub-Levels / Floor")
             split_row = col.column(align=True)
             split_row.enabled = scene.wfc_sub_levels_per_floor > 1
@@ -9759,62 +9760,81 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
             ceiling_row.enabled = scene.wfc_add_ceiling
             ceiling_row.prop(scene, "wfc_ceiling_thickness", text="Ceiling Thickness (m)")
             col.prop(scene, "wfc_organic_amount", text="Organic Irregularity (m)")
-            col.prop(scene, "wfc_uv_tile_size", text="UV Tile Size (m)")
             col.separator()
             col.prop(scene, "wfc_simple_materials", text="Simple Viewport Colors")
             style_col = section.column(align=True)
             style_col.enabled = not scene.wfc_simple_materials
             style_col.prop(scene, "wfc_style", text="Visual Style")
             col = section.column(align=True)
-            col.prop(scene, "wfc_iso_mode", text="Isometric Mode (Cull Ceilings)")
             col.prop(scene, "wfc_color_rooms", text="Color Rooms/Corridors")
+
+        section = _section(layout, "LA_setup_advanced", "Advanced", 'PREFERENCES', default_closed=True)
+        if section:
+            col = section.column(align=True)
+            col.prop(scene, "wfc_uv_tile_size", text="UV Tile Size (m)")
+            col.prop(scene, "wfc_iso_mode", text="Isometric Mode (Cull Ceilings)")
 
         layout.separator()
         _step_button(
             layout, "object.generate_game_blueprint", "Step 1: Generate Blueprint",
             'MESH_CUBE', 'COLLECTION_COLOR_05',
         )
-        util_row = layout.row(align=True)
-        util_row.operator("object.separate_level_by_floor", text="Separate by Floor/Room", icon='MOD_EXPLODE')
-        util_row.enabled = context.active_object is not None and context.active_object.type == 'MESH'
+        section = _section(layout, "LA_tools", "Tools", 'TOOL_SETTINGS', default_closed=True)
+        if section:
+            util_row = section.row(align=True)
+            util_row.operator("object.separate_level_by_floor", text="Separate by Floor/Room", icon='MOD_EXPLODE')
+            util_row.enabled = context.active_object is not None and context.active_object.type == 'MESH'
 
-        freeze_row = layout.row(align=True)
-        freeze_row.operator("object.freeze_level_for_texture_work", text="Freeze for Texture Work", icon='LOCKED')
-        freeze_row.enabled = bpy.data.objects.get(BLUEPRINT_OBJECT_NAME) is not None
+            freeze_row = section.row(align=True)
+            freeze_row.operator("object.freeze_level_for_texture_work", text="Freeze for Texture Work", icon='LOCKED')
+            freeze_row.enabled = bpy.data.objects.get(BLUEPRINT_OBJECT_NAME) is not None
 
     def _draw_walls_tab(self, context, layout):
         scene = context.scene
-        col = layout.column(align=True)
-        row = col.row(align=True)
-        row.prop(scene, "wfc_wall_height", text="Height")
-        row.prop(scene, "wfc_wall_thickness", text="Thick")
-        col.prop(scene, "wfc_wall_cap_top", text="Cap Top")
-        col.prop(scene, "wfc_wall_grouping", text="Grouping")
-        col.separator()
-        col.prop(scene, "wfc_wall_corner_rounding", text="Round Corners")
-        radius_row = col.row(align=True)
-        radius_row.enabled = scene.wfc_wall_corner_rounding
-        radius_row.prop(scene, "wfc_wall_corner_radius", text="Radius")
-        col.separator()
-        col.prop(scene, "wfc_wall_style", text="Wall Style")
-        colors_row = col.row(align=True)
-        colors_row.enabled = scene.wfc_wall_style == 'MASONRY' or scene.wfc_round_wall_style == 'MASONRY'
-        colors_row.prop(scene, "wfc_masonry_room_colors", text="Room Brick Colors")
-        wall_ruin_row = col.row(align=True)
-        wall_ruin_row.enabled = scene.wfc_wall_style == 'MASONRY'
-        wall_ruin_row.prop(scene, "wfc_wall_ruin", text="Wall Ruin")
-        col.prop(scene, "wfc_round_wall_style", text="Round Rooms")
-        ruin_row = col.row(align=True)
-        ruin_row.enabled = scene.wfc_round_wall_style == 'MASONRY'
-        ruin_row.prop(scene, "wfc_round_wall_ruin", text="Ruin")
-        col.separator()
-        col.prop(scene, "wfc_window_chance", text="Window Chance")
-        win_col = col.column(align=True)
-        win_col.enabled = scene.wfc_window_chance > 0.0
-        win_col.prop(scene, "wfc_window_width", text="Window Width")
-        win_row = win_col.row(align=True)
-        win_row.prop(scene, "wfc_window_sill", text="Sill")
-        win_row.prop(scene, "wfc_window_height", text="Height")
+        masonry = scene.wfc_wall_style == 'MASONRY'
+        round_masonry = scene.wfc_round_wall_style == 'MASONRY'
+
+        section = _section(layout, "LA_wall_shape", "Shape", 'MOD_BUILD')
+        if section:
+            col = section.column(align=True)
+            row = col.row(align=True)
+            row.prop(scene, "wfc_wall_height", text="Height")
+            row.prop(scene, "wfc_wall_thickness", text="Thick")
+            col.prop(scene, "wfc_wall_cap_top", text="Cap Top")
+            col.prop(scene, "wfc_wall_grouping", text="Grouping")
+            col.separator()
+            col.prop(scene, "wfc_wall_corner_rounding", text="Round Corners")
+            radius_row = col.row(align=True)
+            radius_row.enabled = scene.wfc_wall_corner_rounding
+            radius_row.prop(scene, "wfc_wall_corner_radius", text="Radius")
+
+        section = _section(layout, "LA_wall_masonry", "Masonry", 'MOD_WIREFRAME')
+        if section:
+            col = section.column(align=True)
+            col.prop(scene, "wfc_wall_style", text="Wall Style")
+            wall_ruin_row = col.row(align=True)
+            wall_ruin_row.enabled = masonry
+            wall_ruin_row.prop(scene, "wfc_wall_ruin", text="Wall Ruin")
+            col.separator()
+            col.prop(scene, "wfc_round_wall_style", text="Round Rooms")
+            ruin_row = col.row(align=True)
+            ruin_row.enabled = round_masonry
+            ruin_row.prop(scene, "wfc_round_wall_ruin", text="Ruin")
+            col.separator()
+            colors_row = col.row(align=True)
+            colors_row.enabled = masonry or round_masonry
+            colors_row.prop(scene, "wfc_masonry_room_colors", text="Room Brick Colors")
+
+        section = _section(layout, "LA_wall_windows", "Windows", 'MESH_PLANE', default_closed=True)
+        if section:
+            col = section.column(align=True)
+            col.prop(scene, "wfc_window_chance", text="Window Chance")
+            win_col = col.column(align=True)
+            win_col.enabled = scene.wfc_window_chance > 0.0
+            win_col.prop(scene, "wfc_window_width", text="Window Width")
+            win_row = win_col.row(align=True)
+            win_row.prop(scene, "wfc_window_sill", text="Sill")
+            win_row.prop(scene, "wfc_window_height", text="Height")
         layout.separator()
         _step_button(
             layout, "object.generate_level_walls", "Step 2: Generate Walls",
@@ -9866,9 +9886,11 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
         arch_row.prop(scene, "wfc_door_arch_height", text="Arch Height")
         col.separator()
         col.prop(scene, "wfc_generate_door_panels", text="Generate Door Panels")
-        hinge_row = col.row(align=True)
-        hinge_row.enabled = scene.wfc_generate_door_panels
-        hinge_row.prop(scene, "wfc_upbge_hinge_physics", text="UPBGE Hinge Physics (Experimental)")
+        section = _section(layout, "LA_door_advanced", "Advanced", 'PREFERENCES', default_closed=True)
+        if section:
+            hinge_row = section.row(align=True)
+            hinge_row.enabled = scene.wfc_generate_door_panels
+            hinge_row.prop(scene, "wfc_upbge_hinge_physics", text="UPBGE Hinge Physics (Experimental)")
         layout.separator()
         _step_button(
             layout, "object.generate_level_doors", "Step 4: Generate Doors",

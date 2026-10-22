@@ -3196,6 +3196,90 @@ check("Tower: wall thickness >= radius-0.3 is refused", refused)
 scene.wfc_tower_radius, scene.wfc_tower_wall = 3.0, 0.55
 
 # ==============================================================================
+# Panel layout: draw every tab (and both section states) on a recording stub layout.
+print("\n--- Panel layout ---")
+
+
+class _FakeLayout:
+    def __init__(self, log, closed):
+        self.log, self.closed = log, closed
+        self.enabled = True
+        self.active = True
+        self.alert = False
+
+    def panel(self, idname, default_closed=False):
+        self.log["sections"].append(idname)
+        body = _FakeLayout(self.log, self.closed)
+        if self.closed:
+            return _FakeLayout(self.log, self.closed), None
+        return _FakeLayout(self.log, self.closed), body
+
+    def prop(self, data, name, **kw):
+        self.log["props"].append(name)
+        check("Panel: property exists: " + name, hasattr(data, name) or name in data.bl_rna.properties)
+
+    def operator(self, idname, **kw):
+        self.log["ops"].append(idname)
+        return types.SimpleNamespace(preset="", per_floor=False)
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        if name in ("row", "column", "box", "split", "column_flow", "grid_flow"):
+            return lambda *a, **k: _FakeLayout(self.log, self.closed)
+        return lambda *a, **k: None
+
+
+import types
+panel_cls = addon.VIEW3D_PT_GameLevelArchitect
+panel_props, panel_sections = {}, {}
+
+
+def _draw_panel(layout):
+    fake = types.SimpleNamespace(layout=layout)
+    for name in dir(panel_cls):
+        if name.startswith("_draw_"):
+            setattr(fake, name, (lambda f: lambda *a: f(fake, *a))(getattr(panel_cls, name)))
+    panel_cls.draw(fake, bpy.context)
+
+
+for tab in ('SETUP', 'WALLS', 'STAIRS', 'DOORS', 'PROPS', 'EXPORT', 'TOWER', 'CASTLE'):
+    scene.wfc_active_tab = tab
+    log = {"props": [], "ops": [], "sections": []}
+    try:
+        _draw_panel(_FakeLayout(log, False))
+        drew = True
+    except Exception as exc:  # noqa
+        drew = False
+        print("   draw error:", repr(exc))
+    check("Panel: tab %s draws without error" % tab, drew)
+    panel_props[tab], panel_sections[tab] = set(log["props"]), log["sections"]
+    log2 = {"props": [], "ops": [], "sections": []}
+    try:
+        _draw_panel(_FakeLayout(log2, True))
+        drew = True
+    except Exception as exc:  # noqa
+        drew = False
+        print("   draw error (collapsed):", repr(exc))
+    check("Panel: tab %s draws with every section collapsed" % tab, drew)
+check("Panel: Walls tab is split into Shape / Masonry / Windows",
+      {"LA_wall_shape", "LA_wall_masonry", "LA_wall_windows"} <= set(panel_sections['WALLS']))
+check("Panel: Setup has Floors & Elevation, Advanced and Tools sections",
+      {"LA_floors", "LA_setup_advanced", "LA_tools"} <= set(panel_sections['SETUP']))
+check("Panel: sub-level / elevation props still reachable",
+      {"wfc_sub_levels_per_floor", "wfc_split_level_chance", "wfc_elevation_chance",
+       "wfc_elevation_range", "wfc_max_ramp_slope"} <= panel_props['SETUP'])
+check("Panel: every Walls prop still drawn",
+      {"wfc_wall_height", "wfc_wall_thickness", "wfc_wall_cap_top", "wfc_wall_grouping",
+       "wfc_wall_corner_rounding", "wfc_wall_corner_radius", "wfc_wall_style", "wfc_wall_ruin",
+       "wfc_round_wall_style", "wfc_round_wall_ruin", "wfc_masonry_room_colors",
+       "wfc_window_chance", "wfc_window_width", "wfc_window_sill", "wfc_window_height"}
+      <= panel_props['WALLS'])
+check("Panel: hinge physics + UV tile size + iso mode still reachable",
+      "wfc_upbge_hinge_physics" in panel_props['DOORS']
+      and {"wfc_uv_tile_size", "wfc_iso_mode"} <= panel_props['SETUP'])
+
+# ==============================================================================
 print()
 if failures:
     print(f"{len(failures)} CHECK(S) FAILED:")
