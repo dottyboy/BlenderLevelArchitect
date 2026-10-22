@@ -7445,16 +7445,25 @@ _STYLE_TEXTURES = {
     'FITTED_DARK': (4, 0.52, [0.6, 0.9, 1.3, 1.1], (0.38, 0.38, 0.37), 0.05, 0.008, 0.03, 0.08, 0.9),
     'PANEL': (4, 0.52, [1.2, 2.4], (0.80, 0.82, 0.85), 0.02, 0.022, 0.008, 0.015, 0.35),
     'PANEL_DARK': (4, 0.52, [1.2, 2.4], (0.22, 0.25, 0.30), 0.02, 0.022, 0.008, 0.015, 0.4),
+    'ALPINE_LOG': (8, 0.26, [2.4], (0.37, 0.24, 0.14), 0.02, 0.014, 0.035, 0.04, 0.8),
+    'STRAW': (16, 0.13, [0.3, 0.5, 0.7], (0.74, 0.62, 0.32), 0.05, 0.004, 0.01, 0.08, 1.0),
+    'BRANCH': (16, 0.13, [0.4, 0.7, 1.0], (0.36, 0.26, 0.15), 0.05, 0.01, 0.015, 0.08, 1.0),
+    'EARTH': (4, 0.52, [1.6, 2.4], (0.55, 0.40, 0.28), 0.03, 0.003, 0.08, 0.04, 1.0),
+    'EARTHBAG': (8, 0.26, [0.6, 0.7, 0.8], (0.62, 0.50, 0.36), 0.04, 0.014, 0.05, 0.04, 1.0),
+    'AIRCRETE': (2, 1.04, [2.4], (0.86, 0.85, 0.82), 0.01, 0.002, 0.004, 0.03, 0.7),
     # roofs
+    'SHINGLE': (12, 0.1733, [0.2, 0.25, 0.3], (0.40, 0.28, 0.17), 0.04, 0.006, 0.02, 0.07, 0.9),
+    'SOD': (2, 1.04, [2.4], (0.30, 0.40, 0.16), 0.05, 0.002, 0.004, 0.1, 1.0),
     'THATCH': (20, 0.104, [0.12, 0.16, 0.2], (0.70, 0.58, 0.30), 0.06, 0.004, 0.012, 0.08, 1.0),
     'SANDROOF': (2, 1.04, [1.2, 2.4], (0.74, 0.62, 0.42), 0.03, 0.01, 0.02, 0.05, 0.95),
     'TILE_GREY': (10, 0.208, [0.22, 0.26], (0.34, 0.38, 0.42), 0.04, 0.012, 0.03, 0.08, 0.7),
     'METAL': (2, 1.04, [1.2, 2.4], (0.24, 0.27, 0.32), 0.02, 0.016, 0.006, 0.015, 0.35),
 }
-_STYLE_CONTRAST = {'SANDSTONE': 0.45, 'SANDSTONE_DARK': 0.5, 'ADOBE': 0.2, 'ADOBE_TRIM': 0.3, 'TIMBER': 0.4, 'TIMBER_DARK': 0.4,
+_STYLE_CONTRAST = {'ALPINE_LOG': 0.5, 'STRAW': 0.5, 'BRANCH': 0.5, 'EARTH': 0.25, 'EARTHBAG': 0.35, 'AIRCRETE': 0.15, 'SHINGLE': 0.5, 'SOD': 0.4,
+                   'SANDSTONE': 0.45, 'SANDSTONE_DARK': 0.5, 'ADOBE': 0.2, 'ADOBE_TRIM': 0.3, 'TIMBER': 0.4, 'TIMBER_DARK': 0.4,
                    'FITTED': 0.6, 'FITTED_DARK': 0.6, 'PANEL': 0.25, 'PANEL_DARK': 0.25, 'THATCH': 0.55, 'SANDROOF': 0.4,
                    'TILE_GREY': 0.6, 'METAL': 0.25}
-ROOF_COLORS = ('TERRACOTTA', 'SLATE', 'STONE', 'THATCH', 'SANDROOF', 'TILE_GREY', 'METAL')
+ROOF_COLORS = ('TERRACOTTA', 'SLATE', 'STONE', 'THATCH', 'SANDROOF', 'TILE_GREY', 'METAL', 'SHINGLE', 'SOD', 'AIRCRETE')
 
 
 def get_style_material(key):
@@ -9348,10 +9357,14 @@ def _layout_corridors(node, target_xy, width):
     return out
 
 
-def _apply_vary(rng, params, rule):
-    """Per-building random choice from rule["vary"] = {"brick_color": [...], "roof_color": [...]} (any param)."""
+def _apply_vary(rng, params, rule, style=None):
+    """Per-building random choice from rule["vary"] = {"brick_color": [...], "roof_color": [...]} (any param).
+    Brick tints and tile roofs belong to the medieval pack, so they are not applied under another style."""
     for key, choices in (rule.get("vary") or {}).items():
-        params[key] = rng.choice(list(choices))
+        pick = rng.choice(list(choices))                  # always draw, so the rest of the layout does not shift
+        if key in ("brick_color", "roof_color") and style not in (None, 'medieval'):
+            continue
+        params[key] = pick
     return params
 
 
@@ -9518,8 +9531,8 @@ def _layout_rule_problem(rule):
         and count[0] <= count[1])
     if not ok:
         return "layout count must be an integer >= 0 or [min, max]"
-    if rule.get("near", "free") not in ("free", "wall", "ring"):
-        return "layout 'near' must be 'free', 'wall' or 'ring'"
+    if rule.get("near", "free") not in ("free", "wall", "ring", "attach"):
+        return "layout 'near' must be 'free', 'wall', 'ring' or 'attach'"
     ring = rule.get("ring")
     if ring is not None and not (isinstance(ring, (list, tuple)) and len(ring) == 2
                                  and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in ring) and 0 <= ring[0] <= ring[1]):
@@ -9534,7 +9547,7 @@ def _layout_rule_problem(rule):
     return None
 
 
-def _expand_compound(node, seed):
+def _expand_compound(node, seed, style=None):
     """Returns (generated_children, warnings) for one compound's layout rules."""
     params = node.get("params") or {}
     rules = params.get("layout") or []
@@ -9590,7 +9603,7 @@ def _expand_compound(node, seed):
                     k += 1
                 cid = "%s_%d" % (rule["kind"], k)
                 used_ids.add(cid)
-                child = plan_node(cid, "building", rule["kind"], params=_apply_vary(rng, dict(rule.get("params") or {}), rule),
+                child = plan_node(cid, "building", rule["kind"], params=_apply_vary(rng, dict(rule.get("params") or {}), rule, style),
                                   transform={"x": round(vx, 3), "y": round(vy, 3), "z": 0.0, "rot": 0.0})
                 child["generated"] = True
                 out.append(child)
@@ -9598,6 +9611,54 @@ def _expand_compound(node, seed):
         not_placed = 0
         for _ in range(n):
             for attempt in range(250):
+                if rule.get("near") == "attach":
+                    cparams = _apply_vary(rng, dict(rule.get("params") or {}), rule, style)
+                    base = plan_footprint(plan_node("proto", "building", rule["kind"], params=cparams))
+                    mods = [(c_, _hut_walls_of(c_)) for c_ in list(node.get("children", [])) + out
+                            if c_.get("kind") == "hut" and (c_.get("transform") or {}).get("rot", 0.0) == 0.0
+                            and _hut_walls_of(c_)[2] in ("BOX", "AFRAME")]
+                    bw, bd = max(q[0] for q in base) - min(q[0] for q in base), max(q[1] for q in base) - min(q[1] for q in base)
+                    if mods:
+                        anchor_c, (aw, ad, _f) = mods[rng.randrange(len(mods))]
+                        at = anchor_c["transform"]
+                        side = rng.choice(("E", "W", "N", "S"))
+                        if side in ("E", "W"):
+                            sgn = 1.0 if side == "E" else -1.0
+                            cx, cy = at["x"] + sgn * (aw / 2.0 + bw / 2.0), at["y"]
+                        else:
+                            sgn = 1.0 if side == "N" else -1.0
+                            cx, cy = at["x"], at["y"] + sgn * (ad / 2.0 + bd / 2.0)
+                        rot = 0.0
+                        opposite = {"E": "W", "W": "E", "N": "S", "S": "N"}[side]
+                    else:                                   # the first module: anywhere inside
+                        xs, ys = [q[0] for q in container], [q[1] for q in container]
+                        cx, cy = rng.uniform(min(xs), max(xs)), rng.uniform(min(ys), max(ys))
+                        rot, anchor_c, side, opposite = 0.0, None, None, None
+                    poly = _convex_hull(_poly_transform(base, cx, cy, rot))
+                    if not _inside_with_margin(poly, container, margin):
+                        continue
+                    if any(_convex_gap(poly, q) < -1e-6 for q in placed) or any(_convex_gap(poly, q) <= 0.0 for q in corridors):
+                        continue
+                    # only the module it is joined to may touch: everything else keeps the minimum gap
+                    near_touch = [q for q in placed if -1e-6 <= _convex_gap(poly, q) < gap]
+                    if len(near_touch) > (1 if anchor_c is not None else 0):
+                        continue
+                    placed.append(poly)
+                    k = 1
+                    while "%s_%d" % (rule["kind"], k) in used_ids:
+                        k += 1
+                    cid = "%s_%d" % (rule["kind"], k)
+                    used_ids.add(cid)
+                    if side is not None:
+                        cparams["doors"] = sorted(set(cparams.get("doors", [])) | {opposite})
+                        ap = anchor_c.setdefault("params", {})
+                        if anchor_c.get("generated"):
+                            ap["doors"] = sorted(set(ap.get("doors", [])) | {side})
+                    child = plan_node(cid, "building", rule["kind"], params=cparams,
+                                      transform={"x": round(cx, 3), "y": round(cy, 3), "z": 0.0, "rot": rot})
+                    child["generated"] = True
+                    out.append(child)
+                    break
                 if rule.get("near") == "wall":
                     i = rng.randrange(len(container))
                     a, b = container[i], container[(i + 1) % len(container)]
@@ -9631,7 +9692,7 @@ def _expand_compound(node, seed):
                     k += 1
                 cid = "%s_%d" % (rule["kind"], k)
                 used_ids.add(cid)
-                child = plan_node(cid, "building", rule["kind"], params=_apply_vary(rng, dict(rule.get("params") or {}), rule),
+                child = plan_node(cid, "building", rule["kind"], params=_apply_vary(rng, dict(rule.get("params") or {}), rule, style),
                                   transform={"x": round(cx, 3), "y": round(cy, 3), "z": 0.0, "rot": rot})
                 child["generated"] = True
                 out.append(child)
@@ -9738,7 +9799,7 @@ def _anchor_world(root, resolved, ref):
     return None
 
 
-def _expand_block(node, seed):
+def _expand_block(node, seed, style=None):
     """(generated buildings, road-end anchors, warnings) for one block."""
     params = node.get("params") or {}
     nodes, edges = plan_block_graph(node)
@@ -9777,7 +9838,7 @@ def _expand_block(node, seed):
                 bparams = dict(rule.get("params") or {})
                 for key, (lo, hi) in (rule.get("size") or {}).items():
                     bparams[key] = rng.randint(int(lo), int(hi)) if key == "floors" else round(rng.uniform(lo, hi), 2)
-                _apply_vary(rng, bparams, rule)
+                _apply_vary(rng, bparams, rule, style)
                 proto = plan_node("proto", "building", rule["kind"], params=bparams)
                 base = plan_footprint(proto)
                 if not base:
@@ -9851,20 +9912,21 @@ def plan_expand_layout(root):
     resolved_seed = {}
     warnings = []
 
-    def walk(node, path, parent_seed):
+    def walk(node, path, parent_seed, parent_style=None):
+        style = node.get("style") or parent_style
         seed = node["seed"] if node.get("seed") is not None else (plan_child_seed(parent_seed, node["id"]) if parent_seed is not None else 0)
         resolved_seed[path] = seed
         _plan_materialise_shapes_and_roads(node, seed)
-        generated, warn = _expand_compound(node, seed) if node.get("type") == "compound" else ([], [])
+        generated, warn = _expand_compound(node, seed, style) if node.get("type") == "compound" else ([], [])
         if node.get("type") == "block":
-            generated, road_anchors, warn = _expand_block(node, seed)
+            generated, road_anchors, warn = _expand_block(node, seed, style)
             node["anchors"] = list(node.get("anchors", [])) + road_anchors
         warnings.extend("%s: %s" % ("/".join(path), w) for w in warn)
         node["children"] = node.get("children", []) + generated
         if generated and isinstance(node.get("params"), dict):
             node["params"].pop("layout", None)
         for child in node["children"]:
-            walk(child, path + (child["id"],), seed)
+            walk(child, path + (child["id"],), seed, style)
 
     walk(root, (root["id"],), None)
     return root, warnings
@@ -10206,17 +10268,18 @@ PLAN_HOUSE_DEFAULTS = {
                    window_kind='rect', window_width=0.6, window_height=0.5, window_sill=1.6, windows=True),
 }
 PLAN_HOUSE_COMMON = dict(brick_color='PLAIN', ruin=0.0, detail='MEDIUM', chimney=False, roof_overhang=0.45, parapet=0.0,
-                         stairs=True, door_leaf=True, roof_lift=0.7)
+                         stairs=True, door_leaf=True, roof_lift=0.7, basement=0, stilts=0.0, doors=(), use='dwelling')
 PLAN_HOUSE_RANGES = {
     "width": (2.0, 60.0), "depth": (2.0, 60.0), "wall_height": (1.8, 10.0), "floors": (1, 4),
     "wall_thickness": (0.2, 1.4), "roof_pitch": (0.2, 1.6), "ruin": (0.0, 1.0),
     "door_width": (0.6, 4.0), "door_height": (1.4, 6.0), "window_width": (0.2, 2.5),
-    "window_height": (0.2, 4.0), "window_sill": (0.2, 4.0), "roof_overhang": (0.1, 2.5), "parapet": (0.0, 1.5), "roof_lift": (0.0, 2.0),
+    "window_height": (0.2, 4.0), "window_sill": (0.2, 4.0), "roof_overhang": (0.1, 2.5), "parapet": (0.0, 1.5), "roof_lift": (0.0, 2.0), "basement": (0, 2),
+    "stilts": (0.0, 2.5),
 }
 PLAN_HOUSE_ENUMS = {
     "roof": ('GABLE', 'HIP', 'CURVED', 'FLAT', 'NONE'), "door": ('S', 'E', 'N', 'W', 'NONE'),
     "door_style": ('arch', 'pointed', 'rect'), "window_kind": ('arch', 'pointed', 'rect'),
-    "detail": ('LOW', 'MEDIUM', 'HIGH'), "roof_color": ROOF_COLORS,
+    "detail": ('LOW', 'MEDIUM', 'HIGH'), "roof_color": ROOF_COLORS, "use": ('dwelling', 'storage'),
 }
 
 
@@ -10295,7 +10358,41 @@ PLAN_STYLES = {
             'stable': dict(roof='FLAT', parapet=0.2, wall_thickness=0.4, door_style='rect', window_kind='rect', chimney=False),
             'barn': dict(roof='FLAT', parapet=0.2, wall_thickness=0.4, door_style='rect', chimney=False),
         }),
+    'alpine': dict(
+        label="Alpine chalet", wall='ALPINE_LOG', trim='FITTED_DARK', wood='DARK', roof_color='SHINGLE', fence='wood',
+        kinds={
+            'house': dict(wall_height=2.7, floors=2, roof='GABLE', roof_pitch=0.48, roof_overhang=1.3, wall_thickness=0.3,
+                          door_style='rect', door_width=1.1, door_height=2.2, window_kind='rect', window_width=0.8,
+                          window_height=0.9, window_sill=1.0, chimney=True),
+            'chapel': dict(width=6.0, depth=9.0, wall_height=4.5, roof='GABLE', roof_pitch=0.9, roof_overhang=0.9,
+                           wall_thickness=0.4, door_style='arch', window_kind='arch', chimney=False),
+            'stable': dict(roof='GABLE', roof_pitch=0.45, roof_overhang=1.2, wall_thickness=0.3, door_style='rect', chimney=False),
+            'barn': dict(roof='GABLE', roof_pitch=0.45, roof_overhang=1.2, wall_thickness=0.3, door_style='rect', chimney=False),
+        }),
 }
+
+
+PLAN_CONSTRUCTIONS = {
+    'straw': dict(label="Straw bale", wall='STRAW', trim='BRANCH', wood='BROWN', roof_color='THATCH', fence='wood',
+                  kinds={'house': dict(roof='GABLE', roof_pitch=1.0, roof_overhang=0.6, wall_thickness=0.45, door_style='rect',
+                                       chimney=False)}),
+    'branch': dict(label="Woven branches", wall='BRANCH', trim='ALPINE_LOG', wood='BROWN', roof_color='THATCH', fence='wood',
+                   kinds={'house': dict(roof='GABLE', roof_pitch=1.1, roof_overhang=0.5, wall_thickness=0.25, door_style='rect',
+                                        chimney=False)}),
+    'timber': dict(label="Timber", wall='ALPINE_LOG', trim='FITTED_DARK', wood='DARK', roof_color='SHINGLE', fence='wood',
+                   kinds={'house': dict(roof='GABLE', roof_pitch=0.6, roof_overhang=0.7, wall_thickness=0.3, door_style='rect',
+                                        chimney=False)}),
+    'earth': dict(label="Cob / rammed earth", wall='EARTH', trim='ADOBE_TRIM', wood='DARK', roof_color='SOD', fence='stone',
+                  kinds={'house': dict(roof='FLAT', parapet=0.25, wall_thickness=0.5, door_style='arch', window_kind='arch',
+                                       chimney=False)}),
+    'earthbag': dict(label="Earthbag", wall='EARTHBAG', trim='EARTH', wood='DARK', roof_color='SOD', fence='stone',
+                     kinds={'house': dict(roof='FLAT', parapet=0.2, wall_thickness=0.45, door_style='arch', window_kind='arch',
+                                          chimney=False)}),
+    'aircrete': dict(label="Aircrete", wall='AIRCRETE', trim='EARTH', wood='DARK', roof_color='AIRCRETE', fence='stone',
+                     kinds={'house': dict(roof='FLAT', parapet=0.15, wall_thickness=0.35, door_style='arch', window_kind='arch',
+                                          chimney=False)}),
+}
+PLAN_PACKS = {**PLAN_STYLES, **PLAN_CONSTRUCTIONS}
 
 
 PLAN_STYLE_CHOICES = list(PLAN_STYLES) + ['mixed']
@@ -10311,7 +10408,7 @@ def plan_pick_style(style, seed):
 
 
 def plan_style_name(style):
-    return style if style in PLAN_STYLES else 'medieval'
+    return style if style in PLAN_PACKS else 'medieval'
 
 
 def _style_wood_material(spec):
@@ -10321,7 +10418,7 @@ def _style_wood_material(spec):
 def plan_material_slots(style, brick_color='PLAIN', roof_color=None, wood=False):
     """Material slots of a plan-built mesh. Medieval keeps the brick/stone list (tints, optional roof and wood);
     every other style gets exactly [wall, trim, roof, wood] and ignores brick tints."""
-    spec = PLAN_STYLES[plan_style_name(style)]
+    spec = PLAN_PACKS[plan_style_name(style)]
     if spec["wall"] is None:
         return masonry_material_list(brick_color != 'PLAIN', roof=roof_color, wood=wood)
     return [get_style_material(spec["wall"]), get_style_material(spec["trim"]),
@@ -10332,7 +10429,7 @@ def plan_house_params(kind, params, style=None):
     """Defaults for the kind, then the style's overrides, then the node's params; raises PlanError on bad values.
     The result carries the resolved "style" name."""
     style = plan_style_name(style)
-    spec = PLAN_STYLES[style]
+    spec = PLAN_PACKS[style]
     merged = {**PLAN_HOUSE_COMMON, "roof_color": spec["roof_color"], **PLAN_HOUSE_DEFAULTS[kind],
               **spec["kinds"].get(kind, {}), **(params or {}), "style": style}
     for key, (lo, hi) in PLAN_HOUSE_RANGES.items():
@@ -10347,6 +10444,14 @@ def plan_house_params(kind, params, style=None):
     for key in ("windows", "chimney", "stairs", "door_leaf"):
         if not isinstance(merged[key], bool):
             raise PlanError("params.%s must be true or false" % key)
+    doors = merged["doors"]
+    if not isinstance(doors, (list, tuple)) or any(d_ not in ('S', 'E', 'N', 'W') for d_ in doors):
+        raise PlanError("params.doors must be a list of sides from S, E, N, W")
+    merged["doors"] = tuple(doors)
+    if merged["floors"] + merged["basement"] > 5:
+        raise PlanError("floors + basement may not exceed 5 levels")
+    if merged["use"] == 'storage' and "windows" not in (params or {}):
+        merged["windows"] = False
     if min(merged["width"], merged["depth"]) < 2.0 * merged["wall_thickness"] + 1.2:
         raise PlanError("walls are too thick for a %.1f x %.1f m building" % (merged["width"], merged["depth"]))
     return merged
@@ -10452,11 +10557,34 @@ def _house_roof(rm, W, D, H, t, pitch, kind, overhang=0.45):
             rm.poly('gable', pts, [(p[1] / tile, p[2] / tile) for p in pts], (face, 0.0, 0.0), 0)
 
 
+def _house_stilts(mesh, W, D, t, st, p, nb):
+    """Posts under the building corners and wall midpoints, an underside for the floor, and steps up to the door."""
+    posts = [(-W / 2, -D / 2), (W / 2, -D / 2), (W / 2, D / 2), (-W / 2, D / 2), (0.0, -D / 2), (0.0, D / 2), (-W / 2, 0.0), (W / 2, 0.0)]
+    for px, py in posts:
+        _soup_box(mesh, px, py, 0.0, 0.26, 0.26, st, WOOD_SOURCE_SLOT)
+    iw, idp = W / 2.0 + t / 2.0, D / 2.0 + t / 2.0
+    under = [(-iw, -idp, st), (-iw, idp, st), (iw, idp, st), (iw, -idp, st)]
+    mesh.poly('stiltfloor', under, [(q[0] / TOWER_TILE_W, q[1] / TOWER_TILE_W) for q in under], (0.0, 0.0, -1.0), WOOD_SOURCE_SLOT)
+    side = p["door"]
+    if side != 'NONE':
+        n = int(math.ceil(st / 0.2))
+        dw = p["door_width"] + 0.5
+        steps = _TowerMesh()
+        out = (D if side in ("S", "N") else W) / 2.0 + t / 2.0
+        for i in range(n):
+            top = st - (i + 1) * (st / n) + st / n
+            _soup_box(steps, 0.0, -out - (i + 0.5) * 0.3, 0.0, dw, 0.3, max(0.1, st - i * (st / n) - 0.05), WOOD_SOURCE_SLOT)
+        mesh.append(steps, rot={"S": 0.0, "E": math.pi / 2.0, "N": math.pi, "W": 3.0 * math.pi / 2.0}[side])
+
+
 def _build_house_mesh(kind, p, seed):
     big = _TowerMesh()
-    W, D, h, floors, t = p["width"], p["depth"], p["wall_height"], int(p["floors"]), p["wall_thickness"]
+    W, D, h, t = p["width"], p["depth"], p["wall_height"], p["wall_thickness"]
+    nb = int(p.get("basement", 0))
+    floors = int(p["floors"]) + nb                    # all levels, basement included; the building is shifted down by nb levels at the end
     H = h * floors
     ruin = p["ruin"]
+    door_sides = {p["door"], *p.get("doors", ())} - {'NONE'}
     tint = BRICK_COLOR_INDEX.get(p["brick_color"], 0)
     if p["brick_color"] == 'MIXED':
         tint = (2, 3, 4, 6, 1, 5)[seed % 6]
@@ -10474,11 +10602,11 @@ def _build_house_mesh(kind, p, seed):
         wb = _WallRunBuilder(L, H + parapet, t, battlements=False, seed=seed + 11 * i, ruin=ruin,
                              stones=int(L * (H + parapet) * 0.3 * stones_scale))
         side = "SENW"[i]
-        if p["door"] == side:
-            wb.add_opening(L / 2.0, p["door_width"], 0.0, min(p["door_height"], wb.Hs - 0.5), p["door_style"])
+        if side in door_sides:
+            wb.add_opening(L / 2.0, p["door_width"], nb * h, min(p["door_height"], wb.Hs - nb * h - 0.5), p["door_style"])
         if p["windows"]:
             n = max(1, int((spans[i] - 1.2) / 2.8))
-            for k in range(floors):
+            for k in range(nb, floors):
                 for j in range(n):
                     wb.add_opening((j + 0.5) * L / n, p["window_width"], k * h + p["window_sill"],
                                    p["window_height"], p["window_kind"])
@@ -10493,7 +10621,7 @@ def _build_house_mesh(kind, p, seed):
         run = n_steps * 0.27
         xs0 = -iw + 0.35
         if xs0 + run + 0.4 <= iw - 1.0 and idp > 1.6:
-            north = p["door"] != 'N'
+            north = 'N' not in door_sides
             band = (idp - 0.95, idp - 0.05) if north else (-idp + 0.05, -idp + 0.95)
             stair = dict(n=n_steps, rise=h / n_steps, x0=xs0, run=run, band=band, ox=(xs0 + 0.3 * run, min(iw, xs0 + run + 0.5)))
             for k in range(floors - 1):
@@ -10542,10 +10670,10 @@ def _build_house_mesh(kind, p, seed):
     # the door leaf, standing open beside the doorway (built on the south side, then turned to the door's side)
     if p["door"] != 'NONE' and p["door_leaf"] and ruin < 0.35:
         dw = p["door_width"]
-        dh = min(p["door_height"], H - 0.5) - 0.1
+        dh = min(p["door_height"], H - nb * h - 0.5) - 0.1
         out = (D if p["door"] in ("S", "N") else W) / 2.0 + t / 2.0
         leaf = _TowerMesh()
-        _soup_box(leaf, -dw / 2.0 - 0.03, -out - dw * 0.475, 0.05, 0.06, dw * 0.95, dh, WOOD_SOURCE_SLOT)
+        _soup_box(leaf, -dw / 2.0 - 0.03, -out - dw * 0.475, nb * h + 0.05, 0.06, dw * 0.95, dh, WOOD_SOURCE_SLOT)
         big.append(leaf, rot={"S": 0.0, "E": math.pi / 2.0, "N": math.pi, "W": 3.0 * math.pi / 2.0}[p["door"]], mat_map=mat_map)
     if p["roof"] != 'NONE' and ruin < 0.35:
         if p["roof"] == 'FLAT':
@@ -10568,7 +10696,14 @@ def _build_house_mesh(kind, p, seed):
                 _soup_box(rm, max(W, D) * 0.27, 0.0, H - 0.3, 0.7, 0.7, rise_c + 1.2, 1)
                 _soup_box(rm, max(W, D) * 0.27, 0.0, H + rise_c + 0.85, 0.9, 0.9, 0.12, 1)
             big.append(rm, rot=0.0 if W >= D else math.pi / 2.0, mat_map=mat_map)
-    return big
+    st = float(p.get("stilts", 0.0))
+    if nb == 0 and st <= 0.0:
+        return big
+    out_mesh = _TowerMesh()
+    out_mesh.append(big, offset=(0.0, 0.0, st - nb * h), mat_map=None)
+    if st > 0.0:
+        _house_stilts(out_mesh, W, D, t, st, p, nb)
+    return out_mesh
 
 
 # ------------------------------------------------------------------------------
@@ -10826,7 +10961,7 @@ def _build_road_mesh(nodes, edges):
     tile = TOWER_TILE_W
     rects = [_edge_rect(nodes[a], nodes[b], w / 2.0) for a, b, w in edges]
     for i, (a, b, w) in enumerate(edges):
-        z = 0.03 + 0.002 * (i % 8)
+        z = 0.03 + 0.0006 * (i % 40)
         quad = [(x, y, z) for x, y in rects[i]]
         soup.poly('road', quad, [(q[0] / tile, q[1] / tile) for q in quad], (0.0, 0.0, 1.0), 1)
     for i, (a, b, w) in enumerate(edges):
@@ -11018,6 +11153,69 @@ def _plan_build_prop(context, node, world, seed, path):
     return [obj]
 
 
+# ------------------------------------------------------------------------------
+# Huts: small modular buildings (3-5 m x 4-8 m) in a construction method (straw bale, woven branches,
+# timber, cob, earthbag, aircrete) and a form (BOX, DOME, TUNNEL, SILO, AFRAME), from a basement up to the attic,
+# optionally on stilts, as a dwelling or storage. `near: "attach"` in a layout rule joins huts wall to wall
+# (with a passage through the shared wall) so they can grow into bigger structures.
+# ------------------------------------------------------------------------------
+PLAN_HUT_FORMS = ('BOX', 'DOME', 'TUNNEL', 'SILO', 'AFRAME')
+PLAN_HUT_DEFAULTS = dict(construction='timber', form='BOX', width=4.0, depth=6.0, levels=1, level_height=2.5)
+PLAN_HUT_ONLY = ("construction", "form", "levels", "level_height")
+PLAN_HUT_RANGES = {"width": (2.5, 12.0), "depth": (2.5, 14.0), "levels": (1, 3), "level_height": (2.2, 3.5)}
+PLAN_DEFAULT_FOOTPRINTS["hut"] = lambda params: _footprint_rect(
+    {"width": float(params.get("width", 4.0)), "depth": float(params.get("depth", 6.0))})
+
+
+def plan_hut_params(params, style=None):
+    """Hut defaults + validation; returns (hut_params, house_params) where house_params feeds the BOX builder."""
+    params = dict(params or {})
+    construction = params.get("construction") or {"alpine": "timber", "inca": "earth", "egyptian": "earth", "mexican": "earth",
+                                                  "chinese": "timber", "futuristic": "aircrete"}.get(style or "", "timber")
+    if construction not in PLAN_CONSTRUCTIONS:
+        raise PlanError("params.construction = %r is not one of %s" % (construction, ", ".join(PLAN_CONSTRUCTIONS)))
+    hut = {**PLAN_HUT_DEFAULTS, **{k: v for k, v in params.items() if k in PLAN_HUT_ONLY}, "construction": construction}
+    if hut["form"] not in PLAN_HUT_FORMS:
+        raise PlanError("params.form = %r is not one of %s" % (hut["form"], ", ".join(PLAN_HUT_FORMS)))
+    hut["width"] = params.get("width", PLAN_HUT_DEFAULTS["width"])
+    hut["depth"] = params.get("depth", PLAN_HUT_DEFAULTS["depth"])
+    for key, (lo, hi) in PLAN_HUT_RANGES.items():
+        v = hut[key]
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v < lo or v > hi:
+            raise PlanError("params.%s = %r is outside %s..%s" % (key, v, lo, hi))
+    house_in = {k: v for k, v in params.items() if k not in PLAN_HUT_ONLY}
+    house_in.update(width=hut["width"], depth=hut["depth"], floors=int(hut["levels"]), wall_height=hut["level_height"])
+    house = plan_house_params('house', house_in, construction)
+    if hut["form"] != 'BOX' and house["basement"] > 0 and hut["form"] not in ('SILO',):
+        raise PlanError("a basement is only available for the BOX and SILO forms")
+    return hut, house
+
+
+def _build_hut_round(hut, house, seed):
+    raise PlanError("the %s form is not available yet" % hut["form"])
+
+
+def _plan_build_hut(context, node, world, seed, path):
+    where = "/".join(path)
+    try:
+        hut, house = plan_hut_params(node.get("params"), node.get("style"))
+    except PlanError as exc:
+        raise PlanError("%s: %s" % (where, exc))
+    if hut["form"] == 'BOX':
+        soup = _build_house_mesh('house', house, int(seed) % 1_000_000)
+    else:
+        soup = _build_hut_round(hut, house, int(seed) % 1_000_000)
+    return [_plan_add_mesh_object(context, soup, "Hut_" + node["id"], 'PLAIN', path, world, house["roof_color"], wood=True,
+                                  style=hut["construction"])]
+
+
+def _hut_walls_of(child):
+    """(width, depth, kind-of-form) of a hut child, from its params (defaults filled in)."""
+    p = child.get("params") or {}
+    return (float(p.get("width", PLAN_HUT_DEFAULTS["width"])), float(p.get("depth", PLAN_HUT_DEFAULTS["depth"])),
+            p.get("form", "BOX"))
+
+
 def _plan_build_house(context, node, world, seed, path):
     where = "/".join(path)
     try:
@@ -11033,7 +11231,8 @@ def _plan_build_house(context, node, world, seed, path):
 PLAN_BUILDERS = {"tower": _plan_build_tower, "castle": _plan_build_castle,
                  "house": _plan_build_house, "chapel": _plan_build_house, "stable": _plan_build_house,
                  "barn": _plan_build_house, "well": _plan_build_well, "keep": _plan_build_keep,
-                 "tree": _plan_build_prop, "barrel": _plan_build_prop, "crate": _plan_build_prop, "haystack": _plan_build_prop}
+                 "tree": _plan_build_prop, "barrel": _plan_build_prop, "crate": _plan_build_prop, "haystack": _plan_build_prop,
+                 "hut": _plan_build_hut}
 
 
 def plan_build(context, root):
@@ -11126,6 +11325,18 @@ def plan_new_example(scene, kind, existing_ids):
             ]},
             anchors=[{"id": "gate", "kind": "gate", "pos": [0.0, -half_d, 0.0], "dir": 270.0, "width": 4.0, "level": 0}],
             children=[castle])
+    if kind == 'HUT':
+        return plan_node(unique("hut"), "building", "hut", transform=transform, params={"construction": "timber"})
+    if kind == 'HUTS':
+        return plan_node(
+            unique("huts"), "compound", "huts", transform=transform,
+            footprint=[[-22.0, -16.0], [22.0, -16.0], [22.0, 16.0], [-22.0, 16.0]],
+            params={"fence": "none", "layout": [
+                {"kind": "hut", "count": 7, "near": "attach", "min_gap": 3.0,
+                 "vary": {"construction": ["timber", "straw", "earth", "earthbag", "branch", "aircrete"],
+                          "width": [3.0, 4.0, 5.0], "depth": [4.0, 5.0, 6.0, 8.0], "levels": [1, 1, 2, 3],
+                          "basement": [0, 0, 1], "stilts": [0.0, 0.0, 1.2]}},
+            ]})
     if kind == 'STREET':
         return plan_node(
             unique("street"), "block", "street", transform=transform,
@@ -11207,7 +11418,8 @@ class OBJECT_OT_PlanCreate(bpy.types.Operator):
     kind: EnumProperty(items=[('TOWER', "Tower", ""), ('CASTLE', "Castle", ""), ('GROUNDS', "Castle Grounds", ""),
                               ('HOUSE', "House", ""), ('CHAPEL', "Chapel", ""), ('STABLE', "Stable", ""),
                               ('FORTRESS', "Fortress", ""), ('FARM', "Farm", ""), ('HAMLET', "Hamlet", ""),
-                              ('STREET', "Street", ""), ('BLOCK', "Block", "")])
+                              ('STREET', "Street", ""), ('BLOCK', "Block", ""),
+                              ('HUT', "Hut", ""), ('HUTS', "Hut cluster", "")])
 
     def execute(self, context):
         plan = plan_new_example(context.scene, self.kind, set(plan_list_ids()))
@@ -12561,6 +12773,9 @@ class VIEW3D_PT_GLAPlans(bpy.types.Panel):
             row.operator("object.gla_plan_create", text=label).kind = kind
         row = layout.row(align=True)
         for kind, label in (('FARM', "Farm"), ('HAMLET', "Hamlet"), ('STREET', "Street"), ('BLOCK', "Block")):
+            row.operator("object.gla_plan_create", text=label).kind = kind
+        row = layout.row(align=True)
+        for kind, label in (('HUT', "Hut"), ('HUTS', "Hut cluster")):
             row.operator("object.gla_plan_create", text=label).kind = kind
         for plan_id in plan_list_ids():
             box = layout.box()

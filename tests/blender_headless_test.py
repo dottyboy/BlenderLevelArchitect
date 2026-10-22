@@ -3356,7 +3356,7 @@ check("Plans: bad id and clockwise footprint are errors", len(addon.plan_validat
 bowtie = addon.plan_node("b", "building", "house", footprint=[[0, 0], [4, 0], [4, 3], [1, 3], [1, -1]])
 check("Plans: self-crossing footprint is an error", any("crosses" in e for e in addon.plan_validate(bowtie)[0]))
 check("Plans: building without footprint is an error",
-      any("footprint" in e for e in addon.plan_validate(addon.plan_node("h", "building", "hut"))[0]))
+      any("footprint" in e for e in addon.plan_validate(addon.plan_node("h", "building", "pagoda"))[0]))
 dup = addon.plan_node("p", "compound", footprint=[[0, 0], [9, 0], [9, 9], [0, 9]],
                       children=[addon.plan_node("a", "terrain"), addon.plan_node("a", "terrain")])
 check("Plans: duplicate sibling ids are an error", any("duplicate" in e for e in addon.plan_validate(dup)[0]))
@@ -4516,6 +4516,99 @@ hit_c2 = _ray((600.0 + 3.9 + 1.0 - 1.5, 2.5 + 1.0 - 1.5, 12.0), (0.0, 0.0, -1.0)
 check("Curved roof: the eave corners are lifted above the inward points", hit_c is not None and hit_c2 is not None and hit_c.z > 2.8 - 0.2, str((hit_c, hit_c2)))
 check("Curved roof: the chinese style uses it", addon.plan_house_params("house", {}, "chinese")["roof"] == "CURVED")
 check("Curved roof: vertex count stays modest", all(len(o.data.vertices) < 3500 for o in bpy.data.objects if o.name.startswith("PB_cv") and o.type == 'MESH'))
+
+# ==============================================================================
+print("\n--- Plans: alpine style and box huts ---")
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+check("Alpine: the pack exists", "alpine" in addon.PLAN_STYLES and "alpine" in addon.PLAN_PACKS)
+hut_mats = {}
+for i, cons in enumerate(addon.PLAN_CONSTRUCTIONS):
+    hn = addon.plan_node("hc_" + cons, "building", "hut", params={"construction": cons}, transform={"x": i * 20.0, "y": 0.0, "z": 0.0, "rot": 0.0})
+    check("Hut: %s construction builds" % cons, addon.plan_build(bpy.context, hn)["built"] == ["hc_" + cons])
+    ho = next(o for o in bpy.data.objects if o.name.startswith("PB_hc_" + cons) and o.type == 'MESH')
+    hut_mats[cons] = [m.name for m in ho.data.materials]
+    spec = addon.PLAN_CONSTRUCTIONS[cons]
+    check("Hut: %s uses its own wall, trim, roof and wood" % cons,
+          hut_mats[cons][0] == addon.get_style_material(spec["wall"]).name and hut_mats[cons][1] == addon.get_style_material(spec["trim"]).name and len(hut_mats[cons]) == 4,
+          str(hut_mats[cons]))
+x0, x1, y0, y1, z0, z1 = _bounds_of("hc_timber")
+check("Hut: a default hut is about 4 x 6 m", abs((x1 - x0) - 4.3) < 1.8 and 5.5 < (y1 - y0) < 8.5, str((x1 - x0, y1 - y0)))
+# basement and stilts
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+bs = addon.plan_node("bs", "building", "hut", params={"levels": 2, "basement": 1, "door_leaf": False})
+addon.plan_build(bpy.context, bs)
+x0, x1, y0, y1, z0, z1 = _bounds_of("bs")
+check("Hut: a basement reaches below the ground (one level down)", z0 < -2.0, str(z0))
+check("Hut: the roof is above the two upper levels", z1 > 5.0, str(z1))
+hit = _ray((0.0, -8.0, 1.0), (0.0, 1.0, 0.0))
+check("Hut: the door is at ground level (a ray at 1 m runs through it)", hit is not None and hit.y > 1.5, str(hit))
+hit = _ray((0.0, -1.0, 0.5), (0.0, 0.0, -1.0))
+check("Hut: the ground floor has a slab above the basement (ray down stops above the basement floor)", hit is not None and hit.z > -0.4, str(hit))
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+st = addon.plan_node("sk", "building", "hut", params={"stilts": 1.4, "door_leaf": False})
+addon.plan_build(bpy.context, st)
+x0, x1, y0, y1, z0, z1 = _bounds_of("sk")
+check("Hut: stilts raise the floor (the mesh spans from the ground to well above it)", abs(z0) < 0.05 and z1 > 1.4 + 2.5, str((z0, z1)))
+hit = _ray((0.0, 0.0, 0.3), (0.0, 0.0, 1.0))
+check("Hut: the floor is up on the stilts (a ray from the ground meets it at the stilt height)", hit is not None and abs(hit.z - 1.4) < 0.1, str(hit))
+hit = _ray((-6.0, 1.0, 0.7), (1.0, 0.0, 0.0))
+check("Hut: under the floor the space between the posts is open (a ray at 0.7 m crosses it)", hit is None or hit.x > 1.5, str(hit))
+# storage and modules
+sto = addon.plan_house_params("house", {"use": "storage"}, "timber")
+check("Hut: storage has no windows by default", sto["windows"] is False)
+try:
+    addon.plan_build(bpy.context, addon.plan_node("lv", "building", "hut", params={"levels": 3, "basement": 2, "door_leaf": False}))
+    refused = False
+except addon.PlanError as exc:
+    refused = True
+check("Hut: three levels plus a two-level basement is accepted (5 levels)", not refused)
+for bad_params, label in (({"construction": "marble"}, "unknown construction"), ({"form": "pyramid"}, "unknown form"),
+                          ({"width": 20.0}, "too wide"), ({"levels": 4}, "too many levels"), ({"doors": ["X"]}, "bad door side"),
+                          ({"basement": 3}, "too deep"), ({"use": "temple"}, "unknown use")):
+    try:
+        addon.plan_build(bpy.context, addon.plan_node("bad", "building", "hut", params=bad_params))
+        refused = False
+    except addon.PlanError as exc:
+        refused = "bad" in str(exc)
+    check("Hut: refused - " + label, refused)
+# doors list opens passages in other walls
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+dl = addon.plan_node("dl", "building", "hut", params={"doors": ["E", "W"], "door_leaf": False})
+addon.plan_build(bpy.context, dl)
+hit = _ray((-6.0, 0.0, 1.0), (1.0, 0.0, 0.0))
+check("Hut: extra doors let you walk straight through (west to east)", hit is None or hit.x > 3.0, str(hit))
+plain_hut = addon.plan_node("ph", "building", "hut", params={"door_leaf": False}, transform={"x": 100.0, "y": 0.0, "z": 0.0, "rot": 0.0})
+addon.plan_build(bpy.context, plain_hut)
+hit = _ray((94.0, 0.0, 1.0), (1.0, 0.0, 0.0))
+check("Hut: without extra doors the side wall is solid", hit is not None and hit.x < 98.0, str(hit))
+# attach cluster
+huts = addon.plan_new_example(scene, 'HUTS', set())
+exp, warns = addon.plan_expand_layout(huts)
+mods = [c for c in exp["children"] if c["kind"] == "hut"]
+check("Cluster: seven modules are placed (or most of them)", len(mods) >= 5, str(len(mods)) + str(warns))
+check("Cluster: deterministic", exp == addon.plan_expand_layout(huts)[0])
+polys = {c["id"]: addon._convex_hull(_world_poly(c)) for c in mods}
+touching = sum(1 for i, a in enumerate(mods) for b in mods[i + 1:] if abs(addon._convex_gap(polys[a["id"]], polys[b["id"]])) < 1e-3)
+check("Cluster: modules are joined wall to wall", touching >= len(mods) - 1, "%d touching of %d" % (touching, len(mods)))
+check("Cluster: no module overlaps another", all(addon._convex_gap(polys[a["id"]], polys[b["id"]]) > -1e-3 for i, a in enumerate(mods) for b in mods[i + 1:]))
+check("Cluster: joined modules have passages (the doors lists are filled in)", sum(1 for c in mods if c["params"].get("doors")) >= len(mods) - 1)
+check("Cluster: the constructions vary", len({c["params"].get("construction") for c in mods}) >= 3)
+res = addon.plan_build(bpy.context, huts)
+check("Cluster: it builds", len(res["built"]) == len(mods), str(res["built"]))
+check("Cluster: bad attach rule refused", bool(addon.plan_validate(addon.plan_node("a", "compound", "x", footprint=[[0, 0], [30, 0], [30, 30], [0, 30]], params={"layout": [{"kind": "hut", "near": "inside"}]}))[0]))
+# alpine pack end to end
+al = addon.plan_node("alp", "building", "house", style="alpine", transform={"x": 500.0, "y": 0.0, "z": 0.0, "rot": 0.0})
+addon.plan_build(bpy.context, al)
+check("Alpine: a chalet has two storeys, shingles and a chimney", _bounds_of("alp")[5] > 2 * 2.7 + 1.0)
+ao = next(o for o in bpy.data.objects if o.name.startswith("PB_alp") and o.type == 'MESH')
+check("Alpine: log walls and shingle roof", ao.data.materials[0].name == "LA_Style_AlpineLog" and ao.data.materials[2].name == "LA_Style_Shingle", str([m.name for m in ao.data.materials]))
+check("Hut: the panel buttons create huts", bpy.ops.object.gla_plan_create(kind='HUT') == {'FINISHED'} and bpy.ops.object.gla_plan_create(kind='HUTS') == {'FINISHED'})
 
 # ==============================================================================
 print()
