@@ -9067,6 +9067,10 @@ def plan_validate(root):
             problem = plan_polygon_problem(fp)
             if problem:
                 errors.append("%s: %s" % (where, problem))
+        for rule in (node.get("params") or {}).get("layout") or []:
+            problem = _layout_rule_problem(rule)
+            if problem:
+                errors.append("%s: %s" % (where, problem))
         zs = [lv.get("z", 0.0) for lv in node.get("levels", [])]
         if any(b <= a for a, b in zip(zs, zs[1:])):
             errors.append("%s: levels must have strictly increasing z" % where)
@@ -9101,6 +9105,209 @@ def plan_validate(root):
                     warnings.append("%s/%s: footprint reaches outside its parent" % ("/".join(path), child.get("id")))
                     break
     return errors, warnings
+
+
+# ------------------------------------------------------------------------------
+# Automatic layout. A compound may carry `params.layout`, a list of rules
+#   {"kind": "house", "count": 3 | [2, 4], "near": "free" | "wall", "min_gap": 2.0, "params": {...}}
+# that are expanded into ordinary child plans at build time (the stored plan is not
+# changed; `Freeze Layout` writes the result into it). Existing children are
+# obstacles; a corridor from every gate anchor to the layout target stays free; every
+# placed footprint lies inside the compound with a margin, and buildings turn their
+# door (local -y) toward the target. Placement is seeded: same plan, same result.
+# ------------------------------------------------------------------------------
+def _poly_transform(points, x, y, rot_deg):
+    c, s = math.cos(math.radians(rot_deg)), math.sin(math.radians(rot_deg))
+    return [(x + px * c - py * s, y + px * s + py * c) for px, py in points]
+
+
+def _convex_hull(points):
+    pts = sorted(set((round(p[0], 6), round(p[1], 6)) for p in points))
+    if len(pts) <= 2:
+        return pts
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+    lower, upper = [], []
+    for p in pts:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
+    for p in reversed(pts):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
+    return lower[:-1] + upper[:-1]
+
+
+def _convex_gap(a, b):
+    """Largest separation found along the edge normals of two convex polygons (>0 means they are apart by at
+    least that much along some axis, <= 0 means they overlap)."""
+    best = -1e9
+    for poly in (a, b):
+        n = len(poly)
+        for i in range(n):
+            ex, ey = poly[(i + 1) % n][0] - poly[i][0], poly[(i + 1) % n][1] - poly[i][1]
+            ln = math.hypot(ex, ey)
+            if ln < 1e-9:
+                continue
+            nx, ny = ey / ln, -ex / ln
+            pa = [p[0] * nx + p[1] * ny for p in a]
+            pb = [p[0] * nx + p[1] * ny for p in b]
+            best = max(best, max(min(pb) - max(pa), min(pa) - max(pb)))
+    return best
+
+
+def _dist_point_segment(p, a, b):
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    t = 0.0 if dx == dy == 0 else max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (dx * dx + dy * dy)))
+    return math.hypot(p[0] - (a[0] + t * dx), p[1] - (a[1] + t * dy))
+
+
+def _inside_with_margin(poly, container, margin):
+    n = len(container)
+    for p in poly:
+        if not _point_in_poly(p, container):
+            return False
+        if min(_dist_point_segment(p, container[i], container[(i + 1) % n]) for i in range(n)) < margin:
+            return False
+    return True
+
+
+def _layout_corridors(node, target_xy, width):
+    """Rectangles (as polygons) from each of the compound's gate anchors to the target."""
+    out = []
+    if target_xy is None:
+        return out
+    for anchor in node.get("anchors", []):
+        if anchor.get("kind") != "gate":
+            continue
+        gx, gy = anchor["pos"][0], anchor["pos"][1]
+        dx, dy = target_xy[0] - gx, target_xy[1] - gy
+        ln = math.hypot(dx, dy)
+        if ln < 1e-6:
+            continue
+        ux, uy, hw = dx / ln, dy / ln, max(width, float(anchor.get("width", 3.0))) / 2.0
+        px, py = -uy * hw, ux * hw
+        out.append([(gx + px, gy + py), (gx - px, gy - py), (target_xy[0] - px, target_xy[1] - py), (target_xy[0] + px, target_xy[1] + py)])
+    return out
+
+
+def _layout_rule_problem(rule):
+    if not isinstance(rule, dict) or not isinstance(rule.get("kind"), str):
+        return "each layout rule needs a string 'kind'"
+    count = rule.get("count", 1)
+    ok = (isinstance(count, int) and not isinstance(count, bool) and count >= 0) or (
+        isinstance(count, (list, tuple)) and len(count) == 2 and all(isinstance(c, int) and not isinstance(c, bool) and c >= 0 for c in count)
+        and count[0] <= count[1])
+    if not ok:
+        return "layout count must be an integer >= 0 or [min, max]"
+    if rule.get("near", "free") not in ("free", "wall"):
+        return "layout 'near' must be 'free' or 'wall'"
+    gap = rule.get("min_gap", 2.0)
+    if isinstance(gap, bool) or not isinstance(gap, (int, float)) or gap < 0:
+        return "layout min_gap must be a number >= 0"
+    return None
+
+
+def _expand_compound(node, seed):
+    """Returns (generated_children, warnings) for one compound's layout rules."""
+    params = node.get("params") or {}
+    rules = params.get("layout") or []
+    fp_local = plan_footprint(node)
+    if not rules or not fp_local or plan_polygon_problem(fp_local):
+        return [], []
+    container = [tuple(p) for p in fp_local]
+    margin = float(params.get("layout_margin", 1.5)) + (float(params.get("fence_thickness", 0.5)) if params.get("fence", "none") != "none" else 0.0)
+    target = None
+    target_id = params.get("layout_target")
+    for child in node.get("children", []):
+        if (target_id and child.get("id") == target_id) or (not target_id and child.get("kind") == "castle"):
+            t = child.get("transform") or {}
+            target = (float(t.get("x", 0.0)), float(t.get("y", 0.0)))
+            break
+    placed = []                                    # convex polygons already taken (existing children first)
+    for child in node.get("children", []):
+        cfp = plan_footprint(child)
+        if cfp and not plan_polygon_problem(cfp):
+            t = child.get("transform") or {}
+            placed.append(_convex_hull(_poly_transform(cfp, t.get("x", 0.0), t.get("y", 0.0), t.get("rot", 0.0))))
+    corridors = [_convex_hull(c) for c in _layout_corridors(node, target, float(params.get("corridor_width", 5.0)))]
+    used_ids = {c.get("id") for c in node.get("children", [])}
+    out, warnings = [], []
+    for ri, rule in enumerate(rules):
+        rng = random.Random(plan_child_seed(seed, "layout%d_%s" % (ri, rule["kind"])))
+        count = rule.get("count", 1)
+        n = rng.randint(count[0], count[1]) if isinstance(count, (list, tuple)) else count
+        gap = float(rule.get("min_gap", 2.0))
+        proto = plan_node("proto", "building", rule["kind"], params=dict(rule.get("params") or {}))
+        base = plan_footprint(proto)
+        if not base:
+            warnings.append("layout: kind %r has no footprint, skipped" % rule["kind"])
+            continue
+        not_placed = 0
+        for _ in range(n):
+            for attempt in range(250):
+                if rule.get("near") == "wall":
+                    i = rng.randrange(len(container))
+                    a, b = container[i], container[(i + 1) % len(container)]
+                    f = rng.random()
+                    ex, ey = b[0] - a[0], b[1] - a[1]
+                    ln = math.hypot(ex, ey) or 1.0
+                    inward = (-ey / ln, ex / ln)
+                    depth = max(abs(p[1]) for p in base) + margin + 0.3
+                    cx, cy = a[0] + ex * f + inward[0] * depth, a[1] + ey * f + inward[1] * depth
+                else:
+                    xs, ys = [p[0] for p in container], [p[1] for p in container]
+                    cx, cy = rng.uniform(min(xs), max(xs)), rng.uniform(min(ys), max(ys))
+                if target is not None:
+                    want = math.degrees(math.atan2(target[1] - cy, target[0] - cx))      # direction the door should face
+                    rot = min((0.0, 90.0, 180.0, 270.0), key=lambda r: abs(((want - (r - 90.0) + 180.0) % 360.0) - 180.0))
+                else:
+                    rot = rng.choice((0.0, 90.0, 180.0, 270.0))
+                poly = _convex_hull(_poly_transform(base, cx, cy, rot))
+                if not _inside_with_margin(poly, container, margin):
+                    continue
+                if any(_convex_gap(poly, q) < gap for q in placed) or any(_convex_gap(poly, q) <= 0.0 for q in corridors):
+                    continue
+                placed.append(poly)
+                k = 1
+                while "%s_%d" % (rule["kind"], k) in used_ids:
+                    k += 1
+                cid = "%s_%d" % (rule["kind"], k)
+                used_ids.add(cid)
+                child = plan_node(cid, "building", rule["kind"], params=dict(rule.get("params") or {}),
+                                  transform={"x": round(cx, 3), "y": round(cy, 3), "z": 0.0, "rot": rot})
+                child["generated"] = True
+                out.append(child)
+                break
+            else:
+                not_placed += 1
+        if not_placed:
+            warnings.append("layout: placed %d of %d %s (no room left)" % (n - not_placed, n, rule["kind"]))
+    return out, warnings
+
+
+def plan_expand_layout(root):
+    """A copy of the tree in which every compound's layout rules are replaced by the child plans they produce.
+    Returns (expanded_root, warnings). Generated children carry "generated": true; the input is not modified."""
+    root = json.loads(json.dumps(root))
+    resolved_seed = {}
+    warnings = []
+
+    def walk(node, path, parent_seed):
+        seed = node["seed"] if node.get("seed") is not None else (plan_child_seed(parent_seed, node["id"]) if parent_seed is not None else 0)
+        resolved_seed[path] = seed
+        generated, warn = _expand_compound(node, seed) if node.get("type") == "compound" else ([], [])
+        warnings.extend("%s: %s" % ("/".join(path), w) for w in warn)
+        node["children"] = node.get("children", []) + generated
+        if generated and isinstance(node.get("params"), dict):
+            node["params"].pop("layout", None)
+        for child in node["children"]:
+            walk(child, path + (child["id"],), seed)
+
+    walk(root, (root["id"],), None)
+    return root, warnings
 
 
 def plan_to_json(root, revision=1):
@@ -9711,6 +9918,8 @@ def plan_build(context, root):
     errors, warnings = plan_validate(root)
     if errors:
         raise PlanError("Plan has errors: " + "; ".join(errors))
+    root, layout_warnings = plan_expand_layout(root)
+    warnings = list(warnings) + layout_warnings
     resolved = plan_resolve(root)
     plan_clear_built(root["id"])
     built, skipped = [], []
@@ -9757,7 +9966,11 @@ def plan_new_example(scene, kind, existing_ids):
     well = plan_node("well", "building", "well", transform={"x": -(w / 2 + 8.0), "y": -6.0, "z": 0.0, "rot": 0.0})
     grounds = plan_node(unique("grounds"), "compound", "castle_grounds", transform=transform,
                         footprint=[[-half_w, -half_d], [half_w, -half_d], [half_w, half_d], [-half_w, half_d]],
-                        params={"fence": "stone"},
+                        params={"fence": "stone", "layout": [
+                            {"kind": "chapel", "count": 1, "near": "wall"},
+                            {"kind": "stable", "count": [1, 2], "near": "wall"},
+                            {"kind": "house", "count": [2, 4]},
+                        ]},
                         anchors=[{"id": "gate", "kind": "gate", "pos": [0.0, -half_d, 0.0], "dir": 270.0,
                                   "width": 4.0, "level": 0}],
                         children=[castle, watch, well])
@@ -9799,6 +10012,28 @@ class OBJECT_OT_PlanBuild(bpy.types.Operator):
         for line in result["warnings"]:
             self.report({'WARNING'}, line)
         self.report({'INFO'}, "Built %d part(s)." % len(result["built"]))
+        return {'FINISHED'}
+
+
+class OBJECT_OT_PlanFreezeLayout(bpy.types.Operator):
+    """Writes the automatic layout of a stored plan into it as ordinary child plans (and drops the layout rules)."""
+    bl_idname = "object.gla_plan_freeze_layout"
+    bl_label = "Freeze Layout"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    plan_id: StringProperty()
+
+    def execute(self, context):
+        try:
+            root = plan_read_from_blend(self.plan_id)
+            expanded, warnings = plan_expand_layout(root)
+        except PlanError as exc:
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+        plan_write_to_blend(context.scene, expanded)
+        for line in warnings:
+            self.report({'WARNING'}, line)
+        self.report({'INFO'}, "Layout frozen into the plan.")
         return {'FINISHED'}
 
 
@@ -11101,6 +11336,7 @@ class VIEW3D_PT_GLAPlans(bpy.types.Panel):
             box.label(text=plan_id, icon='OUTLINER_COLLECTION')
             row = box.row(align=True)
             row.operator("object.gla_plan_build", text="Build", icon='PLAY').plan_id = plan_id
+            row.operator("object.gla_plan_freeze_layout", text="Freeze", icon='FREEZE').plan_id = plan_id
             row.operator("object.gla_plan_save", text="Save", icon='EXPORT').plan_id = plan_id
             row.operator("object.gla_plan_remove", text="", icon='TRASH').plan_id = plan_id
         layout.operator("object.gla_plan_load", text="Load Plan...", icon='IMPORT')
@@ -11121,6 +11357,7 @@ classes = (
     OBJECT_OT_GenerateAllSteps,
     OBJECT_OT_PlanCreate,
     OBJECT_OT_PlanBuild,
+    OBJECT_OT_PlanFreezeLayout,
     OBJECT_OT_PlanRemove,
     OBJECT_OT_PlanSave,
     OBJECT_OT_PlanLoad,

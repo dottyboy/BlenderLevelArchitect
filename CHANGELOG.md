@@ -20,6 +20,16 @@ reproduced exactly from its settings (see **Debug: Last Generation Params** in t
 - Fix: buildings that the wrapped Tower/Castle operators place were offset twice when the plan had a non-zero position
   (the parent inverse was computed from a stale matrix); tests now update the view layer before measuring.
 
+## Unreleased — plans (M2, step 3)
+
+- **Automatic layout for compound plans.** `params.layout` is a list of rules (`kind`, `count` as a number or `[min, max]`,
+  `near` = `free` or `wall`, `min_gap`, `params`) that are expanded into child plans when the plan is built. Existing
+  children are obstacles; a corridor from each `gate` anchor to the target (the castle, or `layout_target`) stays free;
+  buildings keep a margin from the fence and turn their door toward the target. Seeded: the same plan always gives the same
+  arrangement. What does not fit is skipped with a warning.
+- **Freeze** button in the Plans panel writes the generated buildings into the stored plan as ordinary children.
+- The *Castle Grounds* example now lays out a chapel, stables and houses.
+
 ## 0.44.0 — plans (M1)
 
 - **Plans, experimental.** A new collapsed *Plans (experimental)* sub-panel: create a starter plan at the 3D cursor

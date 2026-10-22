@@ -3545,7 +3545,8 @@ check("Plan build: example grounds has a castle, a watchtower and a well",
       [c["id"] for c in grounds["children"]] == ["castle", "watchtower", "well"])
 addon.plan_write_to_blend(scene, grounds)
 res = addon.plan_build(bpy.context, addon.plan_read_from_blend(grounds["id"]))
-check("Plan build: nested plan builds the fence and every building", len(res["built"]) == 4, str(res))
+check("Plan build: nested plan builds the fence, the castle, tower, well and the laid-out buildings",
+      len(res["built"]) >= 4 + 4, str(res))
 tower_objs = [o for o in bpy.data.objects if o.name.startswith("PB_%s.watchtower" % grounds["id"]) and o.type == 'MESH']
 castle_objs = [o for o in bpy.data.objects if o.name.startswith("PB_%s.castle" % grounds["id"]) and o.type == 'MESH']
 check("Plan build: both buildings exist as separate meshes", bool(tower_objs) and bool(castle_objs))
@@ -3771,6 +3772,89 @@ check("Fence: L-shape extents match", abs((x1 - x0) - 12.5) < 0.7 and abs((y1 - 
 # vertex budget for the standard enclosure
 check("Fence: the 40 x 30 m enclosure stays under 8000 vertices",
       all(len(o.data.vertices) < 8000 for o in bpy.data.objects if o.name.startswith("PB_yard") and o.type == 'MESH'))
+
+# ==============================================================================
+print("\n--- Plans: automatic layout ---")
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+
+
+def _world_poly(node, offset=(0.0, 0.0)):
+    t = node.get("transform", {})
+    return addon._poly_transform(addon.plan_footprint(node), t.get("x", 0.0) + offset[0], t.get("y", 0.0) + offset[1], t.get("rot", 0.0))
+
+
+def _layout_yard(seed=3):
+    return addon.plan_node(
+        "ly", "compound", "yard", seed=seed, footprint=[[-30, -22], [30, -22], [30, 22], [-30, 22]],
+        params={"fence": "stone", "layout": [{"kind": "chapel", "count": 1, "near": "wall"},
+                                             {"kind": "stable", "count": [1, 2], "near": "wall"},
+                                             {"kind": "house", "count": 4}]},
+        anchors=[{"id": "gate", "kind": "gate", "pos": [0.0, -22.0, 0.0], "dir": 270.0, "width": 4.0}],
+        children=[addon.plan_node("castle", "building", "castle", params={"width": 20, "depth": 14})])
+
+
+ly = _layout_yard()
+exp1, w1 = addon.plan_expand_layout(ly)
+exp2, w2 = addon.plan_expand_layout(ly)
+gen = [c for c in exp1["children"] if c.get("generated")]
+check("Layout: the stored plan is not modified by expansion", "layout" in ly["params"] and len(ly["children"]) == 1)
+check("Layout: expansion is deterministic", exp1 == exp2)
+check("Layout: counts are honoured (1 chapel, 1-2 stables, 4 houses)",
+      sum(c["kind"] == "chapel" for c in gen) == 1 and sum(c["kind"] == "stable" for c in gen) in (1, 2)
+      and sum(c["kind"] == "house" for c in gen) == 4, str([c["id"] for c in gen]) + str(w1))
+exp3, _ = addon.plan_expand_layout(_layout_yard(seed=99))
+check("Layout: a different seed gives a different arrangement",
+      [c["transform"] for c in exp3["children"]] != [c["transform"] for c in exp1["children"]])
+container = [tuple(p) for p in ly["footprint"]]
+polys = {c["id"]: addon._convex_hull(_world_poly(c)) for c in exp1["children"]}
+check("Layout: every building lies inside the yard with the fence margin",
+      all(addon._inside_with_margin(p, container, 1.5 + 0.5 - 1e-6) for k, p in polys.items() if k != "castle"))
+gaps = [addon._convex_gap(polys[a], polys[b]) for i, a in enumerate(polys) for b in list(polys)[i + 1:]]
+check("Layout: no two buildings overlap or sit closer than the minimum gap (2 m)", min(gaps) >= 2.0 - 1e-6, str(min(gaps)))
+corr = [addon._convex_hull(c) for c in addon._layout_corridors(ly, (0.0, 0.0), 5.0)]
+check("Layout: the corridor from the gate to the castle stays free",
+      all(addon._convex_gap(polys[k], corr[0]) > 0.0 for k in polys if k != "castle") and corr)
+# doors face the castle
+def _door_dir(child):
+    return (child["transform"]["rot"] - 90.0) % 360.0
+ok = True
+for c in gen:
+    if c["kind"] != "house":
+        continue
+    cx, cy = c["transform"]["x"], c["transform"]["y"]
+    want = math.degrees(math.atan2(-cy, -cx)) % 360.0
+    diff = abs(((want - _door_dir(c)) + 180.0) % 360.0 - 180.0)
+    ok = ok and diff <= 46.0
+check("Layout: house doors face the castle (within 45 degrees, rotations are multiples of 90)", ok)
+# not enough room
+crowded = addon.plan_node("cr", "compound", "yard", seed=1, footprint=[[-10, -8], [10, -8], [10, 8], [-10, 8]],
+                          params={"layout": [{"kind": "house", "count": 30}]})
+exp, warns = addon.plan_expand_layout(crowded)
+placed = [c for c in exp["children"] if c.get("generated")]
+check("Layout: when there is no room the rest is skipped with a warning",
+      0 < len(placed) < 30 and any("no room" in w for w in warns), "%d, %s" % (len(placed), warns))
+# rule validation
+for bad_rule in ({"count": 2}, {"kind": "house", "count": -1}, {"kind": "house", "count": [3, 1]},
+                 {"kind": "house", "near": "sky"}, {"kind": "house", "min_gap": -1}):
+    bad = addon.plan_node("bl", "compound", "yard", footprint=[[0, 0], [20, 0], [20, 20], [0, 20]], params={"layout": [bad_rule]})
+    check("Layout: invalid rule refused: " + json.dumps(bad_rule), bool(addon.plan_validate(bad)[0]))
+# end to end: build and freeze
+res = addon.plan_build(bpy.context, ly)
+check("Layout: plan_build builds the fence, the castle and every laid-out building",
+      len(res["built"]) == 1 + 1 + len(gen), str(res["built"]) + str(res["skipped"]))
+check("Layout: the Plans build leaves the stored plan alone", "layout" in ly["params"])
+addon.plan_write_to_blend(scene, ly)
+check("Layout: freeze operator", bpy.ops.object.gla_plan_freeze_layout(plan_id="ly") == {'FINISHED'})
+frozen = addon.plan_read_from_blend("ly")
+check("Layout: after freezing the generated children are real children and the rules are gone",
+      "layout" not in frozen["params"] and len([c for c in frozen["children"] if c.get("generated")]) == len(gen))
+check("Layout: frozen plan builds to the same set of parts",
+      addon.plan_build(bpy.context, frozen)["built"] == res["built"])
+check("Layout: the example Grounds plan lays out its buildings",
+      len([c for c in addon.plan_expand_layout(addon.plan_new_example(scene, 'GROUNDS', set()))[0]["children"] if c.get("generated")]) >= 4)
 
 # ==============================================================================
 print()
