@@ -4,7 +4,7 @@ Internal dev-facing doc: what's built, what's known-broken, what's next. Not for
 (see `dist/README.md` for that). Source of truth for the addon's actual behavior is always
 `levelArchitect_v2.py` — this file can drift out of date; the code can't.
 
-Current version: **0.50.0** (see `bl_info` in the source file).
+Current version: **0.51.0** (see `bl_info` in the source file).
 
 §2 (Development tree) was condensed 2026-08-21 — dropped the blow-by-blow investigation
 narrative and per-run stress-test numbers from older, fully-resolved entries, kept every
@@ -753,6 +753,7 @@ GN complexity there specifically.
       too zoomed-out to show doorway-level detail) confirmed the frame visibly follows the wall's
       curve right at the opening, not standing at a mismatched straight angle against it.
 
+- [x] **Polish round 3 (0.51.0).** `plan_set_param` + `OBJECT_OT_PlanSetParam` + `wfc_plan_edit_*`; EARTH/EARTHBAG textures, bilinear blotches in `_masonry_images`; house wall runs E/W inset by the wall thickness (corner caps); `infill` pass in `_expand_block`; `_chaikin` for rivers.
 - [x] **Plans: biome regions (0.50.0).** `region_biome` + `_terrain_region` (stretched fbm mask) -> `region` attribute; GN lerps Amplitude/Feature/Base/Sea (`... B` inputs), second colour ramp and rock/earth mixes, floor at the main sea line; scatter rules of both biomes weighted by the mask.
 - [x] **Plans: rivers (0.49.0).** `_terrain_river_paths` (auto: best of 8 meanders by clearance from pads), `_terrain_river_profile` (monotone bed from first-pass heights), river capsule pads in `_terrain_arrays` (under plan pads), second attribute write + re-read of heights, `River_` ribbon, `params.rivers`.
 - [x] **Plans: terrain, biomes, towns (0.48.0).** `PLAN_BIOMES` + `plan_terrain_params`, `_terrain_pads` / `_terrain_pad_weights` (numpy signed distances; capsule pads along roads, sloped between anchors), `_terrain_grid_mesh` (grid + skirt rings, attributes `pad_h pad_w edge skirt`), `_terrain_node_group` (Geometry Nodes tree: noise, pads, island drop, skirt, colour ramp/rock/earth stored as `Col`), `_terrain_material`, water plane, `_terrain_scatter` (heights read back from the evaluated mesh, merged meshes per rule), `_plan_build_terrain` hooked in `plan_build`; `TERRAIN` / `TOWN` examples; `"fill": []`; `road_graph.z` for sloped connection roads.

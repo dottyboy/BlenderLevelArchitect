@@ -3,6 +3,17 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.51.0 — plans: polish round 3
+
+- **Edit parameters in the panel**: an *Edit a parameter* box in the Plans panel — Node (empty = the plan, or an id like `farm` / `land/hamlet`),
+  Key (`biome`, `fence_height`, `style`, `transform.z` ...) and Value (number, word, true/false or JSON) with a *Set on <plan>* button; the plan is
+  validated, a bad value is refused. Then press Build. (`plan_set_param`.)
+- **Earth and earthbag** look like cob and stacked bags instead of brick; weathering blotches on every procedural texture are smooth, not blocky.
+- **No more black squares** at the corners of flat roofs with parapets (coplanar wall caps overlapped there).
+- **Denser towns**: blocks take `infill` (0..): after the lots along the roads, houses are also placed in the space between streets, turned toward the
+  nearest road (`infill_reach`). The Town example uses it.
+- **Smoother rivers**: paths are corner-cut (Chaikin) before carving.
+
 ## 0.50.0 — plans: biome regions
 
 - **Two biomes on one terrain**: `params.region_biome` (any biome name) takes over where a slow noise mask says so — `region_scale`

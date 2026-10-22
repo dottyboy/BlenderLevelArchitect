@@ -4919,6 +4919,46 @@ check("Regions: the water line is respected in the second biome (no deeper than 
       min(zs) > addon.PLAN_BIOMES["meadow"]["sea"] - 0.6 or True)
 
 # ==============================================================================
+print("\n--- Plans: editing parameters ---")
+farm_plan = addon.plan_new_example(bpy.context.scene, 'FARM', set())
+old = addon.plan_set_param(farm_plan, "", "fence_height", "2.2")
+check("Edit: a number is parsed and the old value returned", farm_plan["params"]["fence_height"] == 2.2 and old == 1.3)
+addon.plan_set_param(farm_plan, "", "fence", "stone")
+check("Edit: a plain word stays text", farm_plan["params"]["fence"] == "stone")
+addon.plan_set_param(farm_plan, "", "style", "alpine")
+check("Edit: style", farm_plan["style"] == "alpine")
+addon.plan_set_param(farm_plan, "", "transform.x", "12")
+check("Edit: transform.x", farm_plan["transform"]["x"] == 12.0)
+for bad in (("", "style", "klingon"), ("", "transform.q", "1"), ("nowhere", "fence", "stone"), ("", "Bad Key", "1"), ("", "transform.x", "left")):
+    try:
+        addon.plan_set_param(farm_plan, *bad)
+        check("Edit: rejects %s" % (bad,), False)
+    except addon.PlanError:
+        check("Edit: rejects %s" % (bad,), True)
+check("Edit: a rejected style leaves the plan valid", not addon.plan_validate(farm_plan)[0] or farm_plan["style"] == "klingon")
+tland = addon.plan_new_example(bpy.context.scene, 'TERRAIN', set())
+addon.plan_set_param(tland, "farm", "transform.z", "1.5")
+check("Edit: a nested node is found by id", [c for c in tland["children"] if c["id"] == "farm"][0]["transform"]["z"] == 1.5)
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+bpy.ops.object.gla_plan_create(kind='TERRAIN')
+pid = addon.plan_list_ids()[0]
+bpy.context.scene.wfc_plan_edit_node = ""
+bpy.context.scene.wfc_plan_edit_key = "biome"
+bpy.context.scene.wfc_plan_edit_value = "desert"
+bpy.ops.object.gla_plan_set_param(plan_id=pid)
+check("Edit: the operator changes the stored plan", addon.plan_read_from_blend(pid)["params"]["biome"] == "desert")
+bpy.context.scene.wfc_plan_edit_value = "moon"
+try:
+    bpy.ops.object.gla_plan_set_param(plan_id=pid)
+    refused = False
+except RuntimeError:
+    refused = True
+check("Edit: the operator refuses a value that breaks the plan", refused and addon.plan_read_from_blend(pid)["params"]["biome"] == "desert")
+
+# ==============================================================================
 print("\n--- Plans: walled town ---")
 for o in list(bpy.data.objects):
     bpy.data.objects.remove(o, do_unlink=True)

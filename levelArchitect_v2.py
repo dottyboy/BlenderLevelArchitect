@@ -33,7 +33,7 @@ from bpy_extras.io_utils import ExportHelper, ImportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 50, 0),
+    "version": (0, 51, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -7355,8 +7355,14 @@ def _masonry_images(prefix, rows, row_h, lens_choices, palette, seed, joint_m=0.
     noise = blur(rng.normal(0, 1, (H, W)).astype(np.float32), 2)
     height = height + noise * 0.15
     # large soft weathering blotches (tileable: a coarse random grid, blurred with wrap-around)
-    coarse = np.kron(rng.random((9, 8)).astype(np.float32), np.ones((H // 9 + 1, W // 8 + 1), dtype=np.float32))[:H, :W]
-    blotch = blur(coarse, 40) - 0.5
+    grid = rng.random((9, 8)).astype(np.float32)
+    gy, gx = np.arange(H) * 9.0 / H, np.arange(W) * 8.0 / W
+    iy, ix = gy.astype(int), gx.astype(int)
+    fy, fx = gy - iy, gx - ix
+    fy, fx = (fy * fy * (3 - 2 * fy))[:, None], (fx * fx * (3 - 2 * fx))[None, :]
+    g00, g01 = grid[iy % 9][:, ix % 8], grid[iy % 9][:, (ix + 1) % 8]
+    g10, g11 = grid[(iy + 1) % 9][:, ix % 8], grid[(iy + 1) % 9][:, (ix + 1) % 8]
+    blotch = (g00 * (1 - fx) + g01 * fx) * (1 - fy) + (g10 * (1 - fx) + g11 * fx) * fy - 0.5
     base = palette(np, tint, tint2, hv)
     base = base * (1.0 + contrast * (0.80 + 0.40 * (hv[..., None] - 0.82) / 0.18 - 1.0)) * (1 + noise[..., None] * 0.5)
     base = base * (1.0 + blotch[..., None] * wear * 4.0)
@@ -7448,8 +7454,8 @@ _STYLE_TEXTURES = {
     'ALPINE_LOG': (8, 0.26, [2.4], (0.56, 0.38, 0.22), 0.02, 0.014, 0.035, 0.04, 0.8),
     'STRAW': (16, 0.13, [0.3, 0.5, 0.7], (0.74, 0.62, 0.32), 0.05, 0.004, 0.01, 0.08, 1.0),
     'BRANCH': (16, 0.13, [0.4, 0.7, 1.0], (0.36, 0.26, 0.15), 0.05, 0.01, 0.015, 0.08, 1.0),
-    'EARTH': (4, 0.52, [1.6, 2.4], (0.55, 0.40, 0.28), 0.03, 0.003, 0.08, 0.04, 1.0),
-    'EARTHBAG': (8, 0.26, [0.6, 0.7, 0.8], (0.62, 0.50, 0.36), 0.04, 0.014, 0.05, 0.04, 1.0),
+    'EARTH': (2, 1.04, [2.4], (0.68, 0.52, 0.37), 0.015, 0.002, 0.004, 0.14, 1.0),
+    'EARTHBAG': (8, 0.26, [1.2, 1.6, 2.4], (0.62, 0.50, 0.36), 0.05, 0.007, 0.035, 0.08, 1.0),
     'AIRCRETE': (2, 1.04, [2.4], (0.86, 0.85, 0.82), 0.01, 0.002, 0.004, 0.03, 0.7),
     # roofs
     'SHINGLE': (12, 0.1733, [0.2, 0.25, 0.3], (0.52, 0.37, 0.23), 0.04, 0.006, 0.02, 0.07, 0.9),
@@ -9897,7 +9903,52 @@ def _expand_block(node, seed, style=None):
                     child["generated"] = True
                     out.append(child)
                 u += step
-    if total and len(out) < total * 0.3:
+    infill = float(p.get("infill", 0.0))
+    if infill > 0.0 and container:
+        # second pass: fill the space between the streets -- random spots turned toward the nearest road
+        xs_, ys_ = [q[0] for q in container], [q[1] for q in container]
+        for _ in range(int(500 * infill)):
+            rule = rng.choices(fills, weights=weights if sum(weights) > 0 else None)[0]
+            bparams = dict(rule.get("params") or {})
+            for key, (lo, hi) in (rule.get("size") or {}).items():
+                bparams[key] = rng.randint(int(lo), int(hi)) if key == "floors" else round(rng.uniform(lo, hi), 2)
+            _apply_vary(rng, bparams, rule, style)
+            cstyle = _concrete_style(rng, style)
+            proto = plan_node("proto", "building", rule["kind"], params=bparams, style=cstyle or (style if style != 'mixed' else None))
+            base = plan_footprint(proto)
+            if not base:
+                continue
+            cx, cy = rng.uniform(min(xs_), max(xs_)), rng.uniform(min(ys_), max(ys_))
+            best = None
+            for a, b, w in edges:
+                (ax, ay), (bx, by) = nodes[a], nodes[b]
+                L2 = max((bx - ax) ** 2 + (by - ay) ** 2, 1e-9)
+                t = min(max(((cx - ax) * (bx - ax) + (cy - ay) * (by - ay)) / L2, 0.0), 1.0)
+                qx, qy = ax + t * (bx - ax), ay + t * (by - ay)
+                d = math.hypot(cx - qx, cy - qy)
+                if best is None or d < best[0]:
+                    best = (d, qx, qy)
+            if best is None or best[0] > float(p.get("infill_reach", 24.0)):
+                continue
+            rot = math.degrees(math.atan2(cy - best[2], cx - best[1])) + 90.0 if best[0] > 1e-6 else 0.0
+            poly = _convex_hull(_poly_transform(base, cx, cy, rot))
+            tried += 1
+            if not _inside_with_margin(poly, container, 0.5) or any(_convex_gap(poly, r_) <= 0.6 for r_ in roads) \
+                    or any(_convex_gap(poly, q) < p["lot_gap"] + 0.6 for q in placed):
+                continue
+            placed.append(poly)
+            k = 1
+            while "%s_%d" % (rule["kind"], k) in used_ids:
+                k += 1
+            cid = "%s_%d" % (rule["kind"], k)
+            used_ids.add(cid)
+            child = plan_node(cid, "building", rule["kind"], params=bparams,
+                              transform={"x": round(cx, 3), "y": round(cy, 3), "z": 0.0, "rot": round(rot, 3)})
+            if cstyle:
+                child["style"] = cstyle
+            child["generated"] = True
+            out.append(child)
+    if total and len(out) < total * 0.3 and not infill:
         warnings.append("block: only %d of %d lots could be used" % (len(out), total))
     degree = {}
     for a, b, _w in edges:
@@ -9986,6 +10037,47 @@ def plan_summary(root):
     if roads:
         extra.append("%d road segment%s" % (roads, "" if roads == 1 else "s"))
     return ", ".join(parts + extra) or "empty"
+
+
+def plan_set_param(root, node_ref, key, value):
+    """Sets one value in a plan tree (in place): `node_ref` is '' for the root or a node id / path suffix ('farm', 'land/farm');
+    `key` is 'style', 'seed', 'name', 'transform.x' (x y z rot) or a params key ('biome', 'fence', 'roof'...). `value` may be JSON
+    text ('3', 'true', '[1, 2]', '\"stone\"') or a plain word. Returns the old value. Raises PlanError."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            pass
+    target = None
+    parts = [q for q in str(node_ref).split("/") if q]
+    for node, path in plan_iter(root):
+        if not parts or path[-len(parts):] == tuple(parts):
+            target = node
+            break
+    if target is None:
+        raise PlanError("no plan node %r" % (node_ref,))
+    if key in ("style", "seed", "name", "kind"):
+        old = target.get(key)
+        target[key] = None if value in ("", None) else value
+    elif key.startswith("transform."):
+        axis = key.split(".", 1)[1]
+        if axis not in ("x", "y", "z", "rot") or not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise PlanError("transform.%s needs a number (x, y, z or rot)" % axis)
+        old = target.setdefault("transform", {}).get(axis)
+        target["transform"][axis] = float(value)
+    else:
+        if not key or not re.match(r"^[a-z0-9_]+$", key):
+            raise PlanError("parameter names are lower-case words like 'biome' or 'fence_height'")
+        params = target.setdefault("params", {})
+        old = params.get(key)
+        if value is None:
+            params.pop(key, None)
+        else:
+            params[key] = value
+    errors, _w = plan_validate(root)
+    if errors:
+        raise PlanError("that value breaks the plan: " + errors[0])
+    return old
 
 
 def plan_to_json(root, revision=1):
@@ -10632,7 +10724,9 @@ def _build_house_mesh(kind, p, seed):
     dirs = [(1, 0, 0.0), (0, 1, math.pi / 2), (-1, 0, math.pi), (0, -1, 3 * math.pi / 2)]
     spans = (W, D, W, D)
     for i, ((cx, cy), (dx, dy, rot)) in enumerate(zip(corners, dirs)):
-        L = spans[i] + t
+        # the east and west runs stop at the corner squares of the south and north runs (no coplanar caps fighting there)
+        inset = t if i % 2 else 0.0
+        L = spans[i] + t - 2.0 * inset
         wb = _WallRunBuilder(L, H + parapet, t, battlements=False, seed=seed + 11 * i, ruin=ruin,
                              stones=int(L * (H + parapet) * 0.3 * stones_scale))
         side = "SENW"[i]
@@ -10645,7 +10739,7 @@ def _build_house_mesh(kind, p, seed):
                     wb.add_opening((j + 0.5) * L / n, p["window_width"], k * h + p["window_sill"],
                                    p["window_height"], p["window_kind"])
         wb.geometry()
-        big.append(wb.mb, rot=rot, offset=(cx - dx * t / 2.0, cy - dy * t / 2.0, 0.0), mat_map=mat_map)
+        big.append(wb.mb, rot=rot, offset=(cx - dx * (t / 2.0 - inset), cy - dy * (t / 2.0 - inset), 0.0), mat_map=mat_map)
     iw, idp = W / 2.0 - t / 2.0, D / 2.0 - t / 2.0
     tile = TOWER_TILE_W
     # straight stair along the wall opposite the door (when there is room); the slabs get an opening above it
@@ -11743,12 +11837,24 @@ def _terrain_grid_mesh(tp, pads, name):
     return mesh, (nx, ny)
 
 
+def _chaikin(points, rounds=2):
+    """Corner-cutting smoothing of a polyline (the end points stay)."""
+    pts = [tuple(map(float, q)) for q in points]
+    for _ in range(rounds):
+        out = [pts[0]]
+        for a, b in zip(pts, pts[1:]):
+            out += [(0.75 * a[0] + 0.25 * b[0], 0.75 * a[1] + 0.25 * b[1]), (0.25 * a[0] + 0.75 * b[0], 0.25 * a[1] + 0.75 * b[1])]
+        out.append(pts[-1])
+        pts = out
+    return pts
+
+
 def _terrain_river_paths(tp, pads, seed):
     """The rivers to cut: explicit paths, or (auto) meandering ones from one side to the other that keep clear of the pads."""
     import numpy as np
     spec_n = PLAN_BIOME_RIVERS.get(tp["biome"], 0)
     if isinstance(tp["rivers"], list):
-        return [{"path": [tuple(map(float, q)) for q in r["path"]], "width": float(r.get("width", 6.0))} for r in tp["rivers"]]
+        return [{"path": _chaikin(r["path"]), "width": float(r.get("width", 6.0))} for r in tp["rivers"]]
     if tp["rivers"] == "none" or not spec_n:
         return []
     rng = random.Random(seed + 4242)
@@ -11767,7 +11873,7 @@ def _terrain_river_paths(tp, pads, seed):
             clear = min(clear, float(dist.min()))
         if clear > best_clear:
             best, best_clear = pts, clear
-    return [{"path": best, "width": 7.0}]
+    return [{"path": _chaikin(best), "width": 7.0}]
 
 
 def _terrain_river_profile(path, sampler, sea):
@@ -12374,7 +12480,7 @@ def plan_new_example(scene, kind, existing_ids):
             "streets", "block", "district",
             params={"road_generator": {"kind": "ring", "radius": 54.0, "rings": 2, "spokes": 6, "segments": 24, "wobble": 0.04},
                     "shape": {"kind": "circle", "width": 124.0, "depth": 124.0, "seed": 11}, "road_width": 5.0,
-                    "lot_width": 7.0, "lot_depth": 9.0, "skip_chance": 0.1,
+                    "lot_width": 7.0, "lot_depth": 9.0, "skip_chance": 0.1, "infill": 2.0,
                     "fill": [{"kind": "house", "weight": 8, "size": {"width": [6.0, 8.0], "depth": [5.0, 6.5], "floors": [1, 2]},
                               "vary": {"brick_color": ["PLAIN", "OCHRE", "SLATE", "SAND", "ROSE"], "roof_color": ["TERRACOTTA", "SLATE"]}},
                              {"kind": "chapel", "weight": 1}, {"kind": "stable", "weight": 1}]})
@@ -12534,6 +12640,27 @@ class OBJECT_OT_PlanFreezeLayout(bpy.types.Operator):
         for line in warnings:
             self.report({'WARNING'}, line)
         self.report({'INFO'}, "Layout frozen into the plan.")
+        return {'FINISHED'}
+
+
+class OBJECT_OT_PlanSetParam(bpy.types.Operator):
+    """Changes one parameter of a stored plan (see the Edit fields in the Plans panel), then press Build."""
+    bl_idname = "object.gla_plan_set_param"
+    bl_label = "Set Plan Parameter"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    plan_id: StringProperty()
+
+    def execute(self, context):
+        scene = context.scene
+        try:
+            root = plan_read_from_blend(self.plan_id)
+            old = plan_set_param(root, scene.wfc_plan_edit_node, scene.wfc_plan_edit_key, scene.wfc_plan_edit_value)
+        except PlanError as exc:
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+        plan_write_to_blend(scene, root)
+        self.report({'INFO'}, "%s: %s was %r, now %s." % (self.plan_id, scene.wfc_plan_edit_key, old, scene.wfc_plan_edit_value))
         return {'FINISHED'}
 
 
@@ -13852,6 +13979,14 @@ class VIEW3D_PT_GLAPlans(bpy.types.Panel):
             row.operator("object.gla_plan_freeze_layout", text="Freeze", icon='FREEZE').plan_id = plan_id
             row.operator("object.gla_plan_save", text="Save", icon='EXPORT').plan_id = plan_id
             row.operator("object.gla_plan_remove", text="", icon='TRASH').plan_id = plan_id
+        if plan_list_ids():
+            box = layout.box()
+            box.label(text="Edit a parameter, then Set and Build:")
+            box.prop(context.scene, "wfc_plan_edit_node", text="Node")
+            box.prop(context.scene, "wfc_plan_edit_key", text="Key")
+            box.prop(context.scene, "wfc_plan_edit_value", text="Value")
+            for plan_id in plan_list_ids():
+                box.operator("object.gla_plan_set_param", text="Set on %s" % plan_id).plan_id = plan_id
         layout.operator("object.gla_plan_load", text="Load Plan...", icon='IMPORT')
 
 
@@ -13871,6 +14006,7 @@ classes = (
     OBJECT_OT_PlanCreate,
     OBJECT_OT_PlanBuild,
     OBJECT_OT_PlanFreezeLayout,
+    OBJECT_OT_PlanSetParam,
     OBJECT_OT_PlanRemove,
     OBJECT_OT_PlanSave,
     OBJECT_OT_PlanLoad,
@@ -14524,6 +14660,12 @@ def register():
                              ('ROUND', "Round", "Circular enclosures and ring-and-spoke streets"),
                              ('ORGANIC', "Organic", "Free-form outlines and winding streets")],
         default='REGULAR', description="Outline and street pattern of new compounds and blocks")
+    bpy.types.Scene.wfc_plan_edit_node = StringProperty(
+        name="Node", default="", description="Which node of the plan: empty = the plan itself, or a node id such as 'farm' or 'land/hamlet'")
+    bpy.types.Scene.wfc_plan_edit_key = StringProperty(
+        name="Key", default="", description="'style', 'seed', 'name', 'transform.x' / y / z / rot, or a parameter such as 'biome', 'fence', 'floors', 'scatter'")
+    bpy.types.Scene.wfc_plan_edit_value = StringProperty(
+        name="Value", default="", description="A number, true/false, a word, or JSON such as [1, 2]")
     bpy.types.Scene.wfc_plan_biome = EnumProperty(
         name="Biome", items=[(k, v["label"], "Ground colours, relief, water and vegetation of a new terrain plan")
                              for k, v in PLAN_BIOMES.items()],
@@ -14665,6 +14807,9 @@ def unregister():
     del bpy.types.Scene.wfc_plan_style
     del bpy.types.Scene.wfc_plan_shape
     del bpy.types.Scene.wfc_plan_biome
+    del bpy.types.Scene.wfc_plan_edit_node
+    del bpy.types.Scene.wfc_plan_edit_key
+    del bpy.types.Scene.wfc_plan_edit_value
 
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

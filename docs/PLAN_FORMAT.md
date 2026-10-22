@@ -108,6 +108,11 @@ placed on it and the ground is flattened under them.
   and rock/earth colours, floors the second biome at the first one's water line, and scatter uses each biome's rules in proportion.
 * Not yet: polygon-shaped biome regions blended across one terrain, terrain from a heightmap image, roads that curve with the ground.
 
+### Block extras
+
+`"infill": 1.0` (default 0) adds a second pass: random spots inside the block outline, up to `infill_reach` (24 m) from a road, turned toward the nearest road,
+kept clear of roads and lots. `"fill": []` means a bare road.
+
 ## 6. Storage
 
 **In the .blend:** one *Collection* per plan, named `Plan_<path>` (ids from the root joined by `.`, e.g. `Plan_farm.barn.silo`), nested like the plan tree.

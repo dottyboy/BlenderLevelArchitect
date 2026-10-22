@@ -214,6 +214,14 @@ The **Town** button makes a round town: a stone wall with towers (none in the ga
 it a ring-and-spoke street pattern lined with houses, chapels and stables. Put it inside a terrain to see it on the ground. Use the
 **Style** dropdown for another culture, or change `params.shape` / the block's `road_generator` for another layout.
 
+### Editing a plan from the panel
+
+Under the plan list there is an **Edit a parameter** box: type the node (leave empty for the plan itself, or `farm`, `land/hamlet`), the key
+(`biome`, `scatter`, `fence_height`, `floors`, `style`, `seed`, `transform.z` ...) and the value (a number, a word, `true`/`false`, or JSON like `[1, 2]`),
+press **Set on <plan>**, then **Build**. A value that would break the plan is refused with the reason.
+
+A block's `infill` (for example `"infill": 2.0`) places extra houses between the streets, not only along them — the Town example uses it.
+
 ### Tips for plans
 
 * Change a parameter in the saved JSON (or in the plan's custom property), then press **Build** — rebuilds are cheap and exact.
