@@ -7298,7 +7298,7 @@ TOWER_ROWS = 8
 ROOF_SOURCE_SLOT = 2                 # material slot the building builders give roof faces (maps to the roof slot)
 
 
-def _masonry_images(prefix, rows, row_h, lens_choices, palette, seed, joint_m=0.011, bevel_m=0.016, wear=0.12):
+def _masonry_images(prefix, rows, row_h, lens_choices, palette, seed, joint_m=0.011, bevel_m=0.016, wear=0.12, contrast=1.0):
     """(albedo, normal) procedural masonry images, generated once per session
     with numpy and packed into the .blend so glTF export embeds them. rows *
     row_h must equal the brick tile height so every material shares one UV
@@ -7358,7 +7358,7 @@ def _masonry_images(prefix, rows, row_h, lens_choices, palette, seed, joint_m=0.
     coarse = np.kron(rng.random((9, 8)).astype(np.float32), np.ones((H // 9 + 1, W // 8 + 1), dtype=np.float32))[:H, :W]
     blotch = blur(coarse, 40) - 0.5
     base = palette(np, tint, tint2, hv)
-    base = base * (0.80 + 0.40 * (hv[..., None] - 0.82) / 0.18) * (1 + noise[..., None] * 0.5)
+    base = base * (1.0 + contrast * (0.80 + 0.40 * (hv[..., None] - 0.82) / 0.18 - 1.0)) * (1 + noise[..., None] * 0.5)
     base = base * (1.0 + blotch[..., None] * wear * 4.0)
     mortar = np.array([0.20, 0.19, 0.17])
     albedo = np.where((d_edge < joint + 0.5)[..., None], mortar, base)
@@ -7423,14 +7423,62 @@ def _roof_images(color):
                            [0.26, 0.3, 0.34], palette, 19, joint_m=0.012, bevel_m=0.03, wear=0.14)
 
 
+def _flat_palette(base, jitter=0.05):
+    """A palette function for _masonry_images: a base colour with per-block lightness/hue jitter."""
+    def palette(np, tint, tint2, hv):
+        return np.stack([base[0] + jitter * tint + 0.4 * jitter * tint2,
+                         base[1] + 0.9 * jitter * tint,
+                         base[2] + 0.8 * jitter * tint - 0.4 * jitter * tint2], -1)
+    return palette
+
+
+# Wall / trim / roof materials of the style packs: key -> (rows, row_h, block lengths, base colour, jitter, joint, bevel, wear,
+# roughness). rows * row_h is always the 2.08 m tile height so every material shares one UV scale.
+_STYLE_TEXTURES = {
+    'SANDSTONE': (4, 0.52, [0.9, 1.2, 1.5], (0.80, 0.66, 0.44), 0.025, 0.012, 0.025, 0.06, 0.9),
+    'SANDSTONE_DARK': (4, 0.52, [0.9, 1.2, 1.5], (0.62, 0.48, 0.32), 0.03, 0.012, 0.025, 0.07, 0.9),
+    'ADOBE': (4, 0.52, [1.2, 1.6, 2.0], (0.88, 0.72, 0.52), 0.035, 0.004, 0.06, 0.03, 0.95),
+    'ADOBE_TRIM': (4, 0.52, [1.2, 1.6, 2.0], (0.58, 0.34, 0.20), 0.04, 0.006, 0.05, 0.04, 0.9),
+    'TIMBER': (8, 0.26, [2.4], (0.58, 0.13, 0.10), 0.015, 0.01, 0.01, 0.02, 0.6),
+    'TIMBER_DARK': (8, 0.26, [2.4], (0.26, 0.16, 0.11), 0.015, 0.01, 0.01, 0.02, 0.8),
+    'FITTED': (4, 0.52, [0.6, 0.9, 1.3, 1.1], (0.52, 0.51, 0.48), 0.05, 0.008, 0.03, 0.07, 0.9),
+    'FITTED_DARK': (4, 0.52, [0.6, 0.9, 1.3, 1.1], (0.38, 0.38, 0.37), 0.05, 0.008, 0.03, 0.08, 0.9),
+    'PANEL': (4, 0.52, [1.2, 2.4], (0.80, 0.82, 0.85), 0.02, 0.022, 0.008, 0.015, 0.35),
+    'PANEL_DARK': (4, 0.52, [1.2, 2.4], (0.22, 0.25, 0.30), 0.02, 0.022, 0.008, 0.015, 0.4),
+    # roofs
+    'THATCH': (20, 0.104, [0.12, 0.16, 0.2], (0.70, 0.58, 0.30), 0.06, 0.004, 0.012, 0.08, 1.0),
+    'SANDROOF': (2, 1.04, [1.2, 2.4], (0.74, 0.62, 0.42), 0.03, 0.01, 0.02, 0.05, 0.95),
+    'TILE_GREY': (10, 0.208, [0.22, 0.26], (0.34, 0.38, 0.42), 0.04, 0.012, 0.03, 0.08, 0.7),
+    'METAL': (2, 1.04, [1.2, 2.4], (0.24, 0.27, 0.32), 0.02, 0.016, 0.006, 0.015, 0.35),
+}
+_STYLE_CONTRAST = {'SANDSTONE': 0.45, 'SANDSTONE_DARK': 0.5, 'ADOBE': 0.2, 'ADOBE_TRIM': 0.3, 'TIMBER': 0.4, 'TIMBER_DARK': 0.4,
+                   'FITTED': 0.6, 'FITTED_DARK': 0.6, 'PANEL': 0.25, 'PANEL_DARK': 0.25, 'THATCH': 0.55, 'SANDROOF': 0.4,
+                   'TILE_GREY': 0.6, 'METAL': 0.25}
+ROOF_COLORS = ('TERRACOTTA', 'SLATE', 'STONE', 'THATCH', 'SANDROOF', 'TILE_GREY', 'METAL')
+
+
+def get_style_material(key):
+    """A style-pack wall/trim/roof material by key (procedural, packed like the masonry textures)."""
+    name = "LA_Style_" + key.title().replace("_", "")
+    existing = bpy.data.materials.get(name)
+    if existing is not None:
+        return existing
+    rows, row_h, lens, base, jitter, joint, bevel, wear, rough = _STYLE_TEXTURES[key]
+    images = _masonry_images(name, rows, row_h, lens, _flat_palette(base, jitter), 31 + len(key), joint_m=joint,
+                             bevel_m=bevel, wear=wear, contrast=_STYLE_CONTRAST.get(key, 1.0))
+    return _masonry_material(name, images, name + ".png", "%02x%02x%02x" % tuple(int(c * 255) for c in base), roughness=rough)
+
+
 def get_or_create_roof_material(color):
-    """Roof tiles (procedural, packed like the masonry): 'TERRACOTTA' or 'SLATE'; anything else gives the
-    dressed-stone material, i.e. the earlier stone roof."""
-    if color not in ('TERRACOTTA', 'SLATE'):
-        return get_or_create_tower_stone_material()
-    name = "LA_Roof_" + color.capitalize()
-    return _masonry_material(name, _roof_images(color) if bpy.data.materials.get(name) is None else None,
-                             name + ".png", "8a4a2e" if color == 'TERRACOTTA' else "3a4048", roughness=0.8)
+    """Roof material: terracotta / slate tiles, thatch, sand slab, grey tiles, metal; 'STONE' (and anything
+    unknown) gives the dressed-stone material, i.e. the earlier stone roof."""
+    if color in ('TERRACOTTA', 'SLATE'):
+        name = "LA_Roof_" + color.capitalize()
+        return _masonry_material(name, _roof_images(color) if bpy.data.materials.get(name) is None else None,
+                                 name + ".png", "8a4a2e" if color == 'TERRACOTTA' else "3a4048", roughness=0.8)
+    if color in _STYLE_TEXTURES:
+        return get_style_material(color)
+    return get_or_create_tower_stone_material()
 
 
 def _masonry_material(name, images, fallback_file, fallback_hex, roughness=0.9):
@@ -7561,9 +7609,13 @@ def get_or_create_tower_brick_tint_material(index):
 WOOD_SOURCE_SLOT = 3                 # material slot of wooden parts (fences); needs the roof slot before it
 
 
-def _wood_images():
+WOOD_COLORS = {'BROWN': (0.34, 0.22, 0.12), 'RED': (0.56, 0.10, 0.07), 'DARK': (0.17, 0.11, 0.07)}
+
+
+def _wood_images(variant='BROWN'):
     """(albedo, normal): weathered planks with a long vertical grain, tileable, generated once and packed."""
-    alb, nrm = bpy.data.images.get("LA_Wood_Albedo"), bpy.data.images.get("LA_Wood_Normal")
+    pre = "LA_Wood" if variant == 'BROWN' else "LA_Wood_" + variant.title()
+    alb, nrm = bpy.data.images.get(pre + "_Albedo"), bpy.data.images.get(pre + "_Normal")
     if alb is not None and nrm is not None:
         return alb, nrm
     try:
@@ -7579,7 +7631,7 @@ def _wood_images():
     plank = (np.arange(W) // 64)[None, :]
     tone = 0.85 + 0.15 * np.sin(plank * 12.9898) * np.ones((H, 1))
     seam = ((np.arange(W) % 64) < 2)[None, :] * np.ones((H, 1))
-    base = np.stack([0.34, 0.22, 0.12], -1)[None, None, :] * (tone * (1.0 + grain * 0.25))[..., None]
+    base = np.array(WOOD_COLORS[variant])[None, None, :] * (tone * (1.0 + grain * 0.25))[..., None]
     base = base * (1.0 - 0.5 * seam[..., None])
     albedo = np.clip(base, 0.0, 1.0)
     height = grain * 0.4 - seam * 1.0
@@ -7598,13 +7650,14 @@ def _wood_images():
         img.update()
         img.pack()
         return img
-    return make("LA_Wood_Albedo", albedo, 'sRGB'), make("LA_Wood_Normal", nrm_arr, 'Non-Color')
+    return make(pre + "_Albedo", albedo, 'sRGB'), make(pre + "_Normal", nrm_arr, 'Non-Color')
 
 
-def get_or_create_wood_material():
-    """Weathered wood (procedural planks, packed like the masonry textures)."""
-    return _masonry_material("LA_Wood", _wood_images() if bpy.data.materials.get("LA_Wood") is None else None,
-                             "LA_Wood.png", "3a2616", roughness=0.85)
+def get_or_create_wood_material(variant='BROWN'):
+    """Weathered wood (procedural planks, packed like the masonry textures); BROWN, RED (lacquer) or DARK."""
+    name = "LA_Wood" if variant == 'BROWN' else "LA_Wood_" + variant.title()
+    return _masonry_material(name, _wood_images(variant) if bpy.data.materials.get(name) is None else None,
+                             name + ".png", "3a2616", roughness=0.85)
 
 
 def masonry_material_list(room_colors, roof=None, wood=False):
@@ -9162,6 +9215,8 @@ def plan_validate(root):
             problem = _layout_rule_problem(rule)
             if problem:
                 errors.append("%s: %s" % (where, problem))
+        if node.get("style") not in (None, *PLAN_STYLES):
+            errors.append("%s: unknown style %r (known: %s)" % (where, node.get("style"), ", ".join(PLAN_STYLES)))
         zs = [lv.get("z", 0.0) for lv in node.get("levels", [])]
         if any(b <= a for a, b in zip(zs, zs[1:])):
             errors.append("%s: levels must have strictly increasing z" % where)
@@ -9921,6 +9976,19 @@ def _plan_run_scene_operator(context, node, world, seed, path, op, mapping, pref
             setattr(scene, prop, value)
         scene.cursor.location = saved_cursor
     new_objects = [bpy.data.objects[n] for n in bpy.data.objects.keys() if n not in before]
+    style = plan_style_name(node.get("style"))
+    if style != 'medieval':
+        spec = PLAN_STYLES[style]
+        for obj in new_objects:
+            if obj.type != 'MESH' or len(obj.data.materials) < 2 or obj.name.endswith("Props"):
+                continue
+            mesh = obj.data
+            n_slots = len(mesh.materials)
+            for poly in mesh.polygons:
+                poly.material_index = 1 if poly.material_index >= n_slots - 1 else 0     # last slot = stone/trim, the rest = walls
+            mesh.materials.clear()
+            mesh.materials.append(get_style_material(spec["wall"]))
+            mesh.materials.append(get_style_material(spec["trim"]))
     _plan_adopt_objects(scene, path, world, new_objects, absolute=True)
     return new_objects
 
@@ -9969,7 +10037,7 @@ PLAN_HOUSE_DEFAULTS = {
     "house": dict(width=7.0, depth=5.0, wall_height=2.8, floors=1, wall_thickness=0.45, roof='GABLE',
                   roof_pitch=0.65, door='S', door_style='arch', door_width=1.1, door_height=2.1,
                   window_kind='rect', window_width=0.8, window_height=1.0, window_sill=1.0, windows=True, chimney=True),
-    "chapel": dict(width=6.0, depth=11.0, wall_height=5.0, floors=1, wall_thickness=0.6, roof='GABLE', roof_color='SLATE',
+    "chapel": dict(width=6.0, depth=11.0, wall_height=5.0, floors=1, wall_thickness=0.6, roof='GABLE',
                    roof_pitch=1.0, door='S', door_style='pointed', door_width=1.5, door_height=3.0,
                    window_kind='pointed', window_width=0.7, window_height=1.8, window_sill=1.8, windows=True),
     "barn": dict(width=10.0, depth=7.0, wall_height=3.6, floors=1, wall_thickness=0.45, roof='GABLE',
@@ -9979,17 +10047,17 @@ PLAN_HOUSE_DEFAULTS = {
                    roof_pitch=0.55, door='S', door_style='rect', door_width=2.6, door_height=2.1,
                    window_kind='rect', window_width=0.6, window_height=0.5, window_sill=1.6, windows=True),
 }
-PLAN_HOUSE_COMMON = dict(brick_color='PLAIN', ruin=0.0, detail='MEDIUM', roof_color='TERRACOTTA', chimney=False)
+PLAN_HOUSE_COMMON = dict(brick_color='PLAIN', ruin=0.0, detail='MEDIUM', chimney=False, roof_overhang=0.45, parapet=0.0)
 PLAN_HOUSE_RANGES = {
     "width": (2.0, 60.0), "depth": (2.0, 60.0), "wall_height": (1.8, 10.0), "floors": (1, 4),
     "wall_thickness": (0.2, 1.4), "roof_pitch": (0.2, 1.6), "ruin": (0.0, 1.0),
-    "door_width": (0.6, 4.0), "door_height": (1.4, 4.0), "window_width": (0.2, 2.0),
-    "window_height": (0.2, 2.5), "window_sill": (0.2, 4.0),
+    "door_width": (0.6, 4.0), "door_height": (1.4, 6.0), "window_width": (0.2, 2.5),
+    "window_height": (0.2, 4.0), "window_sill": (0.2, 4.0), "roof_overhang": (0.1, 2.5), "parapet": (0.0, 1.5),
 }
 PLAN_HOUSE_ENUMS = {
-    "roof": ('GABLE', 'FLAT', 'NONE'), "door": ('S', 'E', 'N', 'W', 'NONE'),
+    "roof": ('GABLE', 'HIP', 'FLAT', 'NONE'), "door": ('S', 'E', 'N', 'W', 'NONE'),
     "door_style": ('arch', 'pointed', 'rect'), "window_kind": ('arch', 'pointed', 'rect'),
-    "detail": ('LOW', 'MEDIUM', 'HIGH'), "roof_color": ('TERRACOTTA', 'SLATE', 'STONE'),
+    "detail": ('LOW', 'MEDIUM', 'HIGH'), "roof_color": ROOF_COLORS,
 }
 
 
@@ -10003,9 +10071,99 @@ for _kind in PLAN_HOUSE_DEFAULTS:
         {"width": PLAN_HOUSE_DEFAULTS[k]["width"], "depth": PLAN_HOUSE_DEFAULTS[k]["depth"], **params}))(_kind)
 
 
-def plan_house_params(kind, params):
-    """Defaults for the kind merged with the node's params; raises PlanError on bad values."""
-    merged = {**PLAN_HOUSE_COMMON, **PLAN_HOUSE_DEFAULTS[kind], **(params or {})}
+# ------------------------------------------------------------------------------
+# Style packs. A style is data: wall / trim / roof / wood materials and per-kind default
+# parameters (roof form, door and window shapes, proportions). A plan node's `style`
+# (inherited from its parent) picks the pack; explicit `params` always win over the
+# style's defaults. `medieval` is today's look (brick + stone, tintable).
+# ------------------------------------------------------------------------------
+PLAN_STYLES = {
+    'medieval': dict(label="Medieval", wall=None, trim=None, wood='BROWN', roof_color='TERRACOTTA', fence='stone',
+                     kinds={'chapel': dict(roof_color='SLATE')}),
+    'egyptian': dict(
+        label="Egyptian", wall='SANDSTONE', trim='SANDSTONE_DARK', wood='DARK', roof_color='SANDROOF', fence='stone',
+        kinds={
+            'house': dict(wall_height=3.2, roof='FLAT', parapet=0.5, wall_thickness=0.7, door_style='rect', door_width=1.1,
+                          door_height=2.5, window_kind='rect', window_width=0.4, window_height=0.6, window_sill=2.2, chimney=False),
+            'chapel': dict(width=9.0, depth=14.0, wall_height=7.0, roof='FLAT', parapet=0.8, wall_thickness=1.0,
+                           door_style='rect', door_width=2.4, door_height=4.4, windows=False, chimney=False),
+            'stable': dict(roof='FLAT', parapet=0.3, wall_thickness=0.7, door_style='rect', window_kind='rect', chimney=False),
+            'barn': dict(roof='FLAT', parapet=0.3, wall_thickness=0.7, door_style='rect', chimney=False),
+        }),
+    'mexican': dict(
+        label="Mexican adobe", wall='ADOBE', trim='ADOBE_TRIM', wood='DARK', roof_color='TERRACOTTA', fence='stone',
+        kinds={
+            'house': dict(wall_height=3.0, roof='HIP', roof_pitch=0.4, roof_overhang=0.6, wall_thickness=0.6,
+                          door_style='arch', window_kind='arch', window_width=0.7, window_height=1.1, chimney=False),
+            'chapel': dict(roof='GABLE', roof_pitch=0.55, wall_thickness=0.8, door_style='arch', window_kind='arch',
+                           roof_color='TERRACOTTA', chimney=False),
+            'stable': dict(roof='HIP', roof_pitch=0.35, roof_overhang=0.6, wall_thickness=0.6, chimney=False),
+            'barn': dict(roof='HIP', roof_pitch=0.4, roof_overhang=0.6, wall_thickness=0.6, chimney=False),
+        }),
+    'chinese': dict(
+        label="Chinese", wall='TIMBER', trim='TIMBER_DARK', wood='RED', roof_color='TILE_GREY', fence='wood',
+        kinds={
+            'house': dict(wall_height=3.0, roof='HIP', roof_pitch=0.55, roof_overhang=1.1, wall_thickness=0.3,
+                          door_style='rect', door_width=1.4, door_height=2.3, window_kind='rect', window_width=1.2,
+                          window_height=1.1, window_sill=0.9, chimney=False),
+            'chapel': dict(width=8.0, depth=10.0, wall_height=4.5, roof='HIP', roof_pitch=0.6, roof_overhang=1.4,
+                           wall_thickness=0.35, door_style='rect', door_width=2.0, door_height=3.4, window_kind='rect',
+                           window_width=1.4, window_height=1.6, window_sill=1.2, chimney=False),
+            'stable': dict(roof='HIP', roof_pitch=0.5, roof_overhang=0.9, wall_thickness=0.3, door_style='rect', chimney=False),
+            'barn': dict(roof='HIP', roof_pitch=0.5, roof_overhang=0.9, wall_thickness=0.3, door_style='rect', chimney=False),
+        }),
+    'inca': dict(
+        label="Inca", wall='FITTED', trim='FITTED_DARK', wood='DARK', roof_color='THATCH', fence='stone',
+        kinds={
+            'house': dict(wall_height=2.6, roof='GABLE', roof_pitch=1.15, roof_overhang=0.5, wall_thickness=0.7,
+                          door_style='rect', door_width=0.95, door_height=1.9, window_kind='rect', window_width=0.35,
+                          window_height=0.5, window_sill=1.6, chimney=False),
+            'chapel': dict(width=7.0, depth=12.0, wall_height=4.0, roof='GABLE', roof_pitch=1.1, wall_thickness=0.9,
+                           door_style='rect', door_width=1.4, door_height=3.0, window_kind='rect', window_width=0.4,
+                           window_height=0.6, window_sill=2.4, chimney=False),
+            'stable': dict(roof='GABLE', roof_pitch=1.0, wall_thickness=0.7, door_style='rect', chimney=False),
+            'barn': dict(roof='GABLE', roof_pitch=1.0, wall_thickness=0.7, door_style='rect', chimney=False),
+        }),
+    'futuristic': dict(
+        label="Futuristic", wall='PANEL', trim='PANEL_DARK', wood='METAL', roof_color='METAL', fence='stone',
+        kinds={
+            'house': dict(width=8.0, depth=7.0, wall_height=3.4, floors=2, roof='FLAT', parapet=0.25, wall_thickness=0.4,
+                          door_style='rect', door_width=1.6, door_height=2.5, window_kind='rect', window_width=1.6,
+                          window_height=1.4, window_sill=0.8, chimney=False),
+            'chapel': dict(width=10.0, depth=10.0, wall_height=6.0, roof='FLAT', parapet=0.3, wall_thickness=0.5,
+                           door_style='rect', door_width=2.6, door_height=3.4, window_kind='rect', window_width=2.0,
+                           window_height=2.6, window_sill=1.2, chimney=False),
+            'stable': dict(roof='FLAT', parapet=0.2, wall_thickness=0.4, door_style='rect', window_kind='rect', chimney=False),
+            'barn': dict(roof='FLAT', parapet=0.2, wall_thickness=0.4, door_style='rect', chimney=False),
+        }),
+}
+
+
+def plan_style_name(style):
+    return style if style in PLAN_STYLES else 'medieval'
+
+
+def _style_wood_material(spec):
+    return get_style_material('PANEL_DARK') if spec["wood"] == 'METAL' else get_or_create_wood_material(spec["wood"])
+
+
+def plan_material_slots(style, brick_color='PLAIN', roof_color=None, wood=False):
+    """Material slots of a plan-built mesh. Medieval keeps the brick/stone list (tints, optional roof and wood);
+    every other style gets exactly [wall, trim, roof, wood] and ignores brick tints."""
+    spec = PLAN_STYLES[plan_style_name(style)]
+    if spec["wall"] is None:
+        return masonry_material_list(brick_color != 'PLAIN', roof=roof_color, wood=wood)
+    return [get_style_material(spec["wall"]), get_style_material(spec["trim"]),
+            get_or_create_roof_material(roof_color or spec["roof_color"]), _style_wood_material(spec)]
+
+
+def plan_house_params(kind, params, style=None):
+    """Defaults for the kind, then the style's overrides, then the node's params; raises PlanError on bad values.
+    The result carries the resolved "style" name."""
+    style = plan_style_name(style)
+    spec = PLAN_STYLES[style]
+    merged = {**PLAN_HOUSE_COMMON, "roof_color": spec["roof_color"], **PLAN_HOUSE_DEFAULTS[kind],
+              **spec["kinds"].get(kind, {}), **(params or {}), "style": style}
     for key, (lo, hi) in PLAN_HOUSE_RANGES.items():
         v = merged[key]
         if isinstance(v, bool) or not isinstance(v, (int, float)) or v < lo or v > hi:
@@ -10023,10 +10181,40 @@ def plan_house_params(kind, params):
     return merged
 
 
-def _house_roof(rm, W, D, H, t, pitch, kind):
+def _house_roof_hip(rm, W, D, H, t, pitch, overhang):
+    """Hipped roof (four slopes; a pyramid on a square) in the frame where the longer side runs along x."""
+    Lr, Sp = max(W, D), min(W, D)
+    th = 0.18
+    hs = (Sp + t) / 2.0 + overhang
+    hl = (Lr + t) / 2.0 + overhang
+    rise = pitch * hs
+    rl = max(0.0, hl - hs)
+    tile, th_tile = TOWER_TILE_W, TOWER_ROWS * TOWER_ROW_H
+    ridge = [(-rl, 0.0), (rl, 0.0)]
+    faces = [
+        ([(-hl, -hs, H), (hl, -hs, H), (rl, 0.0, H + rise), (-rl, 0.0, H + rise)], (0.0, -rise, hs)),
+        ([(hl, hs, H), (-hl, hs, H), (-rl, 0.0, H + rise), (rl, 0.0, H + rise)], (0.0, rise, hs)),
+        ([(hl, -hs, H), (hl, hs, H), (rl, 0.0, H + rise)], (rise, 0.0, hs)),
+        ([(-hl, hs, H), (-hl, -hs, H), (-rl, 0.0, H + rise)], (-rise, 0.0, hs)),
+    ]
+    for pts, nrm in faces:
+        uv = [(q[0] / tile + q[1] / tile, math.hypot(q[1], q[2] - H) / th_tile + abs(q[0]) * 0.0) for q in pts]
+        rm.poly('hip', pts, uv, nrm, ROOF_SOURCE_SLOT)
+        under = [(q[0], q[1], q[2] - th) for q in pts]
+        rm.poly('hipu', under, uv, (-nrm[0], -nrm[1], -nrm[2]), ROOF_SOURCE_SLOT)
+    eave = [(-hl, -hs), (hl, -hs), (hl, hs), (-hl, hs)]
+    for i in range(4):
+        (x0, y0), (x1, y1) = eave[i], eave[(i + 1) % 4]
+        quad = [(x0, y0, H), (x1, y1, H), (x1, y1, H - th), (x0, y0, H - th)]
+        ln = math.hypot(x1 - x0, y1 - y0)
+        rm.poly('hipe', quad, [(0.0, H / th_tile), (ln / tile, H / th_tile), (ln / tile, (H - th) / th_tile), (0.0, (H - th) / th_tile)],
+                (y1 - y0, -(x1 - x0), 0.0), ROOF_SOURCE_SLOT)
+
+
+def _house_roof(rm, W, D, H, t, pitch, kind, overhang=0.45):
     """Gable roof (ridge along the longer side) into mesh `rm`, built in a frame where the ridge runs along x."""
     Lr, Sp = max(W, D), min(W, D)                 # ridge-axis and span (centreline) lengths
-    over_side, over_end, th = 0.45, 0.3, 0.18
+    over_side, over_end, th = overhang, overhang * 0.65, 0.18
     hs = (Sp + t) / 2.0 + over_side               # half span at the eaves
     xe = Lr / 2.0 + t / 2.0 + over_end            # half length incl. end overhang
     rise = pitch * hs
@@ -10064,15 +10252,18 @@ def _build_house_mesh(kind, p, seed):
     tint = BRICK_COLOR_INDEX.get(p["brick_color"], 0)
     if p["brick_color"] == 'MIXED':
         tint = (2, 3, 4, 6, 1, 5)[seed % 6]
+    if p.get("style", "medieval") != 'medieval':
+        tint = 0                                   # style packs have their own wall materials
     mat_map = {0: tint, 1: len(BRICK_TINTS), ROOF_SOURCE_SLOT: len(BRICK_TINTS) + 1} if tint else None
     stones_scale = {'LOW': 0.0, 'MEDIUM': 1.0, 'HIGH': 3.0}[p["detail"]]
+    parapet = p["parapet"] if p["roof"] == 'FLAT' else 0.0
     corners = [(-W / 2, -D / 2), (W / 2, -D / 2), (W / 2, D / 2), (-W / 2, D / 2)]
     dirs = [(1, 0, 0.0), (0, 1, math.pi / 2), (-1, 0, math.pi), (0, -1, 3 * math.pi / 2)]
     spans = (W, D, W, D)
     for i, ((cx, cy), (dx, dy, rot)) in enumerate(zip(corners, dirs)):
         L = spans[i] + t
-        wb = _WallRunBuilder(L, H, t, battlements=False, seed=seed + 11 * i, ruin=ruin,
-                             stones=int(L * H * 0.3 * stones_scale))
+        wb = _WallRunBuilder(L, H + parapet, t, battlements=False, seed=seed + 11 * i, ruin=ruin,
+                             stones=int(L * (H + parapet) * 0.3 * stones_scale))
         side = "SENW"[i]
         if p["door"] == side:
             wb.add_opening(L / 2.0, p["door_width"], 0.0, min(p["door_height"], wb.Hs - 0.5), p["door_style"])
@@ -10105,9 +10296,13 @@ def _build_house_mesh(kind, p, seed):
             slab = [(-W / 2 - 0.2, -D / 2 - 0.2, H), (W / 2 + 0.2, -D / 2 - 0.2, H),
                     (W / 2 + 0.2, D / 2 + 0.2, H), (-W / 2 - 0.2, D / 2 + 0.2, H)]
             big.poly('flat', slab, [(q[0] / tile, q[1] / (TOWER_ROWS * TOWER_ROW_H)) for q in slab], (0.0, 0.0, 1.0), ROOF_SOURCE_SLOT)
+        elif p["roof"] == 'HIP':
+            rm = _TowerMesh()
+            _house_roof_hip(rm, W, D, H, t, p["roof_pitch"], p["roof_overhang"])
+            big.append(rm, rot=0.0 if W >= D else math.pi / 2.0, mat_map=mat_map)
         else:
             rm = _TowerMesh()
-            _house_roof(rm, W, D, H, t, p["roof_pitch"], kind)
+            _house_roof(rm, W, D, H, t, p["roof_pitch"], kind, p["roof_overhang"])
             if p["chimney"]:
                 rise_c = p["roof_pitch"] * ((min(W, D) + t) / 2.0 + 0.45)
                 _soup_box(rm, max(W, D) * 0.27, 0.0, H - 0.3, 0.7, 0.7, rise_c + 1.2, 1)
@@ -10275,11 +10470,11 @@ def _build_wood_fence_mesh(footprint, p, seed, gates):
     return big
 
 
-def _plan_add_mesh_object(context, soup, name, brick_color, path, world, roof_color=None, wood=False):
+def _plan_add_mesh_object(context, soup, name, brick_color, path, world, roof_color=None, wood=False, style=None):
     mesh = soup.to_mesh(name)
     obj = bpy.data.objects.new(name, mesh)
     context.scene.collection.objects.link(obj)
-    for mat_ in masonry_material_list(brick_color not in ('PLAIN',), roof=roof_color, wood=wood):
+    for mat_ in plan_material_slots(style, brick_color, roof_color, wood):
         mesh.materials.append(mat_)
     _add_viewport_color_attribute(mesh)
     _plan_adopt_objects(context.scene, path, world, [obj])
@@ -10289,11 +10484,14 @@ def _plan_add_mesh_object(context, soup, name, brick_color, path, world, roof_co
 def _plan_build_well(context, node, world, seed, path):
     try:
         p = _plan_checked({**PLAN_WELL_DEFAULTS, **(node.get("params") or {})}, PLAN_WELL_RANGES,
-                          {"roof_color": ('TERRACOTTA', 'SLATE', 'STONE')})
+                          {"roof_color": ROOF_COLORS})
     except PlanError as exc:
         raise PlanError("%s: %s" % ("/".join(path), exc))
+    style = plan_style_name(node.get("style"))
+    if style != 'medieval':
+        p = {**p, "brick_color": 'PLAIN', "roof_color": (node.get("params") or {}).get("roof_color", PLAN_STYLES[style]["roof_color"])}
     soup = _build_well_mesh(p, int(seed) % 1_000_000)
-    return [_plan_add_mesh_object(context, soup, "Well_" + node["id"], p["brick_color"], path, world, p["roof_color"])]
+    return [_plan_add_mesh_object(context, soup, "Well_" + node["id"], p["brick_color"], path, world, p["roof_color"], style=style)]
 
 
 def _plan_build_compound(context, node, world, seed, path):
@@ -10302,15 +10500,20 @@ def _plan_build_compound(context, node, world, seed, path):
         return []
     try:
         p = _plan_checked({**PLAN_FENCE_DEFAULTS, **(node.get("params") or {})}, PLAN_FENCE_RANGES,
-                          {"fence": ('none', 'stone', 'wood'), "detail": ('LOW', 'MEDIUM', 'HIGH')})
+                          {"fence": ('none', 'stone', 'wood', 'auto'), "detail": ('LOW', 'MEDIUM', 'HIGH')})
     except PlanError as exc:
         raise PlanError("%s: %s" % ("/".join(path), exc))
+    style = plan_style_name(node.get("style"))
+    if p["fence"] == 'auto':
+        p = {**p, "fence": PLAN_STYLES[style]["fence"]}
+    if style != 'medieval':
+        p = {**p, "brick_color": 'PLAIN'}
     gates = [a for a in node.get("anchors", []) if a.get("kind") == "gate"]
     if p["fence"] == 'wood':
         soup = _build_wood_fence_mesh(plan_footprint(node), p, int(seed) % 1_000_000, gates)
-        return [_plan_add_mesh_object(context, soup, "Fence_" + node["id"], 'PLAIN', path, world, 'STONE', wood=True)]
+        return [_plan_add_mesh_object(context, soup, "Fence_" + node["id"], 'PLAIN', path, world, 'STONE', wood=True, style=style)]
     soup = _build_fence_mesh(plan_footprint(node), p, int(seed) % 1_000_000, gates)
-    return [_plan_add_mesh_object(context, soup, "Fence_" + node["id"], p["brick_color"], path, world)]
+    return [_plan_add_mesh_object(context, soup, "Fence_" + node["id"], p["brick_color"], path, world, style=style)]
 
 
 def _clip_segment_to_convex(p, q, poly):
@@ -10391,7 +10594,8 @@ def _plan_build_block(context, node, world, seed, path):
     nodes, edges = plan_block_graph(node)
     if not edges:
         return []
-    return [_plan_add_mesh_object(context, _build_road_mesh(nodes, edges), "Road_" + node["id"], 'PLAIN', path, world)]
+    return [_plan_add_mesh_object(context, _build_road_mesh(nodes, edges), "Road_" + node["id"], 'PLAIN', path, world,
+                                  style=node.get("style"))]
 
 
 PLAN_KEEP_DEFAULTS = dict(size=8.0, wall_height=5.0, wall_thickness=1.0, ruin=0.0, brick_color='PLAIN', detail='MEDIUM')
@@ -10410,19 +10614,23 @@ def _plan_build_keep(context, node, world, seed, path):
         raise PlanError("%s: %s" % ("/".join(path), exc))
     span = p["size"] / 0.38                       # the castle builder sizes its keep as 38 % of the smaller side
     soup = _build_castle_mesh(span, span, p["wall_height"], p["wall_thickness"], 2.0, p["wall_height"] + 3.0, False, True,
-                              p["ruin"], p["detail"], int(seed) % 1_000_000, brick_color=p["brick_color"], keep_only=True)
-    return [_plan_add_mesh_object(context, soup, "Keep_" + node["id"], p["brick_color"], path, world)]
+                              p["ruin"], p["detail"], int(seed) % 1_000_000,
+                              brick_color=p["brick_color"] if plan_style_name(node.get("style")) == 'medieval' else 'PLAIN', keep_only=True)
+    style = plan_style_name(node.get("style"))
+    return [_plan_add_mesh_object(context, soup, "Keep_" + node["id"], p["brick_color"] if style == 'medieval' else 'PLAIN', path, world,
+                                  style=style)]
 
 
 def _plan_build_house(context, node, world, seed, path):
     where = "/".join(path)
     try:
-        params = plan_house_params(node["kind"], node.get("params"))
+        params = plan_house_params(node["kind"], node.get("params"), node.get("style"))
     except PlanError as exc:
         raise PlanError("%s: %s" % (where, exc))
     soup = _build_house_mesh(node["kind"], params, int(seed) % 1_000_000)
     name = "%s_%s" % (node["kind"].capitalize(), node["id"])
-    return [_plan_add_mesh_object(context, soup, name, params["brick_color"], path, world, params["roof_color"])]
+    return [_plan_add_mesh_object(context, soup, name, params["brick_color"], path, world, params["roof_color"],
+                                  style=params["style"])]
 
 
 PLAN_BUILDERS = {"tower": _plan_build_tower, "castle": _plan_build_castle,
@@ -10443,11 +10651,13 @@ def plan_build(context, root):
     built, skipped = [], []
     for node, path in plan_iter(root):
         if node["type"] == "compound":
-            if _plan_build_compound(context, node, resolved[path]["world"], resolved[path]["seed"], path):
+            if _plan_build_compound(context, {**node, "style": resolved[path]["style"]}, resolved[path]["world"],
+                                    resolved[path]["seed"], path):
                 built.append("/".join(path))
             continue
         if node["type"] == "block":
-            if _plan_build_block(context, node, resolved[path]["world"], resolved[path]["seed"], path):
+            if _plan_build_block(context, {**node, "style": resolved[path]["style"]}, resolved[path]["world"],
+                                 resolved[path]["seed"], path):
                 built.append("/".join(path))
             continue
         if node["type"] != "building":
@@ -10457,7 +10667,7 @@ def plan_build(context, root):
             skipped.append(("/".join(path), "no builder for kind %r yet" % node.get("kind")))
             continue
         info = resolved[path]
-        fn(context, node, info["world"], info["seed"], path)
+        fn(context, {**node, "style": info["style"]}, info["world"], info["seed"], path)
         built.append("/".join(path))
     return {"built": built, "skipped": skipped, "warnings": warnings}
 
@@ -10566,6 +10776,8 @@ class OBJECT_OT_PlanCreate(bpy.types.Operator):
 
     def execute(self, context):
         plan = plan_new_example(context.scene, self.kind, set(plan_list_ids()))
+        if context.scene.wfc_plan_style != 'medieval':
+            plan["style"] = context.scene.wfc_plan_style
         plan_write_to_blend(context.scene, plan)
         self.report({'INFO'}, "Created plan '%s'." % plan["id"])
         return {'FINISHED'}
@@ -11902,6 +12114,7 @@ class VIEW3D_PT_GLAPlans(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
+        layout.prop(context.scene, "wfc_plan_style", text="Style")
         layout.label(text="New plan at the 3D cursor:")
         row = layout.row(align=True)
         for kind, label in (('TOWER', "Tower"), ('CASTLE', "Castle"), ('GROUNDS', "Grounds"), ('FORTRESS', "Fortress")):
@@ -12591,6 +12804,10 @@ def register():
                     "punctual lights. Turn off to export geometry only and light the level by "
                     "hand in-engine instead"
     )
+    bpy.types.Scene.wfc_plan_style = EnumProperty(
+        name="Style", items=[(k, v["label"], "Style pack for new plans: wall, trim, roof and wood materials and building proportions")
+                             for k, v in PLAN_STYLES.items()],
+        default='medieval', description="Style pack used by plans created with the buttons below")
     bpy.types.Scene.wfc_structure_kind = EnumProperty(
         name="Structure",
         items=[
@@ -12721,6 +12938,7 @@ def unregister():
     del bpy.types.Scene.wfc_export_include_lights
     del bpy.types.Scene.wfc_active_tab
     del bpy.types.Scene.wfc_structure_kind
+    del bpy.types.Scene.wfc_plan_style
 
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

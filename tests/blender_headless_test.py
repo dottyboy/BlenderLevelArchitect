@@ -4190,6 +4190,121 @@ check("Kerb: a segment that misses the square is not clipped",
       addon._clip_segment_to_convex((-5.0, 3.0), (5.0, 3.0), [(-1, -1), (1, -1), (1, 1), (-1, 1)]) is None)
 
 # ==============================================================================
+print("\n--- Plans: style packs ---")
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+check("Styles: six packs are defined", {"medieval", "egyptian", "mexican", "chinese", "inca", "futuristic"} <= set(addon.PLAN_STYLES))
+
+
+def _style_site(style, ox):
+    return addon.plan_node(
+        "site", "compound", "yard", style=style, footprint=[[-30, -14], [30, -14], [30, 14], [-30, 14]],
+        params={"fence": "auto", "fence_height": 1.6}, transform={"x": ox, "y": 0.0, "z": 0.0, "rot": 0.0},
+        anchors=[{"id": "gate", "kind": "gate", "pos": [0.0, -14.0, 0.0], "dir": 270.0, "width": 4.0}],
+        children=[
+            addon.plan_node("house", "building", "house", transform={"x": -22.0, "y": 0.0, "z": 0.0, "rot": 0.0}),
+            addon.plan_node("chapel", "building", "chapel", transform={"x": -8.0, "y": 0.0, "z": 0.0, "rot": 0.0}),
+            addon.plan_node("stable", "building", "stable", transform={"x": 8.0, "y": 0.0, "z": 0.0, "rot": 0.0}),
+            addon.plan_node("barn", "building", "barn", transform={"x": 22.0, "y": 0.0, "z": 0.0, "rot": 0.0}),
+            addon.plan_node("well", "building", "well", transform={"x": 0.0, "y": 8.0, "z": 0.0, "rot": 0.0}),
+            addon.plan_node("keep", "building", "keep", transform={"x": 0.0, "y": -8.0, "z": 0.0, "rot": 0.0}, params={"size": 6.0}),
+            addon.plan_node("tower", "building", "tower", transform={"x": 26.0, "y": 8.0, "z": 0.0, "rot": 0.0},
+                            params={"props": False, "lights": False, "interior": False, "height": 8.0}),
+        ])
+
+
+for i, style in enumerate(addon.PLAN_STYLES):
+    site = _style_site(style, i * 200.0)
+    site["id"] = "st_" + style
+    try:
+        res = addon.plan_build(bpy.context, site)
+        ok = len(res["built"]) == 8 and not res["skipped"]
+    except addon.PlanError as exc:
+        ok = False
+        print("   ", style, exc)
+    check("Styles: %s builds fence, house, chapel, stable, barn, well, keep and tower" % style, ok)
+    house = next(o for o in bpy.data.objects if o.name.startswith("PB_st_%s.house" % style) and o.type == 'MESH')
+    names = [m.name for m in house.data.materials]
+    if style == "medieval":
+        check("Styles: medieval keeps the brick/stone/roof list", names[0] == "LA_Tower_Brick" and len(names) == 3, str(names))
+    else:
+        spec = addon.PLAN_STYLES[style]
+        check("Styles: %s house has wall, trim, roof and wood slots" % style,
+              len(names) == 4 and names[0] == addon.get_style_material(spec["wall"]).name and names[1] == addon.get_style_material(spec["trim"]).name, str(names))
+        tw = next(o for o in bpy.data.objects if o.name.startswith("PB_st_%s.tower" % style) and o.type == 'MESH')
+        check("Styles: %s tower is re-skinned with the wall and trim materials" % style,
+              [m.name for m in tw.data.materials] == [addon.get_style_material(spec["wall"]).name, addon.get_style_material(spec["trim"]).name])
+fence_mats = {s_: [m.name for m in next(o for o in bpy.data.objects if o.name.startswith("PB_st_%s_Fence" % s_)).data.materials]
+              for s_ in ("chinese", "egyptian")}
+check("Styles: fence auto is wooden for chinese and stone for egyptian",
+      fence_mats["chinese"][3] == "LA_Wood_Red" and any(p.material_index == 3 for p in next(
+          o for o in bpy.data.objects if o.name.startswith("PB_st_chinese_Fence")).data.polygons)
+      and not any(p.material_index == 3 for p in next(o for o in bpy.data.objects if o.name.startswith("PB_st_egyptian_Fence")).data.polygons))
+# inheritance and overrides
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+mix = addon.plan_node("mix", "compound", "yard", style="egyptian", footprint=[[-30, -10], [30, -10], [30, 10], [-30, 10]], children=[
+    addon.plan_node("a", "building", "house", transform={"x": -20.0, "y": 0.0, "z": 0.0, "rot": 0.0}),
+    addon.plan_node("b", "building", "house", style="chinese", transform={"x": 0.0, "y": 0.0, "z": 0.0, "rot": 0.0}),
+    addon.plan_node("c", "building", "house", transform={"x": 20.0, "y": 0.0, "z": 0.0, "rot": 0.0},
+                    params={"roof": "GABLE", "wall_height": 3.5})])
+check("Styles: style is inherited and a child can override it",
+      [addon.plan_resolve(mix)[("mix", k)]["style"] for k in "abc"] == ["egyptian", "chinese", "egyptian"])
+addon.plan_build(bpy.context, mix)
+mats = {k: [m.name for m in next(o for o in bpy.data.objects if o.name.startswith("PB_mix.%s" % k) and o.type == 'MESH').data.materials] for k in "abc"}
+check("Styles: the overriding child uses the other pack", mats["a"][0] == "LA_Style_Sandstone" and mats["b"][0] == "LA_Style_Timber", str(mats))
+_, _, _, _, _, za = _bounds_of("mix.a")
+_, _, _, _, _, zc = _bounds_of("mix.c")
+check("Styles: explicit params beat the style (gable roof on an egyptian house rises well above its walls)", zc > 3.5 + 1.5 and za < 3.2 + 0.5 + 0.3, str((za, zc)))
+check("Styles: an unknown style is a validation error",
+      bool(addon.plan_validate(addon.plan_node("u", "building", "house", style="atlantean"))[0]))
+# hip roof
+bpy.context.view_layer.update()
+hip = addon.plan_node("hp2", "building", "house", transform={"x": 100.0, "y": 0.0, "z": 0.0, "rot": 0.0},
+                      params={"roof": "HIP", "roof_pitch": 0.5, "width": 8.0, "depth": 6.0})
+addon.plan_build(bpy.context, hip)
+bpy.context.view_layer.update()
+hit = _ray((100.0, 0.0, 12.0), (0.0, 0.0, -1.0))
+rise_expected = 0.5 * ((6.0 + 0.45) / 2.0 + 0.45)
+check("Styles: hip roof apex height matches pitch (ridge above the centre)", hit is not None and abs(hit.z - (2.8 + rise_expected)) < 0.25, str(hit))
+hit = _ray((100.0 + 3.9, 0.0, 12.0), (0.0, 0.0, -1.0))
+check("Styles: hip roof also slopes at the short end (lower than the ridge)", hit is not None and hit.z < 2.8 + rise_expected - 0.4, str(hit))
+hit = _ray((100.0, -9.0, 1.0), (0.0, 1.0, 0.0))
+check("Styles: the hip-roofed house door is open", hit is not None and hit.y > 2.0, str(hit))
+sq = addon.plan_node("sq", "building", "house", transform={"x": 120.0, "y": 0.0, "z": 0.0, "rot": 0.0},
+                     params={"roof": "HIP", "width": 6.0, "depth": 6.0})
+check("Styles: a square hip roof (pyramid) builds", addon.plan_build(bpy.context, sq)["built"] == ["sq"])
+# overhang and parapet
+wide = addon.plan_node("ow", "building", "house", transform={"x": 140.0, "y": 0.0, "z": 0.0, "rot": 0.0}, params={"roof_overhang": 1.5})
+narrow = addon.plan_node("on", "building", "house", transform={"x": 160.0, "y": 0.0, "z": 0.0, "rot": 0.0}, params={"roof_overhang": 0.2})
+addon.plan_build(bpy.context, wide)
+addon.plan_build(bpy.context, narrow)
+xw0, xw1, _, _, _, _ = _bounds_of("ow")
+xn0, xn1, _, _, _, _ = _bounds_of("on")
+check("Styles: roof_overhang widens the roof", (xw1 - xw0) > (xn1 - xn0) + 1.5, str((xw1 - xw0, xn1 - xn0)))
+par = addon.plan_node("pa", "building", "house", transform={"x": 180.0, "y": 0.0, "z": 0.0, "rot": 0.0},
+                      params={"roof": "FLAT", "parapet": 0.8, "wall_height": 3.0})
+addon.plan_build(bpy.context, par)
+check("Styles: a parapet rises above the flat roof", abs(_bounds_of("pa")[5] - 3.8) < 0.25, str(_bounds_of("pa")[5]))
+hit = _ray((180.0, 0.0, 10.0), (0.0, 0.0, -1.0))
+check("Styles: the flat roof surface sits at the wall height, inside the parapet", hit is not None and abs(hit.z - 3.0) < 0.1, str(hit))
+# plan creation uses the style dropdown
+scene.wfc_plan_style = 'inca'
+bpy.ops.object.gla_plan_create(kind='HOUSE')
+created = addon.plan_read_from_blend(addon.plan_list_ids()[-1])
+check("Styles: new plans take the style chosen in the panel", created.get("style") == "inca")
+scene.wfc_plan_style = 'medieval'
+check("Styles: the Plans panel draws with the style dropdown",
+      (lambda: [addon.VIEW3D_PT_GLAPlans.draw(types.SimpleNamespace(layout=_FakeLayout({"props": [], "ops": [], "sections": []}, False)), bpy.context)] and True)())
+check("Styles: every style material is generated and packed",
+      all(addon.get_style_material(k).node_tree is not None for k in addon._STYLE_TEXTURES)
+      and all(bpy.data.images.get("LA_Style_%s_Albedo" % k.title().replace("_", "")).packed_file is not None for k in addon._STYLE_TEXTURES))
+
+# ==============================================================================
 print()
 if failures:
     print(f"{len(failures)} CHECK(S) FAILED:")
