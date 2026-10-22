@@ -9178,6 +9178,9 @@ def plan_footprint(node):
     """The node's own footprint, else the default derived from its kind and params, else None."""
     if node.get("footprint"):
         return node["footprint"]
+    shape = (node.get("params") or {}).get("shape")
+    if isinstance(shape, dict) and shape.get("kind", "rect") in PLAN_SHAPE_KINDS:
+        return plan_shape_polygon(shape)
     maker = PLAN_DEFAULT_FOOTPRINTS.get(node.get("kind"))
     return maker(node.get("params", {})) if maker else None
 
@@ -9207,6 +9210,12 @@ def plan_validate(root):
             problem = plan_polygon_problem(fp)
             if problem:
                 errors.append("%s: %s" % (where, problem))
+        shp = (node.get("params") or {}).get("shape")
+        if shp is not None and (not isinstance(shp, dict) or shp.get("kind", "rect") not in PLAN_SHAPE_KINDS):
+            errors.append("%s: shape.kind must be one of %s" % (where, ", ".join(PLAN_SHAPE_KINDS)))
+        gen_ = (node.get("params") or {}).get("road_generator")
+        if gen_ is not None and (not isinstance(gen_, dict) or gen_.get("kind", "grid") not in ("grid", "organic", "ring")):
+            errors.append("%s: road_generator.kind must be grid, organic or ring" % where)
         if node.get("type") == "block":
             problem = _block_graph_problem(node.get("params") or {})
             if problem:
@@ -9215,8 +9224,8 @@ def plan_validate(root):
             problem = _layout_rule_problem(rule)
             if problem:
                 errors.append("%s: %s" % (where, problem))
-        if node.get("style") not in (None, *PLAN_STYLES):
-            errors.append("%s: unknown style %r (known: %s)" % (where, node.get("style"), ", ".join(PLAN_STYLES)))
+        if node.get("style") not in (None, "mixed", *PLAN_STYLES):
+            errors.append("%s: unknown style %r (known: %s, mixed)" % (where, node.get("style"), ", ".join(PLAN_STYLES)))
         zs = [lv.get("z", 0.0) for lv in node.get("levels", [])]
         if any(b <= a for a, b in zip(zs, zs[1:])):
             errors.append("%s: levels must have strictly increasing z" % where)
@@ -9355,6 +9364,151 @@ def _vary_problem(rule):
     return None
 
 
+# ------------------------------------------------------------------------------
+# Noise, free-form shapes and road generators. A footprint can come from `params.shape`
+# ({"kind": "rect|circle|ellipse|blob|lshape", "width", "depth", "irregularity", "seed"}) and a
+# block can generate its roads from `params.road_generator`
+# ({"kind": "grid|ring|organic", ...}); everything is seeded and deterministic.
+# ------------------------------------------------------------------------------
+def _hash01(ix, iy, seed):
+    """A deterministic pseudo-random float in [0, 1) for an integer lattice point."""
+    h = (ix * 374761393 + iy * 668265263 + int(seed) * 2147483647) & 0xFFFFFFFF
+    h = ((h ^ (h >> 13)) * 1274126177) & 0xFFFFFFFF
+    h ^= h >> 16
+    return (h & 0xFFFFFF) / float(0x1000000)
+
+
+def plan_noise2(x, y, seed=0):
+    """Smooth value noise in [0, 1) (quintic-interpolated lattice values)."""
+    ix, iy = math.floor(x), math.floor(y)
+    fx, fy = x - ix, y - iy
+    fx, fy = fx * fx * fx * (fx * (fx * 6 - 15) + 10), fy * fy * fy * (fy * (fy * 6 - 15) + 10)
+    a, b = _hash01(ix, iy, seed), _hash01(ix + 1, iy, seed)
+    c, d = _hash01(ix, iy + 1, seed), _hash01(ix + 1, iy + 1, seed)
+    return (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy
+
+
+def plan_fbm2(x, y, seed=0, octaves=3):
+    """Fractal noise in [0, 1): octaves of plan_noise2 at doubling frequency and halving weight."""
+    total, amp, norm, freq = 0.0, 1.0, 0.0, 1.0
+    for o in range(octaves):
+        total += amp * plan_noise2(x * freq, y * freq, seed + 101 * o)
+        norm += amp
+        amp *= 0.5
+        freq *= 2.0
+    return total / norm
+
+
+PLAN_SHAPE_KINDS = ("rect", "circle", "ellipse", "blob", "lshape")
+
+
+def plan_shape_polygon(shape):
+    """Counter-clockwise footprint polygon for a shape description (centred on the origin)."""
+    kind = shape.get("kind", "rect")
+    w, d = float(shape.get("width", 40.0)), float(shape.get("depth", shape.get("width", 40.0)))
+    seed = int(shape.get("seed", 0))
+    irr = float(shape.get("irregularity", 0.25))
+    if kind == "rect":
+        return [[-w / 2, -d / 2], [w / 2, -d / 2], [w / 2, d / 2], [-w / 2, d / 2]]
+    if kind == "lshape":
+        cx, cy = w * 0.45, d * 0.45
+        return [[-w / 2, -d / 2], [w / 2, -d / 2], [w / 2, -d / 2 + cy], [-w / 2 + cx, -d / 2 + cy], [-w / 2 + cx, d / 2], [-w / 2, d / 2]]
+    n = max(12, int(shape.get("points", 28 if kind == "blob" else 24)))
+    pts = []
+    for i in range(n):
+        a = 2 * math.pi * i / n
+        r = 1.0
+        if kind == "blob":
+            r = 1.0 + irr * (2.0 * plan_fbm2(math.cos(a) * 1.3 + 7.0, math.sin(a) * 1.3 + 7.0, seed) - 1.0)
+            r = max(0.45, r)
+        pts.append([round(w / 2 * r * math.cos(a), 3), round(d / 2 * r * math.sin(a), 3)])
+    return pts
+
+
+def plan_generate_roads(gen, seed):
+    """Road graph {"nodes", "edges"} from a generator description; deterministic for (gen, seed)."""
+    kind = gen.get("kind", "grid")
+    seed = int(gen.get("seed", seed)) % 1_000_000
+    nodes, edges = {}, []
+
+    def add(nid, x, y):
+        nodes[nid] = [round(x, 3), round(y, 3)]
+        return nid
+
+    if kind in ("grid", "organic"):
+        cols, rows = max(1, int(gen.get("cols", 3))), max(1, int(gen.get("rows", 3)))
+        cell = float(gen.get("cell", 24.0))
+        jitter = float(gen.get("jitter", 0.0 if kind == "grid" else 0.18)) * cell
+        amp = float(gen.get("amplitude", 0.0 if kind == "grid" else 0.22)) * cell
+        seg = float(gen.get("segment", 8.0))
+        x0, y0 = -cols * cell / 2.0, -rows * cell / 2.0
+
+        def corner(i, j):
+            nid = "n_%d_%d" % (i, j)
+            if nid not in nodes:
+                dx = (plan_noise2(i * 1.7, j * 1.7, seed) - 0.5) * 2 * jitter
+                dy = (plan_noise2(i * 1.7 + 50, j * 1.7 + 50, seed) - 0.5) * 2 * jitter
+                add(nid, x0 + i * cell + dx, y0 + j * cell + dy)
+            return nid
+
+        def link(a, b, tag):
+            pa, pb = nodes[a], nodes[b]
+            length = math.hypot(pb[0] - pa[0], pb[1] - pa[1])
+            pieces = max(1, int(round(length / seg))) if amp > 0 else 1
+            prev = a
+            for k in range(1, pieces):
+                t = k / pieces
+                x, y = pa[0] + (pb[0] - pa[0]) * t, pa[1] + (pb[1] - pa[1]) * t
+                x += (plan_fbm2(x * 0.05, y * 0.05, seed + 7) - 0.5) * 2 * amp
+                y += (plan_fbm2(x * 0.05 + 31, y * 0.05 + 31, seed + 9) - 0.5) * 2 * amp
+                mid = add("%s_%d" % (tag, k), x, y)
+                edges.append([prev, mid])
+                prev = mid
+            edges.append([prev, b])
+
+        for j in range(rows + 1):
+            for i in range(cols):
+                link(corner(i, j), corner(i + 1, j), "h_%d_%d" % (i, j))
+        for i in range(cols + 1):
+            for j in range(rows):
+                link(corner(i, j), corner(i, j + 1), "v_%d_%d" % (i, j))
+    elif kind == "ring":
+        radius = float(gen.get("radius", 32.0))
+        rings = max(1, int(gen.get("rings", 2)))
+        spokes = max(0, int(gen.get("spokes", 6)))
+        seg_n = max(12, int(gen.get("segments", 24)))
+        wobble = float(gen.get("wobble", 0.0))
+        add("c", 0.0, 0.0)
+        for r in range(1, rings + 1):
+            rr = radius * r / rings
+            for k in range(seg_n):
+                a = 2 * math.pi * k / seg_n
+                w = 1.0 + wobble * (2.0 * plan_fbm2(math.cos(a) + r * 3, math.sin(a) + r * 3, seed) - 1.0)
+                add("r%d_%d" % (r, k), rr * w * math.cos(a), rr * w * math.sin(a))
+            for k in range(seg_n):
+                edges.append(["r%d_%d" % (r, k), "r%d_%d" % (r, (k + 1) % seg_n)])
+        for s_ in range(spokes):
+            k = int(round(s_ * seg_n / spokes)) % seg_n
+            prev = "c"
+            for r in range(1, rings + 1):
+                nid = "r%d_%d" % (r, k)
+                edges.append([prev, nid])
+                prev = nid
+    else:
+        raise PlanError("road_generator kind %r is not one of grid, organic, ring" % (kind,))
+    return {"nodes": nodes, "edges": edges}
+
+
+def _plan_materialise_shapes_and_roads(node, seed):
+    """Fills in a footprint from params.shape and a road graph from params.road_generator (on the expanded copy)."""
+    params = node.get("params") or {}
+    if not node.get("footprint") and isinstance(params.get("shape"), dict):
+        node["footprint"] = plan_shape_polygon(params["shape"])
+    if node.get("type") == "block" and not params.get("road_graph") and isinstance(params.get("road_generator"), dict):
+        node["params"] = dict(params)
+        node["params"]["road_graph"] = plan_generate_roads(params["road_generator"], plan_child_seed(seed, "roads"))
+
+
 def _layout_rule_problem(rule):
     if not isinstance(rule, dict) or not isinstance(rule.get("kind"), str):
         return "each layout rule needs a string 'kind'"
@@ -9422,7 +9576,10 @@ def _expand_compound(node, seed):
         if rule.get("at") == "corners":
             # one building centred on every vertex of the footprint (corner towers of the enclosure): not tested
             # against the fence, only against what is already placed
-            for vx, vy in container:
+            every = max(1, int(rule.get("every", 1)))
+            for vi, (vx, vy) in enumerate(container):
+                if vi % every:
+                    continue
                 poly = _convex_hull(_poly_transform(base, vx, vy, 0.0))
                 if any(_convex_gap(poly, q) <= 0.0 for q in placed):
                     warnings.append("layout: a corner %s overlaps another building and was skipped" % rule["kind"])
@@ -9609,10 +9766,10 @@ def _expand_block(node, seed):
         ux, uy = (bx - ax) / L, (by - ay) / L
         for side in (1.0, -1.0):
             nx, ny = -uy * side, ux * side
-            u = p["lot_width"] / 2.0
-            while u + p["lot_width"] / 2.0 <= L + 1e-6:
+            u = p["lot_width"] / 2.0 if L >= p["lot_width"] else L / 2.0
+            while u + min(p["lot_width"], L) / 2.0 <= L + 1e-6:
                 total += 1
-                step = p["lot_width"] + p["lot_gap"]
+                step = (p["lot_width"] + p["lot_gap"]) if L >= p["lot_width"] else L + 1.0
                 rule = rng.choices(fills, weights=weights if sum(weights) > 0 else None)[0]
                 if rng.random() < p["skip_chance"]:
                     u += step
@@ -9697,6 +9854,7 @@ def plan_expand_layout(root):
     def walk(node, path, parent_seed):
         seed = node["seed"] if node.get("seed") is not None else (plan_child_seed(parent_seed, node["id"]) if parent_seed is not None else 0)
         resolved_seed[path] = seed
+        _plan_materialise_shapes_and_roads(node, seed)
         generated, warn = _expand_compound(node, seed) if node.get("type") == "compound" else ([], [])
         if node.get("type") == "block":
             generated, road_anchors, warn = _expand_block(node, seed)
@@ -10048,15 +10206,15 @@ PLAN_HOUSE_DEFAULTS = {
                    window_kind='rect', window_width=0.6, window_height=0.5, window_sill=1.6, windows=True),
 }
 PLAN_HOUSE_COMMON = dict(brick_color='PLAIN', ruin=0.0, detail='MEDIUM', chimney=False, roof_overhang=0.45, parapet=0.0,
-                         stairs=True, door_leaf=True)
+                         stairs=True, door_leaf=True, roof_lift=0.7)
 PLAN_HOUSE_RANGES = {
     "width": (2.0, 60.0), "depth": (2.0, 60.0), "wall_height": (1.8, 10.0), "floors": (1, 4),
     "wall_thickness": (0.2, 1.4), "roof_pitch": (0.2, 1.6), "ruin": (0.0, 1.0),
     "door_width": (0.6, 4.0), "door_height": (1.4, 6.0), "window_width": (0.2, 2.5),
-    "window_height": (0.2, 4.0), "window_sill": (0.2, 4.0), "roof_overhang": (0.1, 2.5), "parapet": (0.0, 1.5),
+    "window_height": (0.2, 4.0), "window_sill": (0.2, 4.0), "roof_overhang": (0.1, 2.5), "parapet": (0.0, 1.5), "roof_lift": (0.0, 2.0),
 }
 PLAN_HOUSE_ENUMS = {
-    "roof": ('GABLE', 'HIP', 'FLAT', 'NONE'), "door": ('S', 'E', 'N', 'W', 'NONE'),
+    "roof": ('GABLE', 'HIP', 'CURVED', 'FLAT', 'NONE'), "door": ('S', 'E', 'N', 'W', 'NONE'),
     "door_style": ('arch', 'pointed', 'rect'), "window_kind": ('arch', 'pointed', 'rect'),
     "detail": ('LOW', 'MEDIUM', 'HIGH'), "roof_color": ROOF_COLORS,
 }
@@ -10104,14 +10262,14 @@ PLAN_STYLES = {
     'chinese': dict(
         label="Chinese", wall='TIMBER', trim='TIMBER_DARK', wood='RED', roof_color='TILE_GREY', fence='wood',
         kinds={
-            'house': dict(wall_height=3.0, roof='HIP', roof_pitch=0.55, roof_overhang=1.1, wall_thickness=0.3,
+            'house': dict(wall_height=3.0, roof='CURVED', roof_pitch=0.62, roof_overhang=1.2, wall_thickness=0.3,
                           door_style='rect', door_width=1.4, door_height=2.3, window_kind='rect', window_width=1.2,
                           window_height=1.1, window_sill=0.9, chimney=False),
-            'chapel': dict(width=8.0, depth=10.0, wall_height=4.5, roof='HIP', roof_pitch=0.6, roof_overhang=1.4,
+            'chapel': dict(width=8.0, depth=10.0, wall_height=4.5, roof='CURVED', roof_pitch=0.65, roof_overhang=1.5,
                            wall_thickness=0.35, door_style='rect', door_width=2.0, door_height=3.4, window_kind='rect',
                            window_width=1.4, window_height=1.6, window_sill=1.2, chimney=False),
-            'stable': dict(roof='HIP', roof_pitch=0.5, roof_overhang=0.9, wall_thickness=0.3, door_style='rect', chimney=False),
-            'barn': dict(roof='HIP', roof_pitch=0.5, roof_overhang=0.9, wall_thickness=0.3, door_style='rect', chimney=False),
+            'stable': dict(roof='CURVED', roof_pitch=0.5, roof_overhang=0.9, wall_thickness=0.3, door_style='rect', chimney=False),
+            'barn': dict(roof='CURVED', roof_pitch=0.5, roof_overhang=0.9, wall_thickness=0.3, door_style='rect', chimney=False),
         }),
     'inca': dict(
         label="Inca", wall='FITTED', trim='FITTED_DARK', wood='DARK', roof_color='THATCH', fence='stone',
@@ -10138,6 +10296,18 @@ PLAN_STYLES = {
             'barn': dict(roof='FLAT', parapet=0.2, wall_thickness=0.4, door_style='rect', chimney=False),
         }),
 }
+
+
+PLAN_STYLE_CHOICES = list(PLAN_STYLES) + ['mixed']
+
+
+def plan_pick_style(style, seed):
+    """The concrete style of one node: a `mixed` plan gives every building, fence and road its own pack,
+    chosen from its (derived, deterministic) seed; anything else is returned unchanged."""
+    if style == 'mixed':
+        names = list(PLAN_STYLES)
+        return names[plan_child_seed(int(seed), "style") % len(names)]
+    return style
 
 
 def plan_style_name(style):
@@ -10180,6 +10350,43 @@ def plan_house_params(kind, params, style=None):
     if min(merged["width"], merged["depth"]) < 2.0 * merged["wall_thickness"] + 1.2:
         raise PlanError("walls are too thick for a %.1f x %.1f m building" % (merged["width"], merged["depth"]))
     return merged
+
+
+def _house_roof_curved(rm, W, D, H, t, pitch, overhang, lift):
+    """A sweeping, concave roof with upturned eave corners (Chinese style): a height field over the roof
+    rectangle, steeper toward the ridge, with the corners lifted by `lift` metres."""
+    Lr, Sp = max(W, D), min(W, D)
+    th = 0.2
+    hs = (Sp + t) / 2.0 + overhang
+    hl = (Lr + t) / 2.0 + overhang
+    rise = pitch * hs
+    nx, ny = 20, 12
+    tile, th_tile = TOWER_TILE_W, TOWER_ROWS * TOWER_ROW_H
+
+    def height(x, y):
+        d = min(hs - abs(y), hl - abs(x))
+        dn = max(0.0, min(1.0, d / hs))
+        z = H + rise * dn ** 1.6
+        edge = max(abs(x) / hl, abs(y) / hs)
+        z += 0.22 * lift * (1.0 - dn) ** 3                               # the eaves curl up all round
+        z += lift * (abs(x) / hl) ** 5 * (abs(y) / hs) ** 5              # and the four corners flick up
+        return z
+    grid = [[(-hl + 2.0 * hl * i / nx, -hs + 2.0 * hs * j / ny) for j in range(ny + 1)] for i in range(nx + 1)]
+    z = [[height(*grid[i][j]) for j in range(ny + 1)] for i in range(nx + 1)]
+    for i in range(nx):
+        for j in range(ny):
+            quad = [(grid[i][j][0], grid[i][j][1], z[i][j]), (grid[i + 1][j][0], grid[i + 1][j][1], z[i + 1][j]),
+                    (grid[i + 1][j + 1][0], grid[i + 1][j + 1][1], z[i + 1][j + 1]), (grid[i][j + 1][0], grid[i][j + 1][1], z[i][j + 1])]
+            uv = [(q[0] / tile, q[1] / th_tile) for q in quad]
+            rm.poly('curved', quad, uv, (0.0, 0.0, 1.0), ROOF_SOURCE_SLOT)
+            rm.poly('curvedu', [(q[0], q[1], q[2] - th) for q in quad], uv, (0.0, 0.0, -1.0), ROOF_SOURCE_SLOT)
+    border = ([(i, 0) for i in range(nx + 1)], [(nx, j) for j in range(ny + 1)],
+              [(i, ny) for i in range(nx, -1, -1)], [(0, j) for j in range(ny, -1, -1)])
+    for side in border:
+        for (i0, j0), (i1, j1) in zip(side[:-1], side[1:]):
+            a, b = grid[i0][j0], grid[i1][j1]
+            quad = [(a[0], a[1], z[i0][j0]), (b[0], b[1], z[i1][j1]), (b[0], b[1], z[i1][j1] - th), (a[0], a[1], z[i0][j0] - th)]
+            rm.poly('curvede', quad, [(0.0, 0.0), (0.5, 0.0), (0.5, 0.1), (0.0, 0.1)], (b[1] - a[1], -(b[0] - a[0]), 0.0), ROOF_SOURCE_SLOT)
 
 
 def _house_roof_hip(rm, W, D, H, t, pitch, overhang):
@@ -10349,6 +10556,10 @@ def _build_house_mesh(kind, p, seed):
             rm = _TowerMesh()
             _house_roof_hip(rm, W, D, H, t, p["roof_pitch"], p["roof_overhang"])
             big.append(rm, rot=0.0 if W >= D else math.pi / 2.0, mat_map=mat_map)
+        elif p["roof"] == 'CURVED':
+            rm = _TowerMesh()
+            _house_roof_curved(rm, W, D, H, t, p["roof_pitch"], p["roof_overhang"], p["roof_lift"])
+            big.append(rm, rot=0.0 if W >= D else math.pi / 2.0, mat_map=mat_map)
         else:
             rm = _TowerMesh()
             _house_roof(rm, W, D, H, t, p["roof_pitch"], kind, p["roof_overhang"])
@@ -10443,6 +10654,33 @@ def _build_well_mesh(p, seed):
     return out
 
 
+def _snap_gates_to_edges(footprint, gates, max_dist=3.0):
+    """{edge index: [(u along the edge, gate width)]}: every gate anchor goes to the nearest footprint edge
+    (its projection onto it) when it lies within max_dist of the outline, so gates work on any shape."""
+    out = {}
+    n = len(footprint)
+    for gate in gates:
+        gx, gy = gate["pos"][0], gate["pos"][1]
+        best = None
+        for i in range(n):
+            ax, ay = footprint[i]
+            bx, by = footprint[(i + 1) % n]
+            L0 = math.hypot(bx - ax, by - ay)
+            if L0 < 0.5:
+                continue
+            ux, uy = (bx - ax) / L0, (by - ay) / L0
+            u = max(0.0, min(L0, (gx - ax) * ux + (gy - ay) * uy))
+            gw_ = float(gate.get("width", 3.0))
+            if L0 > gw_ + 0.7:
+                u = max(gw_ / 2.0 + 0.35, min(L0 - gw_ / 2.0 - 0.35, u))     # keep the opening inside the edge
+            dist = math.hypot(gx - (ax + ux * u), gy - (ay + uy * u))
+            if best is None or dist < best[0]:
+                best = (dist, i, u)
+        if best is not None and best[0] <= max_dist:
+            out.setdefault(best[1], []).append((best[2], float(gate.get("width", 3.0))))
+    return out
+
+
 def _build_fence_mesh(footprint, p, seed, gates):
     """Stone wall along the polygon edges (counter-clockwise: the outside is on each edge's right)."""
     big = _TowerMesh()
@@ -10451,6 +10689,7 @@ def _build_fence_mesh(footprint, p, seed, gates):
     mat_map = {0: tint, 1: len(BRICK_TINTS)} if tint else None
     stones_scale = {'LOW': 0.0, 'MEDIUM': 1.0, 'HIGH': 3.0}[p["detail"]]
     n = len(footprint)
+    snapped = _snap_gates_to_edges(footprint, gates)
     for i in range(n):
         ax, ay = footprint[i]
         bx, by = footprint[(i + 1) % n]
@@ -10460,19 +10699,14 @@ def _build_fence_mesh(footprint, p, seed, gates):
         ux, uy = (bx - ax) / L0, (by - ay) / L0
         wb = _WallRunBuilder(L0 + t, H, t, battlements=False, seed=seed + 17 * i, ruin=ruin,
                              stones=int(L0 * H * 0.3 * stones_scale))
-        for gate in gates:
-            gx, gy = gate["pos"][0], gate["pos"][1]
-            u = (gx - ax) * ux + (gy - ay) * uy
-            v = -(gx - ax) * uy + (gy - ay) * ux
-            if abs(v) < 0.6 and 0.0 <= u <= L0:
-                gw = float(gate.get("width", 3.0))
-                gh = min(p["gate_height"], wb.Hs - 0.4)
-                # an arch needs (width / 2) of rise above its springing: narrow it to fit a low wall,
-                # and fall back to a plain rectangular, then a full-height gap, rather than drop the gate
-                gw_arch = min(gw, 2.0 * (wb.Hs - 0.9))
-                if not (gw_arch >= 1.0 and wb.add_opening(u + t / 2.0, gw_arch, 0.0, gh, 'arch')):
-                    if not wb.add_opening(u + t / 2.0, gw, 0.0, gh, 'rect'):
-                        wb.add_opening(u + t / 2.0, gw, 0.0, gh, 'gap')
+        for u, gw in snapped.get(i, []):
+            gh = min(p["gate_height"], wb.Hs - 0.4)
+            # an arch needs (width / 2) of rise above its springing: narrow it to fit a low wall,
+            # and fall back to a plain rectangular, then a full-height gap, rather than drop the gate
+            gw_arch = min(gw, 2.0 * (wb.Hs - 0.9))
+            if not (gw_arch >= 1.0 and wb.add_opening(u + t / 2.0, gw_arch, 0.0, gh, 'arch')):
+                if not wb.add_opening(u + t / 2.0, gw, 0.0, gh, 'rect'):
+                    wb.add_opening(u + t / 2.0, gw, 0.0, gh, 'gap')
         wb.geometry()
         big.append(wb.mb, rot=math.atan2(uy, ux), offset=(ax - ux * t / 2.0, ay - uy * t / 2.0, 0.0), mat_map=mat_map)
     return big
@@ -10483,6 +10717,7 @@ def _build_wood_fence_mesh(footprint, p, seed, gates):
     big = _TowerMesh()
     H = p["fence_height"]
     n_pts = len(footprint)
+    snapped = _snap_gates_to_edges(footprint, gates)
     for i in range(n_pts):
         ax, ay = footprint[i]
         bx, by = footprint[(i + 1) % n_pts]
@@ -10490,14 +10725,7 @@ def _build_wood_fence_mesh(footprint, p, seed, gates):
         if L0 < 0.5:
             continue
         ux, uy = (bx - ax) / L0, (by - ay) / L0
-        gaps = []
-        for gate in gates:
-            gx, gy = gate["pos"][0], gate["pos"][1]
-            u = (gx - ax) * ux + (gy - ay) * uy
-            v = -(gx - ax) * uy + (gy - ay) * ux
-            if abs(v) < 0.6 and 0.0 <= u <= L0:
-                half = float(gate.get("width", 3.0)) / 2.0
-                gaps.append((max(0.0, u - half), min(L0, u + half)))
+        gaps = [(max(0.0, u - gw / 2.0), min(L0, u + gw / 2.0)) for u, gw in snapped.get(i, [])]
         gaps.sort()
         local = _TowerMesh()
         n = max(1, int(round(L0 / 2.0)))
@@ -10821,12 +11049,12 @@ def plan_build(context, root):
     built, skipped = [], []
     for node, path in plan_iter(root):
         if node["type"] == "compound":
-            if _plan_build_compound(context, {**node, "style": resolved[path]["style"]}, resolved[path]["world"],
+            if _plan_build_compound(context, {**node, "style": plan_pick_style(resolved[path]["style"], resolved[path]["seed"])}, resolved[path]["world"],
                                     resolved[path]["seed"], path):
                 built.append("/".join(path))
             continue
         if node["type"] == "block":
-            if _plan_build_block(context, {**node, "style": resolved[path]["style"]}, resolved[path]["world"],
+            if _plan_build_block(context, {**node, "style": plan_pick_style(resolved[path]["style"], resolved[path]["seed"])}, resolved[path]["world"],
                                  resolved[path]["seed"], path):
                 built.append("/".join(path))
             continue
@@ -10837,9 +11065,40 @@ def plan_build(context, root):
             skipped.append(("/".join(path), "no builder for kind %r yet" % node.get("kind")))
             continue
         info = resolved[path]
-        fn(context, {**node, "style": info["style"]}, info["world"], info["seed"], path)
+        fn(context, {**node, "style": plan_pick_style(info["style"], info["seed"])}, info["world"], info["seed"], path)
         built.append("/".join(path))
     return {"built": built, "skipped": skipped, "warnings": warnings}
+
+
+def plan_apply_shape(plan, mode):
+    """Turns a regular example plan into a round or organic one: compounds get a circle / blob footprint (the stone
+    or wooden enclosure follows it, the gate snaps to the outline), blocks get a ring or organic road generator."""
+    if mode == 'REGULAR':
+        return plan
+    seed = plan_child_seed(7, plan["id"]) % 100000
+    params = plan.setdefault("params", {})
+    if plan["type"] == "compound" and plan.get("footprint"):
+        xs, ys = [q[0] for q in plan["footprint"]], [q[1] for q in plan["footprint"]]
+        w, d = max(xs) - min(xs), max(ys) - min(ys)
+        shape = {"kind": "circle" if mode == 'ROUND' else "blob", "width": round(w, 2), "depth": round(d, 2),
+                 "irregularity": 0.22, "seed": seed}
+        params["shape"] = shape
+        plan["footprint"] = None
+        n = len(plan_shape_polygon(shape))
+        for anchor in plan.get("anchors", []):
+            if anchor.get("kind") == "gate":
+                anchor["pos"] = [0.0, -d / 2.0, 0.0]
+        for rule in params.get("layout") or []:
+            if rule.get("at") == "corners":
+                rule["every"] = max(1, n // 6)
+    elif plan["type"] == "block":
+        params.pop("road_graph", None)
+        if mode == 'ROUND':
+            params["road_generator"] = {"kind": "ring", "radius": 34.0, "rings": 2, "spokes": 6, "segments": 24, "seed": seed}
+        else:
+            params["road_generator"] = {"kind": "organic", "cols": 3, "rows": 3, "cell": 24.0, "jitter": 0.2, "amplitude": 0.2, "seed": seed}
+            params["shape"] = {"kind": "blob", "width": 96.0, "depth": 96.0, "irregularity": 0.18, "seed": seed}
+    return plan
 
 
 def plan_new_example(scene, kind, existing_ids):
@@ -10952,6 +11211,7 @@ class OBJECT_OT_PlanCreate(bpy.types.Operator):
 
     def execute(self, context):
         plan = plan_new_example(context.scene, self.kind, set(plan_list_ids()))
+        plan_apply_shape(plan, context.scene.wfc_plan_shape)
         if context.scene.wfc_plan_style != 'medieval':
             plan["style"] = context.scene.wfc_plan_style
         plan_write_to_blend(context.scene, plan)
@@ -12291,6 +12551,7 @@ class VIEW3D_PT_GLAPlans(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         layout.prop(context.scene, "wfc_plan_style", text="Style")
+        layout.prop(context.scene, "wfc_plan_shape", text="Shape")
         layout.label(text="New plan at the 3D cursor:")
         row = layout.row(align=True)
         for kind, label in (('TOWER', "Tower"), ('CASTLE', "Castle"), ('GROUNDS', "Grounds"), ('FORTRESS', "Fortress")):
@@ -12980,9 +13241,14 @@ def register():
                     "punctual lights. Turn off to export geometry only and light the level by "
                     "hand in-engine instead"
     )
+    bpy.types.Scene.wfc_plan_shape = EnumProperty(
+        name="Shape", items=[('REGULAR', "Regular", "Rectangles and straight street grids"),
+                             ('ROUND', "Round", "Circular enclosures and ring-and-spoke streets"),
+                             ('ORGANIC', "Organic", "Free-form outlines and winding streets")],
+        default='REGULAR', description="Outline and street pattern of new compounds and blocks")
     bpy.types.Scene.wfc_plan_style = EnumProperty(
         name="Style", items=[(k, v["label"], "Style pack for new plans: wall, trim, roof and wood materials and building proportions")
-                             for k, v in PLAN_STYLES.items()],
+                             for k, v in PLAN_STYLES.items()] + [('mixed', "Mixed", "Every building gets a random style pack")],
         default='medieval', description="Style pack used by plans created with the buttons below")
     bpy.types.Scene.wfc_structure_kind = EnumProperty(
         name="Structure",
@@ -13115,6 +13381,7 @@ def unregister():
     del bpy.types.Scene.wfc_active_tab
     del bpy.types.Scene.wfc_structure_kind
     del bpy.types.Scene.wfc_plan_style
+    del bpy.types.Scene.wfc_plan_shape
 
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

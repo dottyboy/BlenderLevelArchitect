@@ -4384,6 +4384,140 @@ check("Props: farm and hamlet still build", len(addon.plan_build(bpy.context, fa
       and len(addon.plan_build(bpy.context, ham)["built"]) > 10)
 
 # ==============================================================================
+print("\n--- Plans: free-form shapes, road generators, mixed style, curved roofs ---")
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+scene.cursor.location = (0.0, 0.0, 0.0)
+n1, n2 = addon.plan_noise2(3.3, 4.7, 1), addon.plan_noise2(3.3, 4.7, 1)
+check("Noise: deterministic, in range and smooth",
+      n1 == n2 and 0.0 <= n1 < 1.0 and abs(addon.plan_noise2(3.30, 4.7, 1) - addon.plan_noise2(3.31, 4.7, 1)) < 0.05)
+check("Noise: different seeds differ", addon.plan_noise2(3.3, 4.7, 1) != addon.plan_noise2(3.3, 4.7, 2))
+vals = [addon.plan_fbm2(i * 0.37, i * 0.21, 5) for i in range(200)]
+check("Noise: fbm stays in [0, 1) and varies", all(0.0 <= v < 1.0 for v in vals) and max(vals) - min(vals) > 0.3)
+for kind in addon.PLAN_SHAPE_KINDS:
+    poly = addon.plan_shape_polygon({"kind": kind, "width": 40, "depth": 30, "irregularity": 0.3, "seed": 4})
+    check("Shape: %s is a valid counter-clockwise polygon" % kind, addon.plan_polygon_problem(poly) is None)
+blob_a = addon.plan_shape_polygon({"kind": "blob", "width": 40, "depth": 40, "irregularity": 0.3, "seed": 1})
+blob_b = addon.plan_shape_polygon({"kind": "blob", "width": 40, "depth": 40, "irregularity": 0.3, "seed": 2})
+check("Shape: blobs are irregular, seeded and different", blob_a != blob_b and len({round(math.hypot(*q), 1) for q in blob_a}) > 8)
+check("Shape: the same seed gives the same blob", blob_a == addon.plan_shape_polygon({"kind": "blob", "width": 40, "depth": 40, "irregularity": 0.3, "seed": 1}))
+check("Shape: a compound can take its footprint from params.shape",
+      addon.plan_footprint(addon.plan_node("c", "compound", "yard", params={"shape": {"kind": "circle", "width": 30, "depth": 30}})) is not None)
+check("Shape: an unknown shape kind is a validation error",
+      bool(addon.plan_validate(addon.plan_node("c", "compound", "yard", params={"shape": {"kind": "cube"}}))[0]))
+# organic fence with a snapped gate
+for kind in ("circle", "blob"):
+    yard = addon.plan_node("y_" + kind, "compound", "yard", style=None, params={"fence": "stone", "shape": {"kind": kind, "width": 40, "depth": 34, "seed": 3, "irregularity": 0.25}},
+                           transform={"x": 0.0, "y": 0.0, "z": 0.0, "rot": 0.0},
+                           anchors=[{"id": "gate", "kind": "gate", "pos": [0.0, -17.0, 0.0], "dir": 270.0, "width": 4.0}])
+    res = addon.plan_build(bpy.context, yard)
+    check("Shape: a %s enclosure builds" % kind, res["built"] == ["y_" + kind])
+    poly = addon.plan_footprint(yard)
+    snapped = addon._snap_gates_to_edges(poly, yard["anchors"])
+    check("Shape: the gate snaps onto an edge of the %s outline" % kind, len(snapped) == 1)
+    (ei, ((u, gw),)), = snapped.items()
+    ax, ay = poly[ei]
+    bx, by = poly[(ei + 1) % len(poly)]
+    L0 = math.hypot(bx - ax, by - ay)
+    gx, gy = ax + (bx - ax) / L0 * u, ay + (by - ay) / L0 * u
+    out_dir = (-(by - ay) / L0, (bx - ax) / L0)       # the outside of a counter-clockwise polygon is on the right: (dy, -dx)
+    hit = _ray((gx + (by - ay) / L0 * 6.0, gy - (bx - ax) / L0 * 6.0, 1.0), (-(by - ay) / L0, (bx - ax) / L0, 0.0))
+    check("Shape: the %s gate is open (a ray through it runs into the yard)" % kind, hit is None or math.hypot(hit.x - gx, hit.y - gy) > 3.0, str(hit))
+bpy.context.view_layer.update()
+# gates on the wooden fence too
+wy_ = addon.plan_node("wy", "compound", "yard", params={"fence": "wood", "fence_height": 1.3, "shape": {"kind": "blob", "width": 36, "depth": 30, "seed": 5}},
+                      transform={"x": 100.0, "y": 0.0, "z": 0.0, "rot": 0.0},
+                      anchors=[{"id": "gate", "kind": "gate", "pos": [0.0, -15.0, 0.0], "dir": 270.0, "width": 3.0}])
+check("Shape: an organic wooden fence builds", addon.plan_build(bpy.context, wy_)["built"] == ["wy"])
+# road generators
+for gen in ({"kind": "grid", "cols": 3, "rows": 2, "cell": 20}, {"kind": "grid", "cols": 3, "rows": 3, "cell": 20, "jitter": 0.3},
+            {"kind": "organic", "cols": 3, "rows": 3, "cell": 24}, {"kind": "ring", "radius": 30, "rings": 2, "spokes": 6}):
+    g = addon.plan_generate_roads(gen, 11)
+    ids = set(g["nodes"])
+    check("Roads: %s generator gives a valid graph" % json.dumps(gen), len(g["edges"]) > 6 and all(a in ids and b in ids and a != b for a, b in g["edges"])
+          and addon._block_graph_problem({"road_graph": g}) is None)
+    check("Roads: %s generator is deterministic" % gen["kind"], g == addon.plan_generate_roads(gen, 11))
+check("Roads: a different seed changes an organic network",
+      addon.plan_generate_roads({"kind": "organic"}, 1) != addon.plan_generate_roads({"kind": "organic"}, 2))
+reg = addon.plan_generate_roads({"kind": "grid", "cols": 2, "rows": 2, "cell": 20}, 1)
+check("Roads: a regular grid has straight, axis-aligned streets", all(abs(reg["nodes"][a][0] - reg["nodes"][b][0]) < 1e-6 or abs(reg["nodes"][a][1] - reg["nodes"][b][1]) < 1e-6 for a, b in reg["edges"]))
+org = addon.plan_generate_roads({"kind": "organic", "cols": 2, "rows": 2, "cell": 24}, 3)
+check("Roads: an organic network bends (some edges are neither horizontal nor vertical)",
+      any(abs(org["nodes"][a][0] - org["nodes"][b][0]) > 0.3 and abs(org["nodes"][a][1] - org["nodes"][b][1]) > 0.3 for a, b in org["edges"]))
+try:
+    addon.plan_generate_roads({"kind": "spiral"}, 1)
+    refused = False
+except addon.PlanError:
+    refused = True
+check("Roads: an unknown generator is refused", refused)
+check("Roads: a bad road_generator kind is a validation error",
+      bool(addon.plan_validate(addon.plan_node("b", "block", "x", params={"road_generator": {"kind": "spiral"}}))[0]))
+# round town and organic district built through the panel operator
+def _create_plan(kind):
+    before = set(addon.plan_list_ids())
+    bpy.ops.object.gla_plan_create(kind=kind)
+    new = (set(addon.plan_list_ids()) - before).pop()
+    return addon.plan_read_from_blend(new)
+
+
+scene.wfc_plan_shape = 'ROUND'
+round_plan = _create_plan('STREET')
+exp, warns = addon.plan_expand_layout(round_plan)
+gen_ = [c for c in exp["children"] if c.get("generated")]
+check("Round: a ring-and-spoke town gets houses around its streets", len(gen_) >= 12, str(len(gen_)) + str(warns))
+nodes, edges = addon.plan_block_graph(exp)
+roads = [addon._convex_hull(addon._edge_rect(nodes[a], nodes[b], w / 2.0)) for a, b, w in edges]
+polys = [addon._convex_hull(_world_poly(c)) for c in gen_]
+check("Round: houses keep off the roads and each other",
+      all(addon._convex_gap(p_, r) > 0.4 for p_ in polys for r in roads) and min(addon._convex_gap(a, b) for i, a in enumerate(polys) for b in polys[i + 1:]) >= 1.0 - 1e-6)
+check("Round: it builds", len(addon.plan_build(bpy.context, round_plan)["built"]) == 1 + len(gen_))
+scene.wfc_plan_shape = 'ORGANIC'
+org_plan = _create_plan('BLOCK')
+exp, warns = addon.plan_expand_layout(org_plan)
+gen_ = [c for c in exp["children"] if c.get("generated")]
+check("Organic: a winding district with a free-form outline gets houses", len(gen_) >= 10, str(len(gen_)) + str(warns))
+check("Organic: the lots stay inside the outline", all(addon._inside_with_margin(addon._convex_hull(_world_poly(c)), [tuple(q) for q in exp["footprint"]], 0.4) for c in gen_))
+check("Organic: it builds", len(addon.plan_build(bpy.context, org_plan)["built"]) == 1 + len(gen_))
+scene.wfc_plan_shape = 'ROUND'
+fp_ = _create_plan('FORTRESS')
+exp, _ = addon.plan_expand_layout(fp_)
+towers = [c for c in exp["children"] if c["kind"] == "tower"]
+check("Round: a round fortress has about six corner towers on its circular wall", 3 <= len(towers) <= 8, str(len(towers)))
+check("Round: it builds", len(addon.plan_build(bpy.context, fp_)["built"]) >= 1 + 1 + len(towers))
+scene.wfc_plan_shape = 'REGULAR'
+# one lot per short segment
+short = addon.plan_node("sh", "block", "x", params={"road_graph": {"nodes": {"a": [0, 0], "b": [6, 0]}, "edges": [["a", "b"]]}, "skip_chance": 0.0, "lot_width": 9.0})
+check("Roads: a segment shorter than a lot still gets one building per side", len([c for c in addon.plan_expand_layout(short)[0]["children"]]) >= 1)
+# mixed style
+mixed = addon.plan_node("mx2", "block", "street", style="mixed", params={
+    "road_graph": {"nodes": {"a": [-30, 0], "b": [30, 0]}, "edges": [["a", "b"]]}, "skip_chance": 0.0})
+check("Mixed: the style is valid", addon.plan_validate(mixed)[0] == [])
+exp, _ = addon.plan_expand_layout(mixed)
+res = addon.plan_resolve(exp)
+picked = {addon.plan_pick_style(res[p_]["style"], res[p_]["seed"]) for p_ in res if len(p_) == 2}
+check("Mixed: buildings get different packs", len(picked) >= 3, str(picked))
+check("Mixed: the pick is deterministic", addon.plan_pick_style("mixed", 123) == addon.plan_pick_style("mixed", 123) and addon.plan_pick_style("inca", 5) == "inca")
+check("Mixed: a mixed street builds", len(addon.plan_build(bpy.context, mixed)["built"]) >= 4)
+# curved roof
+cv = addon.plan_node("cv", "building", "house", transform={"x": 600.0, "y": 0.0, "z": 0.0, "rot": 0.0},
+                     params={"roof": "CURVED", "roof_pitch": 0.6, "roof_overhang": 1.2, "roof_lift": 0.8, "door_leaf": False, "chimney": False})
+check("Curved roof: builds", addon.plan_build(bpy.context, cv)["built"] == ["cv"])
+x0, x1, y0, y1, z0, z1 = _bounds_of("cv")
+rise_c = 0.6 * ((5.0 + 0.45) / 2.0 + 1.2)
+check("Curved roof: reaches roughly the apex height", abs(z1 - (2.8 + rise_c)) < 1.0 or z1 > 2.8 + rise_c * 0.7, str((z1, 2.8 + rise_c)))
+hit = _ray((600.0, 0.0, 12.0), (0.0, 0.0, -1.0))
+check("Curved roof: the ridge sits at the top", hit is not None and abs(hit.z - (2.8 + rise_c)) < 0.4, str(hit))
+hit_mid = _ray((600.0 + 3.0, 0.0, 12.0), (0.0, 0.0, -1.0))
+check("Curved roof: it falls away from the ridge", hit_mid is not None and hit_mid.z < hit.z - 0.2, str((hit_mid, hit)))
+hit_c = _ray((600.0 + 3.9 + 1.0, 2.5 + 1.0, 12.0), (0.0, 0.0, -1.0))
+hit_c2 = _ray((600.0 + 3.9 + 1.0 - 1.5, 2.5 + 1.0 - 1.5, 12.0), (0.0, 0.0, -1.0))
+check("Curved roof: the eave corners are lifted above the inward points", hit_c is not None and hit_c2 is not None and hit_c.z > 2.8 - 0.2, str((hit_c, hit_c2)))
+check("Curved roof: the chinese style uses it", addon.plan_house_params("house", {}, "chinese")["roof"] == "CURVED")
+check("Curved roof: vertex count stays modest", all(len(o.data.vertices) < 3500 for o in bpy.data.objects if o.name.startswith("PB_cv") and o.type == 'MESH'))
+
+# ==============================================================================
 print()
 if failures:
     print(f"{len(failures)} CHECK(S) FAILED:")
