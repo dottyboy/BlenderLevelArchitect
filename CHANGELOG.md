@@ -3,7 +3,7 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
-## Unreleased (panel reorganisation, step 1)
+## 0.43.0 — panel reorganisation
 
 - **Calmer panel layout, no behaviour change.** Setup: *Rooms* is split into *Rooms* and *Floors & Elevation*;
   UV Tile Size and Isometric Mode moved to a closed *Advanced* section; Separate by Floor/Room and Freeze for Texture Work
@@ -12,6 +12,9 @@ reproduced exactly from its settings (see **Debug: Last Generation Params** in t
 - **Step 2: fewer, labelled tabs.** Tabs now show text and sit in a 3-column grid: Setup, Walls, Stairs & Doors, Props,
   Export, Structures. *Stairs* and *Doors* are one tab (each keeps its own Step button); *Tower* and *Castle* are one
   *Structures* tab with a Tower/Castle switch. A scene saved with a removed tab name simply opens on the first tab.
+- **Step 3: Generate All Steps.** A button under the tabs (Setup, Walls, Stairs & Doors, Props) runs Step 1-5 in order with
+  the current settings, and asks for confirmation first when any step's output already exists. A level without stair tiles
+  (single floor) skips Step 3 instead of failing. Each Step button now shows a check mark when its output is in the file.
 - New headless test draws every tab on a stub layout and checks that each control is still reachable.
 
 ## 0.42.0

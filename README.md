@@ -80,10 +80,11 @@ Requires **Blender 4.2 LTS or newer** (tested on 4.2.21, 5.2.1 and 5.2.2). The b
 
 ## Quick start
 
-1. **Setup** tab → pick a Preset or set a map size → **Step 1: Generate Blueprint**.
-2. **Walls** tab → Wall Style *Masonry* → **Step 2: Generate Walls**; then Stairs, Doors, Props.
-3. **Structures** tab (choose Tower or Castle) → move the 3D cursor → **Generate**.
-4. **Export** tab → **Export Level (glTF/GLB)** or **Export Game Package**.
+1. **Setup** tab → pick a Preset or set a map size.
+2. **Walls** tab → Wall Style *Masonry*.
+3. Press **Generate All Steps** (or run Step 1–5 one by one: Blueprint, Walls, Stairs, Doors, Props).
+4. **Structures** tab (choose Tower or Castle) → move the 3D cursor → **Generate**.
+5. **Export** tab → **Export Level (glTF/GLB)** or **Export Game Package**.
 
 The full walkthrough is the **[User Guide](docs/USER_GUIDE.md)**.
 

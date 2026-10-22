@@ -7,6 +7,10 @@ job, each with its own settings and its own Generate button, so only one step's 
 **Presets** (above the tab row) set a bundle of settings tuned for a target camera or genre — *Isometric*,
 *FPS / Immersive-Sim*, *Compact Roguelike*, *Megadungeon*. Step 1 still has to be pressed afterwards.
 
+**Generate All Steps** (under the tab row on the Setup, Walls, Stairs & Doors and Props tabs) runs Step 1–5 in one go with the
+current settings. If any step's output already exists it asks first, since regenerating replaces it. A check mark on a Step
+button means its output is already in the file.
+
 Contents: [Building a level](#building-a-level) · [Walls and materials](#walls-and-materials) ·
 [Towers and castles](#towers-and-castles) · [Ruins](#ruins) · [Exporting](#exporting) · [Tips](#tips)
 
@@ -21,8 +25,8 @@ settings without regenerating the blueprint; regenerating Step 1 rebuilds everyt
 |---|---|---|
 | 1. **Generate Blueprint** | Setup | The room/corridor/stair layout and the floor mesh (a Geometry Nodes modifier). Map size, room count and size, room shape (Rect / Round / Mixed / Cave), floors, sub-levels per floor, continuous elevation, Corridor Stairs. |
 | 2. **Generate Walls** | Walls | Walls from the blueprint's exposed edges (plain boxes or **Masonry**), Round-room rings, windows. |
-| 3. **Generate Stairs** | Stairs | Stepped stairs or smooth ramps; straight, L-bent or U-bent stairwells. |
-| 4. **Generate Doors** | Doors | Frames wherever a corridor enters a room (Flat / Round / Pointed arch), real swinging panels, Entrance and Exit gates. |
+| 3. **Generate Stairs** | Stairs & Doors | Stepped stairs or smooth ramps; straight, L-bent or U-bent stairwells. |
+| 4. **Generate Doors** | Stairs & Doors | Frames wherever a corridor enters a room (Flat / Round / Pointed arch), real swinging panels, Entrance and Exit gates. |
 | 5. **Generate Props** | Props | Wall torches (a mesh plus a real Point light each) and decoration: crates/barrels/cones or themed furniture. |
 
 **Seeds.** Every generation is seeded and reproducible. Turn *Random Seed* off and note the seed to get the same level back.

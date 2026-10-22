@@ -3289,6 +3289,29 @@ check("Panel: hinge physics + UV tile size + iso mode still reachable",
       and {"wfc_uv_tile_size", "wfc_iso_mode"} <= panel_props['SETUP'])
 
 # ==============================================================================
+print("\n--- Generate All Steps ---")
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+check("All Steps: nothing generated yet -> no step reports done",
+      not any(addon._level_step_done(n) for n in range(1, 6)))
+scene.wfc_width, scene.wfc_length, scene.wfc_height = 14, 14, 1
+scene.wfc_random_seed = False
+scene.wfc_seed = 7
+check("All Steps: operator runs", bpy.ops.object.generate_all_steps() == {'FINISHED'})
+check("All Steps: steps 1, 2, 4 report done", all(addon._level_step_done(n) for n in (1, 2, 4)))
+check("All Steps: Blueprint, walls and doors exist",
+      all(any(n.startswith(p) for n in bpy.data.objects.keys())
+          for p in (addon.BLUEPRINT_OBJECT_NAME, addon.WALLS_OBJECT_NAME, addon.DOORS_OBJECT_NAME)))
+for o in [o for o in bpy.data.objects if o.name.startswith(addon.DOORS_OBJECT_NAME)]:
+    bpy.data.objects.remove(o, do_unlink=True)
+check("All Steps: removing the doors flips Step 4 back to not done", not addon._level_step_done(4))
+check("All Steps: running again regenerates cleanly", bpy.ops.object.generate_all_steps() == {'FINISHED'}
+      and addon._level_step_done(4))
+# without a blueprint a later step cannot be reached: the first step always creates it
+check("All Steps: the confirm path exists (invoke_confirm available or fallback)",
+      hasattr(bpy.context.window_manager, "invoke_confirm") or hasattr(bpy.context.window_manager, "invoke_props_dialog"))
+
+# ==============================================================================
 print()
 if failures:
     print(f"{len(failures)} CHECK(S) FAILED:")

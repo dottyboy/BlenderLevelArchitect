@@ -33,7 +33,7 @@ from bpy_extras.io_utils import ExportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 42, 0),
+    "version": (0, 43, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -9420,7 +9420,23 @@ def _color_swatch(layout, color_icon):
         swatch.label(text="")
 
 
-def _step_button(layout, idname, text, icon, color_icon):
+_STEP_OUTPUT_PREFIXES = {
+    1: (BLUEPRINT_OBJECT_NAME,),
+    2: (WALLS_OBJECT_NAME, WALLS_ROUND_OBJECT_NAME, WINDOWS_OBJECT_NAME),
+    3: (STAIRS_OBJECT_NAME,),
+    4: (DOORS_OBJECT_NAME, DOORS_ROUND_OBJECT_NAME),
+    5: (PROPS_TORCH_OBJECT_NAME, PROPS_DECORATION_OBJECT_NAME),
+}
+
+
+def _level_step_done(step):
+    """True if the objects Step <step> generates are in the file (prefix match, so per-floor
+    groupings count too). Pure name check -- cheap enough to run on every panel redraw."""
+    prefixes = _STEP_OUTPUT_PREFIXES[step]
+    return any(name.startswith(prefixes) for name in bpy.data.objects.keys())
+
+
+def _step_button(layout, idname, text, icon, color_icon, done=False):
     """One of the 3 main generation buttons -- taller than a normal button
     and paired with a color accent so the actions that actually DO
     something stand out from the settings stacked above them. Always
@@ -9429,7 +9445,7 @@ def _step_button(layout, idname, text, icon, color_icon):
     row = layout.row(align=True)
     row.scale_y = 1.4
     _color_swatch(row, color_icon)
-    row.operator(idname, text=text, icon=icon)
+    row.operator(idname, text=text, icon='CHECKMARK' if done else icon)
 
 
 class WFC_FloorProfile(bpy.types.PropertyGroup):
@@ -9631,6 +9647,55 @@ class OBJECT_OT_ApplyGLAPreset(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class OBJECT_OT_GenerateAllSteps(bpy.types.Operator):
+    """Runs Step 1-5 in order with the current settings. Asks first when any step's output is
+    already in the file, because regenerating replaces it."""
+    bl_idname = "object.generate_all_steps"
+    bl_label = "Generate All Steps"
+    bl_description = "Run Step 1 to Step 5 in order with the current settings (Blueprint, Walls, Stairs, Doors, Props)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    STEPS = (
+        ("object.generate_game_blueprint", "Step 1 (Blueprint)"),
+        ("object.generate_level_walls", "Step 2 (Walls)"),
+        ("object.generate_level_stairs", "Step 3 (Stairs)"),
+        ("object.generate_level_doors", "Step 4 (Doors)"),
+        ("object.generate_level_props", "Step 5 (Props)"),
+    )
+
+    def invoke(self, context, event):
+        existing = [n for n in range(1, 6) if _level_step_done(n)]
+        if not existing:
+            return self.execute(context)
+        message = "Replaces the existing output of step(s) " + ", ".join(str(n) for n in existing) + "."
+        wm = context.window_manager
+        try:
+            return wm.invoke_confirm(self, event, title="Regenerate the whole level?", message=message)
+        except TypeError:
+            try:
+                return wm.invoke_confirm(self, event)
+            except (TypeError, AttributeError):
+                return wm.invoke_props_dialog(self)
+
+    def execute(self, context):
+        for idname, label in self.STEPS:
+            group, name = idname.split(".")
+            try:
+                result = getattr(getattr(bpy.ops, group), name)()
+            except RuntimeError as exc:
+                self.report({'ERROR'}, f"{label} failed: {exc}")
+                return {'CANCELLED'}
+            if 'FINISHED' not in result:
+                if name == "generate_level_stairs":
+                    # A single-floor level has no stair tiles; Step 3 declines, which is not a failure here.
+                    self.report({'INFO'}, "No stairs in this level -- skipped Step 3.")
+                    continue
+                self.report({'ERROR'}, f"{label} did not finish -- stopped there.")
+                return {'CANCELLED'}
+        self.report({'INFO'}, "Generated all steps.")
+        return {'FINISHED'}
+
+
 class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
@@ -9654,6 +9719,11 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
         tabs = layout.grid_flow(row_major=True, columns=3, even_columns=True, even_rows=True, align=True)
         tabs.prop(scene, "wfc_active_tab", expand=True)
         layout.separator()
+        if scene.wfc_active_tab in ('SETUP', 'WALLS', 'CONNECTIONS', 'PROPS'):
+            all_row = layout.row(align=True)
+            all_row.scale_y = 1.2
+            all_row.operator("object.generate_all_steps", text="Generate All Steps", icon='PLAY')
+            layout.separator()
 
         if scene.wfc_active_tab == 'SETUP':
             self._draw_setup_tab(context, layout)
@@ -9774,6 +9844,7 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
         _step_button(
             layout, "object.generate_game_blueprint", "Step 1: Generate Blueprint",
             'MESH_CUBE', 'COLLECTION_COLOR_05',
+            done=_level_step_done(1),
         )
         section = _section(layout, "LA_tools", "Tools", 'TOOL_SETTINGS', default_closed=True)
         if section:
@@ -9835,6 +9906,7 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
         _step_button(
             layout, "object.generate_level_walls", "Step 2: Generate Walls",
             'MOD_SOLIDIFY', 'COLLECTION_COLOR_08',
+            done=_level_step_done(2),
         )
 
     def _draw_stairs_body(self, context, layout):
@@ -9870,6 +9942,7 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
         _step_button(
             layout, "object.generate_level_stairs", "Step 3: Generate Stairs",
             'TRIA_UP', 'COLLECTION_COLOR_02',
+            done=_level_step_done(3),
         )
         layout.separator()
         section = _section(layout, "LA_doors", "Doors", 'MESH_PLANE')
@@ -9878,6 +9951,7 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
         _step_button(
             layout, "object.generate_level_doors", "Step 4: Generate Doors",
             'MOD_LATTICE', 'COLLECTION_COLOR_06',
+            done=_level_step_done(4),
         )
 
     def _draw_structures_tab(self, context, layout):
@@ -9998,6 +10072,7 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
         _step_button(
             layout, "object.generate_level_props", "Step 5: Generate Props",
             'LIGHT', 'COLLECTION_COLOR_03',
+            done=_level_step_done(5),
         )
 
     def _draw_export_tab(self, context, layout):
@@ -10045,6 +10120,7 @@ classes = (
     OBJECT_OT_GenerateLevelStairs,
     OBJECT_OT_GenerateLevelDoors,
     OBJECT_OT_GenerateLevelProps,
+    OBJECT_OT_GenerateAllSteps,
     OBJECT_OT_GenerateLevelTower,
     OBJECT_OT_GenerateLevelCastle,
     OBJECT_OT_ExportGamePackage,

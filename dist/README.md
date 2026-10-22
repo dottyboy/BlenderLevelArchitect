@@ -80,10 +80,11 @@ Requires **Blender 4.2 LTS or newer** (tested on 4.2.21, 5.2.1 and 5.2.2). The b
 
 ## Quick start
 
-1. **Setup** tab → pick a Preset or set a map size → **Step 1: Generate Blueprint**.
-2. **Walls** tab → Wall Style *Masonry* → **Step 2: Generate Walls**; then Stairs, Doors, Props.
-3. **Tower** or **Castle** tab → move the 3D cursor → **Generate**.
-4. **Export** tab → **Export Level (glTF/GLB)** or **Export Game Package**.
+1. **Setup** tab → pick a Preset or set a map size.
+2. **Walls** tab → Wall Style *Masonry*.
+3. Press **Generate All Steps** (or run Step 1–5 one by one: Blueprint, Walls, Stairs, Doors, Props).
+4. **Structures** tab (choose Tower or Castle) → move the 3D cursor → **Generate**.
+5. **Export** tab → **Export Level (glTF/GLB)** or **Export Game Package**.
 
 The full walkthrough is the **[User Guide](../docs/USER_GUIDE.md)**.
 
@@ -93,12 +94,10 @@ The full walkthrough is the **[User Guide](../docs/USER_GUIDE.md)**.
 |---|---|
 | **Setup** | Map & seed, rooms, room shape, floors and sub-levels, elevation, scale, style, **Step 1** |
 | **Walls** | Wall Style (Boxes / Masonry), Room Brick Colors, Wall Ruin, windows, Round-room walls, **Step 2** |
-| **Stairs** | Stair style, bends, grouping, **Step 3** |
-| **Doors** | Door style and height, frames, swinging panels, **Step 4** |
+| **Stairs & Doors** | Stair style, bends, grouping (**Step 3**); door style, height, frames, swinging panels (**Step 4**) |
 | **Props** | Torches and lights, decoration, themes, **Step 5** |
 | **Export** | glTF/GLB, collision mesh, game packages (whole level or per floor) |
-| **Tower** | Round tower: size, door, windows, interior stairs/railing/lanterns/furniture, Brick Color, Ruin |
-| **Castle** | Castle: size, towers, gate, keep, hall furniture, Brick Color, Ruin, castle package export |
+| **Structures** | Switch between **Tower** (size, door, windows, interior stairs/railing/lanterns/furniture, Brick Color, Ruin) and **Castle** (size, towers, gate, keep, hall furniture, Brick Color, Ruin, castle package export) |
 
 ## Tutorials
 
