@@ -3,7 +3,7 @@
     blender --background --factory-startup --python tools/render_media.py -- <job> <out_dir> [quality]
 
 Jobs: castle_still, castle_turntable, ruin_slider, tint_cycle, tower_trio, tower_cutaway, hall_cutaway,
-      level_still, round_rooms_still, seeds_gallery
+      level_still, round_rooms_still, seeds_gallery, houses_still, grounds_still, fortress_still, fortress_turntable
 quality: draft (default, 16 samples) or final (64 samples).
 The frames land as PNGs; tools/make_gif.sh turns a frame folder into a GIF with ffmpeg.
 """
@@ -224,5 +224,40 @@ elif JOB == "seeds_gallery":
         mid = sc.wfc_tile_size * sc.wfc_width / 2
         camera((mid, mid - 24, 36), (mid, mid, 0), lens=34)
         render("f%03d" % i)
+elif JOB in ("houses_still", "grounds_still", "fortress_still", "fortress_turntable"):
+    setup_render(1280, 720) if JOB.endswith("_still") else setup_render(640, 360)
+    clear_scene()
+    world_and_sun()
+    sc.cursor.location = (0, 0, 0)
+    if JOB == "houses_still":
+        row = la.plan_node("row", "compound", "yard", footprint=[[-40, -20], [40, -20], [40, 20], [-40, 20]], children=[
+            la.plan_node("house", "building", "house", transform={"x": -22, "y": 0, "z": 0, "rot": 0}, params={"brick_color": "OCHRE"}),
+            la.plan_node("house2", "building", "house", transform={"x": -9, "y": 0, "z": 0, "rot": 0},
+                         params={"floors": 2, "depth": 6.0, "brick_color": "MIXED"}),
+            la.plan_node("chapel", "building", "chapel", transform={"x": 3, "y": 0, "z": 0, "rot": 0}, params={"brick_color": "SLATE"}),
+            la.plan_node("stable", "building", "stable", transform={"x": 20, "y": 0, "z": 0, "rot": 0}),
+            la.plan_node("ruin", "building", "house", transform={"x": 33, "y": 0, "z": 0, "rot": 0}, params={"ruin": 0.6}),
+        ])
+        la.plan_write_to_blend(sc, row)
+        la.plan_build(bpy.context, row)
+        camera((8, -58, 22), (8, 0, 2.0), lens=34)
+        render("houses")
+    else:
+        plan = la.plan_new_example(sc, 'GROUNDS' if JOB == "grounds_still" else 'FORTRESS', set())
+        la.plan_write_to_blend(sc, plan)
+        la.plan_build(bpy.context, plan)
+        if JOB == "grounds_still":
+            camera((10, -85, 55), (6, 0, 0), lens=30)
+            render("grounds")
+        elif JOB == "fortress_still":
+            camera((8, -62, 42), (4, 0, 0), lens=30)
+            render("fortress")
+        else:
+            cam = camera((0, 0, 0), (0, 0, 3))
+            n = 36
+            for i in range(n):
+                cam.location = orbit((0, 0), 62, 38, math.radians(-90 + 360 * i / n))
+                cam.rotation_euler = (Vector((0, 0, 3)) - cam.location).to_track_quat('-Z', 'Y').to_euler()
+                render("f%03d" % i)
 else:
     raise SystemExit("unknown job " + JOB)

@@ -30,6 +30,16 @@ reproduced exactly from its settings (see **Debug: Last Generation Params** in t
 - **Freeze** button in the Plans panel writes the generated buildings into the stored plan as ordinary children.
 - The *Castle Grounds* example now lays out a chapel, stables and houses.
 
+## Unreleased — plans (M2, step 4)
+
+- **Roof tiles.** Procedural terracotta and slate roof materials (packed like the masonry textures); houses, stables, the
+  chapel (slate by default) and the well use them. `roof_color` = `TERRACOTTA`, `SLATE` or `STONE` (the earlier stone look).
+  Brick tints do not affect the roof.
+- **Corner towers for compounds.** A layout rule with `"at": "corners"` puts one building (e.g. a tower) on every vertex of the
+  compound's footprint, so the stone enclosure becomes a curtain wall with towers. New **Fortress** example in the Plans panel:
+  an outer ward with corner towers and a gate, the castle inside as its keep, and a house or two.
+- tools/render_media.py: jobs `houses_still`, `grounds_still`, `fortress_still`, `fortress_turntable`.
+
 ## 0.44.0 — plans (M1)
 
 - **Plans, experimental.** A new collapsed *Plans (experimental)* sub-panel: create a starter plan at the 3D cursor

@@ -3857,6 +3857,80 @@ check("Layout: the example Grounds plan lays out its buildings",
       len([c for c in addon.plan_expand_layout(addon.plan_new_example(scene, 'GROUNDS', set()))[0]["children"] if c.get("generated")]) >= 4)
 
 # ==============================================================================
+print("\n--- Plans: roof tiles ---")
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+
+
+def _roof_mesh(plan):
+    addon.plan_build(bpy.context, plan)
+    return next(o for o in bpy.data.objects if o.name.startswith("PB_" + plan["id"]) and o.type == 'MESH')
+
+
+rt = _roof_mesh(addon.plan_node("rt", "building", "house"))
+mats = [m.name if m else None for m in rt.data.materials]
+check("Roof: a default house has brick, stone and terracotta slots", mats[-1] == "LA_Roof_Terracotta" and len(mats) == 3, str(mats))
+roof_polys = [p for p in rt.data.polygons if p.material_index == 2]
+check("Roof: roof faces use the roof slot and sit above the walls",
+      len(roof_polys) >= 8 and all(p.center.z >= addon.PLAN_HOUSE_DEFAULTS["house"]["wall_height"] - 0.3 for p in roof_polys))
+check("Roof: the walls keep the brick slot (nothing below the eaves uses the roof slot)",
+      all(p.center.z > 2.0 for p in rt.data.polygons if p.material_index == 2))
+img = bpy.data.images.get("LA_Roof_Terracotta_Albedo")
+check("Roof: tile texture is generated and packed", img is not None and img.packed_file is not None)
+ch = _roof_mesh(addon.plan_node("rc", "building", "chapel"))
+check("Roof: the chapel defaults to slate", ch.data.materials[-1].name == "LA_Roof_Slate")
+st = _roof_mesh(addon.plan_node("rs", "building", "house", params={"roof_color": "STONE"}))
+check("Roof: roof_color STONE keeps the dressed-stone look", st.data.materials[-1].name == "LA_Tower_Stone")
+tinted = _roof_mesh(addon.plan_node("rtn", "building", "house", params={"brick_color": "SLATE"}))
+check("Roof: a tinted house has tints + stone + roof slots and roof faces still use the last one",
+      len(tinted.data.materials) == len(addon.BRICK_TINTS) + 2
+      and any(p.material_index == len(addon.BRICK_TINTS) + 1 for p in tinted.data.polygons))
+w = _roof_mesh(addon.plan_node("rw", "building", "well"))
+check("Roof: the well roof uses the roof material", w.data.materials[-1].name == "LA_Roof_Terracotta"
+      and any(p.material_index == 2 for p in w.data.polygons))
+try:
+    addon.plan_build(bpy.context, addon.plan_node("rb", "building", "house", params={"roof_color": "GOLD"}))
+    refused = False
+except addon.PlanError as exc:
+    refused = "roof_color" in str(exc)
+check("Roof: an unknown roof colour is refused", refused)
+check("Roof: a ruin without a roof does not add roof faces",
+      not any(p.material_index == 2 for p in _roof_mesh(addon.plan_node("rr", "building", "house", params={"ruin": 0.8})).data.polygons))
+
+# ==============================================================================
+print("\n--- Plans: fortress (corner towers on a compound) ---")
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+scene.cursor.location = (0.0, 0.0, 0.0)
+fort = addon.plan_new_example(scene, 'FORTRESS', set())
+check("Fortress: the example is a compound with a castle inside", fort["type"] == "compound"
+      and [c["kind"] for c in fort["children"]] == ["castle"] and "layout" in fort["params"])
+exp, warns = addon.plan_expand_layout(fort)
+towers = [c for c in exp["children"] if c["kind"] == "tower"]
+check("Fortress: one tower on each of the four corners",
+      sorted((c["transform"]["x"], c["transform"]["y"]) for c in towers) == sorted(tuple(map(float, p)) for p in fort["footprint"]),
+      str([c["transform"] for c in towers]))
+check("Fortress: houses placed too, nothing overlapping a tower",
+      all(addon._convex_gap(addon._convex_hull(_world_poly(a)), addon._convex_hull(_world_poly(b))) > 0
+          for i, a in enumerate(exp["children"]) for b in exp["children"][i + 1:]), str(warns))
+res = addon.plan_build(bpy.context, fort)
+check("Fortress: builds the enclosure, the castle, four towers and the houses", len(res["built"]) >= 1 + 1 + 4 + 1, str(res))
+bpy.context.view_layer.update()
+# the gate on the south side is passable, towers sit on the fence corners
+hx = fort["footprint"][0]
+hit = _ray((0.0, fort["footprint"][0][1] - 6.0, 1.0), (0.0, 1.0, 0.0))
+check("Fortress: the gate passage is open (ray reaches the castle behind it)",
+      hit is not None and hit.y > fort["footprint"][0][1] + 3.0, str(hit))
+bad = addon.plan_node("bc", "compound", "yard", footprint=[[0, 0], [20, 0], [20, 20], [0, 20]],
+                      params={"layout": [{"kind": "tower", "at": "middle"}]})
+check("Fortress: an unknown 'at' value is refused", bool(addon.plan_validate(bad)[0]))
+check("Fortress: the panel creates it", bpy.ops.object.gla_plan_create(kind='FORTRESS') == {'FINISHED'})
+
+# ==============================================================================
 print()
 if failures:
     print(f"{len(failures)} CHECK(S) FAILED:")

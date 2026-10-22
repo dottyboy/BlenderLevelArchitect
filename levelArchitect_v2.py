@@ -7295,6 +7295,7 @@ TOWER_TAU = 2.0 * math.pi
 TOWER_TILE_W = 2.4
 TOWER_ROW_H = 0.26
 TOWER_ROWS = 8
+ROOF_SOURCE_SLOT = 2                 # material slot the building builders give roof faces (maps to the roof slot)
 
 
 def _masonry_images(prefix, rows, row_h, lens_choices, palette, seed, joint_m=0.011, bevel_m=0.016, wear=0.12):
@@ -7401,6 +7402,35 @@ def _tower_stone_images():
     # 4 rows of 0.52 m: the same 2.08 m tile as the bricks, but large dressed blocks
     return _masonry_images("LA_Tower_Stone", TOWER_ROWS // 2, TOWER_ROW_H * 2, [0.7, 0.9, 1.1, 1.4], _stone_palette, 7,
                            joint_m=0.014, bevel_m=0.02, wear=0.10)
+
+
+def _terracotta_palette(np, tint, tint2, hv):
+    # fired clay: orange-red tiles, the odd darker or paler one
+    return np.stack([0.56 + 0.06 * tint + 0.03 * tint2, 0.33 + 0.04 * tint, 0.22 + 0.03 * tint2], -1)
+
+
+def _slate_palette(np, tint, tint2, hv):
+    # blue-grey slate with the odd greener or browner slab
+    return np.stack([0.40 + 0.04 * tint + 0.02 * tint2, 0.45 + 0.04 * tint, 0.52 + 0.04 * tint - 0.02 * tint2], -1)
+
+
+ROOF_ROWS = 10                       # 10 courses of 0.208 m = the same 2.08 m tile height as the bricks
+
+
+def _roof_images(color):
+    palette = _terracotta_palette if color == 'TERRACOTTA' else _slate_palette
+    return _masonry_images("LA_Roof_" + color.capitalize(), ROOF_ROWS, TOWER_ROWS * TOWER_ROW_H / ROOF_ROWS,
+                           [0.26, 0.3, 0.34], palette, 19, joint_m=0.012, bevel_m=0.03, wear=0.14)
+
+
+def get_or_create_roof_material(color):
+    """Roof tiles (procedural, packed like the masonry): 'TERRACOTTA' or 'SLATE'; anything else gives the
+    dressed-stone material, i.e. the earlier stone roof."""
+    if color not in ('TERRACOTTA', 'SLATE'):
+        return get_or_create_tower_stone_material()
+    name = "LA_Roof_" + color.capitalize()
+    return _masonry_material(name, _roof_images(color) if bpy.data.materials.get(name) is None else None,
+                             name + ".png", "8a4a2e" if color == 'TERRACOTTA' else "3a4048", roughness=0.8)
 
 
 def _masonry_material(name, images, fallback_file, fallback_hex, roughness=0.9):
@@ -7528,12 +7558,17 @@ def get_or_create_tower_brick_tint_material(index):
     return mat
 
 
-def masonry_material_list(room_colors):
+def masonry_material_list(room_colors, roof=None):
     """Material slots for masonry meshes: [brick] + [stone], or with per-room colours
-    [tint0 .. tintN-1] + [stone] (see _TowerMesh.append's mat_map)."""
+    [tint0 .. tintN-1] + [stone] (see _TowerMesh.append's mat_map). `roof` ('TERRACOTTA' / 'SLATE' / 'STONE')
+    appends one more slot with the roof material (source slot ROOF_SOURCE_SLOT)."""
     if room_colors:
-        return [get_or_create_tower_brick_tint_material(i) for i in range(len(BRICK_TINTS))] + [get_or_create_tower_stone_material()]
-    return [get_or_create_tower_brick_material(), get_or_create_tower_stone_material()]
+        slots = [get_or_create_tower_brick_tint_material(i) for i in range(len(BRICK_TINTS))] + [get_or_create_tower_stone_material()]
+    else:
+        slots = [get_or_create_tower_brick_material(), get_or_create_tower_stone_material()]
+    if roof is not None:
+        slots.append(get_or_create_roof_material(roof))
+    return slots
 
 
 def get_or_create_tower_stone_material():
@@ -9204,6 +9239,8 @@ def _layout_rule_problem(rule):
         return "layout count must be an integer >= 0 or [min, max]"
     if rule.get("near", "free") not in ("free", "wall"):
         return "layout 'near' must be 'free' or 'wall'"
+    if rule.get("at", None) not in (None, "corners"):
+        return "layout 'at' must be 'corners'"
     gap = rule.get("min_gap", 2.0)
     if isinstance(gap, bool) or not isinstance(gap, (int, float)) or gap < 0:
         return "layout min_gap must be a number >= 0"
@@ -9244,6 +9281,25 @@ def _expand_compound(node, seed):
         base = plan_footprint(proto)
         if not base:
             warnings.append("layout: kind %r has no footprint, skipped" % rule["kind"])
+            continue
+        if rule.get("at") == "corners":
+            # one building centred on every vertex of the footprint (corner towers of the enclosure): not tested
+            # against the fence, only against what is already placed
+            for vx, vy in container:
+                poly = _convex_hull(_poly_transform(base, vx, vy, 0.0))
+                if any(_convex_gap(poly, q) <= 0.0 for q in placed):
+                    warnings.append("layout: a corner %s overlaps another building and was skipped" % rule["kind"])
+                    continue
+                placed.append(poly)
+                k = 1
+                while "%s_%d" % (rule["kind"], k) in used_ids:
+                    k += 1
+                cid = "%s_%d" % (rule["kind"], k)
+                used_ids.add(cid)
+                child = plan_node(cid, "building", rule["kind"], params=dict(rule.get("params") or {}),
+                                  transform={"x": round(vx, 3), "y": round(vy, 3), "z": 0.0, "rot": 0.0})
+                child["generated"] = True
+                out.append(child)
             continue
         not_placed = 0
         for _ in range(n):
@@ -9600,14 +9656,14 @@ PLAN_HOUSE_DEFAULTS = {
     "house": dict(width=7.0, depth=5.0, wall_height=2.8, floors=1, wall_thickness=0.45, roof='GABLE',
                   roof_pitch=0.65, door='S', door_style='arch', door_width=1.1, door_height=2.1,
                   window_kind='rect', window_width=0.8, window_height=1.0, window_sill=1.0, windows=True),
-    "chapel": dict(width=6.0, depth=11.0, wall_height=5.0, floors=1, wall_thickness=0.6, roof='GABLE',
+    "chapel": dict(width=6.0, depth=11.0, wall_height=5.0, floors=1, wall_thickness=0.6, roof='GABLE', roof_color='SLATE',
                    roof_pitch=1.0, door='S', door_style='pointed', door_width=1.5, door_height=3.0,
                    window_kind='pointed', window_width=0.7, window_height=1.8, window_sill=1.8, windows=True),
     "stable": dict(width=12.0, depth=5.5, wall_height=2.6, floors=1, wall_thickness=0.45, roof='GABLE',
                    roof_pitch=0.55, door='S', door_style='rect', door_width=2.6, door_height=2.1,
                    window_kind='rect', window_width=0.6, window_height=0.5, window_sill=1.6, windows=True),
 }
-PLAN_HOUSE_COMMON = dict(brick_color='PLAIN', ruin=0.0, detail='MEDIUM')
+PLAN_HOUSE_COMMON = dict(brick_color='PLAIN', ruin=0.0, detail='MEDIUM', roof_color='TERRACOTTA')
 PLAN_HOUSE_RANGES = {
     "width": (2.0, 60.0), "depth": (2.0, 60.0), "wall_height": (1.8, 10.0), "floors": (1, 4),
     "wall_thickness": (0.2, 1.4), "roof_pitch": (0.2, 1.6), "ruin": (0.0, 1.0),
@@ -9617,7 +9673,7 @@ PLAN_HOUSE_RANGES = {
 PLAN_HOUSE_ENUMS = {
     "roof": ('GABLE', 'FLAT', 'NONE'), "door": ('S', 'E', 'N', 'W', 'NONE'),
     "door_style": ('arch', 'pointed', 'rect'), "window_kind": ('arch', 'pointed', 'rect'),
-    "detail": ('LOW', 'MEDIUM', 'HIGH'),
+    "detail": ('LOW', 'MEDIUM', 'HIGH'), "roof_color": ('TERRACOTTA', 'SLATE', 'STONE'),
 }
 
 
@@ -9633,7 +9689,7 @@ for _kind in PLAN_HOUSE_DEFAULTS:
 
 def plan_house_params(kind, params):
     """Defaults for the kind merged with the node's params; raises PlanError on bad values."""
-    merged = {**PLAN_HOUSE_DEFAULTS[kind], **PLAN_HOUSE_COMMON, **(params or {})}
+    merged = {**PLAN_HOUSE_COMMON, **PLAN_HOUSE_DEFAULTS[kind], **(params or {})}
     for key, (lo, hi) in PLAN_HOUSE_RANGES.items():
         v = merged[key]
         if isinstance(v, bool) or not isinstance(v, (int, float)) or v < lo or v > hi:
@@ -9655,20 +9711,20 @@ def _house_roof(rm, W, D, H, t, pitch, kind):
     hs = (Sp + t) / 2.0 + over_side               # half span at the eaves
     xe = Lr / 2.0 + t / 2.0 + over_end            # half length incl. end overhang
     rise = pitch * hs
-    tile = TOWER_TILE_W
+    tile, th_tile = TOWER_TILE_W, TOWER_ROWS * TOWER_ROW_H
     slope_len = math.hypot(hs, rise)
     for sgn in (-1.0, 1.0):
         top = [(-xe, sgn * hs, H), (xe, sgn * hs, H), (xe, 0.0, H + rise), (-xe, 0.0, H + rise)]
-        uv = [(p[0] / tile, (slope_len if p[1] != 0.0 else 0.0) / tile) for p in top]
-        rm.poly('roof', top, uv, (0.0, -sgn * rise, hs), 1)
+        uv = [(p[0] / tile, (slope_len if p[1] != 0.0 else 0.0) / th_tile) for p in top]
+        rm.poly('roof', top, uv, (0.0, -sgn * rise, hs), ROOF_SOURCE_SLOT)
         under = [(p[0], p[1], p[2] - th) for p in top]
-        rm.poly('roofu', under, uv, (0.0, sgn * rise, -hs), 1)
+        rm.poly('roofu', under, uv, (0.0, sgn * rise, -hs), ROOF_SOURCE_SLOT)
         # eave edge
         edge = [(-xe, sgn * hs, H), (xe, sgn * hs, H), (xe, sgn * hs, H - th), (-xe, sgn * hs, H - th)]
-        rm.poly('roofe', edge, [(p[0] / tile, p[2] / tile) for p in edge], (0.0, sgn, 0.0), 1)
+        rm.poly('roofe', edge, [(p[0] / tile, p[2] / th_tile) for p in edge], (0.0, sgn, 0.0), ROOF_SOURCE_SLOT)
         for xs in (-1.0, 1.0):
             quad = [(xs * xe, sgn * hs, H), (xs * xe, 0.0, H + rise), (xs * xe, 0.0, H + rise - th), (xs * xe, sgn * hs, H - th)]
-            rm.poly('roofg', quad, [(p[1] / tile, p[2] / tile) for p in quad], (xs, 0.0, 0.0), 1)
+            rm.poly('roofg', quad, [(p[1] / tile, p[2] / th_tile) for p in quad], (xs, 0.0, 0.0), ROOF_SOURCE_SLOT)
     # gable fill in wall brick, outer and inner face of each end wall
     so = (Sp + t) / 2.0
     zb = H + pitch * (hs - so) - th
@@ -9689,7 +9745,7 @@ def _build_house_mesh(kind, p, seed):
     tint = BRICK_COLOR_INDEX.get(p["brick_color"], 0)
     if p["brick_color"] == 'MIXED':
         tint = (2, 3, 4, 6, 1, 5)[seed % 6]
-    mat_map = {0: tint, 1: len(BRICK_TINTS)} if tint else None
+    mat_map = {0: tint, 1: len(BRICK_TINTS), ROOF_SOURCE_SLOT: len(BRICK_TINTS) + 1} if tint else None
     stones_scale = {'LOW': 0.0, 'MEDIUM': 1.0, 'HIGH': 3.0}[p["detail"]]
     corners = [(-W / 2, -D / 2), (W / 2, -D / 2), (W / 2, D / 2), (-W / 2, D / 2)]
     dirs = [(1, 0, 0.0), (0, 1, math.pi / 2), (-1, 0, math.pi), (0, -1, 3 * math.pi / 2)]
@@ -9729,7 +9785,7 @@ def _build_house_mesh(kind, p, seed):
         if p["roof"] == 'FLAT':
             slab = [(-W / 2 - 0.2, -D / 2 - 0.2, H), (W / 2 + 0.2, -D / 2 - 0.2, H),
                     (W / 2 + 0.2, D / 2 + 0.2, H), (-W / 2 - 0.2, D / 2 + 0.2, H)]
-            big.poly('flat', slab, [(q[0] / tile, q[1] / tile) for q in slab], (0.0, 0.0, 1.0), 1)
+            big.poly('flat', slab, [(q[0] / tile, q[1] / (TOWER_ROWS * TOWER_ROW_H)) for q in slab], (0.0, 0.0, 1.0), ROOF_SOURCE_SLOT)
         else:
             rm = _TowerMesh()
             _house_roof(rm, W, D, H, t, p["roof_pitch"], kind)
@@ -9742,7 +9798,7 @@ def _build_house_mesh(kind, p, seed):
 # `fence` parameter runs a wall along the compound's footprint, with an arched
 # opening wherever one of the compound's own `gate` anchors sits on an edge.
 # ------------------------------------------------------------------------------
-PLAN_WELL_DEFAULTS = dict(radius=1.0, wall_height=0.9, roof=True, brick_color='PLAIN', ruin=0.0)
+PLAN_WELL_DEFAULTS = dict(radius=1.0, wall_height=0.9, roof=True, brick_color='PLAIN', ruin=0.0, roof_color='TERRACOTTA')
 PLAN_WELL_RANGES = {"radius": (0.5, 3.0), "wall_height": (0.4, 1.5), "ruin": (0.0, 1.0)}
 PLAN_FENCE_DEFAULTS = dict(fence='none', fence_height=2.4, fence_thickness=0.5, gate_height=3.0,
                            brick_color='PLAIN', ruin=0.0, detail='MEDIUM')
@@ -9787,7 +9843,7 @@ def _build_well_mesh(p, seed):
     r, h, n, tile = p["radius"], p["wall_height"], 14, TOWER_TILE_W
     ri = r - 0.35
     tint = BRICK_COLOR_INDEX.get(p["brick_color"], 0)
-    mat_map = {0: tint, 1: len(BRICK_TINTS)} if tint else None
+    mat_map = {0: tint, 1: len(BRICK_TINTS), ROOF_SOURCE_SLOT: len(BRICK_TINTS) + 1} if tint else None
     ang = [2 * math.pi * i / n for i in range(n)]
     for i in range(n):
         a0, a1 = ang[i], ang[(i + 1) % n]
@@ -9813,8 +9869,8 @@ def _build_well_mesh(p, seed):
         xe = px + 0.08 + over
         for sgn in (-1.0, 1.0):
             sl = [(-xe, sgn * hs, top + 0.14), (xe, sgn * hs, top + 0.14), (xe, 0.0, top + 0.14 + rise), (-xe, 0.0, top + 0.14 + rise)]
-            big.poly('wr', sl, [(q[0] / tile, q[1] / tile) for q in sl], (0.0, -sgn * rise, hs), 1)
-            big.poly('wru', [(q[0], q[1], q[2] - 0.08) for q in sl], [(q[0] / tile, q[1] / tile) for q in sl], (0.0, sgn * rise, -hs), 1)
+            big.poly('wr', sl, [(q[0] / tile, q[1] / tile) for q in sl], (0.0, -sgn * rise, hs), ROOF_SOURCE_SLOT)
+            big.poly('wru', [(q[0], q[1], q[2] - 0.08) for q in sl], [(q[0] / tile, q[1] / tile) for q in sl], (0.0, sgn * rise, -hs), ROOF_SOURCE_SLOT)
     out = _TowerMesh()
     out.append(big, mat_map=mat_map)
     return out
@@ -9855,11 +9911,11 @@ def _build_fence_mesh(footprint, p, seed, gates):
     return big
 
 
-def _plan_add_mesh_object(context, soup, name, brick_color, path, world):
+def _plan_add_mesh_object(context, soup, name, brick_color, path, world, roof_color=None):
     mesh = soup.to_mesh(name)
     obj = bpy.data.objects.new(name, mesh)
     context.scene.collection.objects.link(obj)
-    for mat_ in masonry_material_list(brick_color not in ('PLAIN',)):
+    for mat_ in masonry_material_list(brick_color not in ('PLAIN',), roof=roof_color):
         mesh.materials.append(mat_)
     _add_viewport_color_attribute(mesh)
     _plan_adopt_objects(context.scene, path, world, [obj])
@@ -9868,11 +9924,12 @@ def _plan_add_mesh_object(context, soup, name, brick_color, path, world):
 
 def _plan_build_well(context, node, world, seed, path):
     try:
-        p = _plan_checked({**PLAN_WELL_DEFAULTS, **(node.get("params") or {})}, PLAN_WELL_RANGES)
+        p = _plan_checked({**PLAN_WELL_DEFAULTS, **(node.get("params") or {})}, PLAN_WELL_RANGES,
+                          {"roof_color": ('TERRACOTTA', 'SLATE', 'STONE')})
     except PlanError as exc:
         raise PlanError("%s: %s" % ("/".join(path), exc))
     soup = _build_well_mesh(p, int(seed) % 1_000_000)
-    return [_plan_add_mesh_object(context, soup, "Well_" + node["id"], p["brick_color"], path, world)]
+    return [_plan_add_mesh_object(context, soup, "Well_" + node["id"], p["brick_color"], path, world, p["roof_color"])]
 
 
 def _plan_build_compound(context, node, world, seed, path):
@@ -9897,14 +9954,7 @@ def _plan_build_house(context, node, world, seed, path):
         raise PlanError("%s: %s" % (where, exc))
     soup = _build_house_mesh(node["kind"], params, int(seed) % 1_000_000)
     name = "%s_%s" % (node["kind"].capitalize(), node["id"])
-    mesh = soup.to_mesh(name)
-    obj = bpy.data.objects.new(name, mesh)
-    context.scene.collection.objects.link(obj)
-    for mat_ in masonry_material_list(params["brick_color"] != 'PLAIN'):
-        mesh.materials.append(mat_)
-    _add_viewport_color_attribute(mesh)
-    _plan_adopt_objects(context.scene, path, world, [obj])
-    return [obj]
+    return [_plan_add_mesh_object(context, soup, name, params["brick_color"], path, world, params["roof_color"])]
 
 
 PLAN_BUILDERS = {"tower": _plan_build_tower, "castle": _plan_build_castle,
@@ -9952,6 +10002,19 @@ def plan_new_example(scene, kind, existing_ids):
     if kind == 'TOWER':
         return plan_node(unique("tower"), "building", "tower", transform=transform,
                          params=plan_default_params(scene, PLAN_TOWER_PARAMS))
+    if kind == 'FORTRESS':
+        castle = plan_node("castle", "building", "castle", params=plan_default_params(scene, PLAN_CASTLE_PARAMS))
+        half_w, half_d = scene.wfc_castle_width / 2 + 11.0, scene.wfc_castle_depth / 2 + 9.0
+        return plan_node(
+            unique("fortress"), "compound", "fortress", transform=transform,
+            footprint=[[-half_w, -half_d], [half_w, -half_d], [half_w, half_d], [-half_w, half_d]],
+            params={"fence": "stone", "fence_height": 3.6, "fence_thickness": 0.8, "gate_height": 3.4, "layout": [
+                {"kind": "tower", "at": "corners", "params": {"radius": 2.8, "height": 9.0, "interior": False, "props": False,
+                                                              "lights": False, "windows": 1}},
+                {"kind": "house", "count": [1, 2], "near": "wall"},
+            ]},
+            anchors=[{"id": "gate", "kind": "gate", "pos": [0.0, -half_d, 0.0], "dir": 270.0, "width": 4.0, "level": 0}],
+            children=[castle])
     if kind in ('HOUSE', 'CHAPEL', 'STABLE'):
         return plan_node(unique(kind.lower()), "building", kind.lower(), transform=transform, params={})
     castle = plan_node("castle", "building", "castle", params=plan_default_params(scene, PLAN_CASTLE_PARAMS))
@@ -9984,7 +10047,8 @@ class OBJECT_OT_PlanCreate(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     kind: EnumProperty(items=[('TOWER', "Tower", ""), ('CASTLE', "Castle", ""), ('GROUNDS', "Castle Grounds", ""),
-                              ('HOUSE', "House", ""), ('CHAPEL', "Chapel", ""), ('STABLE', "Stable", "")])
+                              ('HOUSE', "House", ""), ('CHAPEL', "Chapel", ""), ('STABLE', "Stable", ""),
+                              ('FORTRESS', "Fortress", "")])
 
     def execute(self, context):
         plan = plan_new_example(context.scene, self.kind, set(plan_list_ids()))
@@ -11326,7 +11390,7 @@ class VIEW3D_PT_GLAPlans(bpy.types.Panel):
         layout = self.layout
         layout.label(text="New plan at the 3D cursor:")
         row = layout.row(align=True)
-        for kind, label in (('TOWER', "Tower"), ('CASTLE', "Castle"), ('GROUNDS', "Grounds")):
+        for kind, label in (('TOWER', "Tower"), ('CASTLE', "Castle"), ('GROUNDS', "Grounds"), ('FORTRESS', "Fortress")):
             row.operator("object.gla_plan_create", text=label).kind = kind
         row = layout.row(align=True)
         for kind, label in (('HOUSE', "House"), ('CHAPEL', "Chapel"), ('STABLE', "Stable")):
