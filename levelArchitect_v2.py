@@ -9651,26 +9651,22 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
                 op.preset = preset_key
         layout.separator()
 
-        tabs = layout.row(align=True)
-        tabs.prop(scene, "wfc_active_tab", expand=True, icon_only=True)
+        tabs = layout.grid_flow(row_major=True, columns=3, even_columns=True, even_rows=True, align=True)
+        tabs.prop(scene, "wfc_active_tab", expand=True)
         layout.separator()
 
         if scene.wfc_active_tab == 'SETUP':
             self._draw_setup_tab(context, layout)
         elif scene.wfc_active_tab == 'WALLS':
             self._draw_walls_tab(context, layout)
-        elif scene.wfc_active_tab == 'STAIRS':
-            self._draw_stairs_tab(context, layout)
-        elif scene.wfc_active_tab == 'DOORS':
-            self._draw_doors_tab(context, layout)
+        elif scene.wfc_active_tab == 'CONNECTIONS':
+            self._draw_connections_tab(context, layout)
         elif scene.wfc_active_tab == 'PROPS':
             self._draw_props_tab(context, layout)
         elif scene.wfc_active_tab == 'EXPORT':
             self._draw_export_tab(context, layout)
-        elif scene.wfc_active_tab == 'TOWER':
-            self._draw_tower_tab(context, layout)
-        elif scene.wfc_active_tab == 'CASTLE':
-            self._draw_castle_tab(context, layout)
+        elif scene.wfc_active_tab == 'STRUCTURES':
+            self._draw_structures_tab(context, layout)
 
         layout.separator()
         section = _section(layout, "LA_debug", "Debug: Last Generation Params", 'CONSOLE', default_closed=True)
@@ -9841,7 +9837,7 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
             'MOD_SOLIDIFY', 'COLLECTION_COLOR_08',
         )
 
-    def _draw_stairs_tab(self, context, layout):
+    def _draw_stairs_body(self, context, layout):
         scene = context.scene
         col = layout.column(align=True)
         col.prop(scene, "wfc_stairs_per_level", text="Stairs / Level")
@@ -9865,13 +9861,36 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
         bend_style_row.prop(scene, "wfc_stair_bend_style", text="Bend Style")
         if scene.wfc_stair_bend_chance > 0.0 and scene.wfc_corridor_stairs:
             col.label(text="Bending needs a room-based stairwell -- ignored with Corridor Stairs on", icon='INFO')
-        layout.separator()
+
+    def _draw_connections_tab(self, context, layout):
+        """Stairs and Doors share one tab: both are about the passages between spaces."""
+        section = _section(layout, "LA_stairs", "Stairs", 'MOD_BEVEL')
+        if section:
+            self._draw_stairs_body(context, section)
         _step_button(
             layout, "object.generate_level_stairs", "Step 3: Generate Stairs",
             'TRIA_UP', 'COLLECTION_COLOR_02',
         )
+        layout.separator()
+        section = _section(layout, "LA_doors", "Doors", 'MESH_PLANE')
+        if section:
+            self._draw_doors_body(context, section)
+        _step_button(
+            layout, "object.generate_level_doors", "Step 4: Generate Doors",
+            'MOD_LATTICE', 'COLLECTION_COLOR_06',
+        )
 
-    def _draw_doors_tab(self, context, layout):
+    def _draw_structures_tab(self, context, layout):
+        """Tower and Castle share one tab, switched by a Structure selector."""
+        scene = context.scene
+        layout.row(align=True).prop(scene, "wfc_structure_kind", expand=True)
+        layout.separator()
+        if scene.wfc_structure_kind == 'CASTLE':
+            self._draw_castle_tab(context, layout)
+        else:
+            self._draw_tower_tab(context, layout)
+
+    def _draw_doors_body(self, context, layout):
         scene = context.scene
         col = layout.column(align=True)
         row = col.row(align=True)
@@ -9891,11 +9910,6 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
             hinge_row = section.row(align=True)
             hinge_row.enabled = scene.wfc_generate_door_panels
             hinge_row.prop(scene, "wfc_upbge_hinge_physics", text="UPBGE Hinge Physics (Experimental)")
-        layout.separator()
-        _step_button(
-            layout, "object.generate_level_doors", "Step 4: Generate Doors",
-            'MOD_LATTICE', 'COLLECTION_COLOR_06',
-        )
 
     def _draw_castle_tab(self, context, layout):
         scene = context.scene
@@ -10675,21 +10689,28 @@ def register():
                     "punctual lights. Turn off to export geometry only and light the level by "
                     "hand in-engine instead"
     )
+    bpy.types.Scene.wfc_structure_kind = EnumProperty(
+        name="Structure",
+        items=[
+            ('TOWER', "Tower", "Round tower: brick shell, arched door, windows, spiral stairs", 'MESH_CYLINDER', 0),
+            ('CASTLE', "Castle", "Walled castle: corner towers, curtain walls, gate, keep, ruins", 'HOME', 1),
+        ],
+        default='TOWER',
+        description="Which stand-alone structure the Structures tab shows",
+    )
     bpy.types.Scene.wfc_active_tab = EnumProperty(
         name="Active Tab",
         items=[
             ('SETUP', "Setup", "Map, seed, rooms, scale, and style settings, plus Step 1: "
                                 "Generate Blueprint", 'MESH_CUBE', 0),
             ('WALLS', "Walls", "Wall settings, plus Step 2: Generate Walls", 'MOD_BUILD', 1),
-            ('STAIRS', "Stairs", "Stair settings, plus Step 3: Generate Stairs", 'MOD_BEVEL', 2),
-            ('DOORS', "Doors", "Door settings, plus Step 4: Generate Doors", 'MESH_PLANE', 3),
+            ('CONNECTIONS', "Stairs & Doors", "Stair and door settings, plus Step 3: Generate "
+                                              "Stairs and Step 4: Generate Doors", 'MOD_BEVEL', 2),
             ('PROPS', "Props", "Torch and decoration settings, plus Step 5: Generate Props",
-                      'LIGHT', 4),
-            ('EXPORT', "Export", "One-click glTF/GLB export", 'EXPORT', 5),
-            ('TOWER', "Tower", "Round tower: brick-textured shell, arched door, slit windows, "
-                               "battlements", 'MESH_CYLINDER', 6),
-            ('CASTLE', "Castle", "Walled castle: corner towers, curtain walls, gate, keep, ruins",
-                                 'HOME', 7),
+                      'LIGHT', 3),
+            ('EXPORT', "Export", "glTF/GLB export, collision mesh and game packages", 'EXPORT', 4),
+            ('STRUCTURES', "Structures", "Stand-alone buildings built at the 3D cursor: round "
+                                         "tower and walled castle", 'HOME', 5),
         ],
         default='SETUP',
         description="Which step's settings the panel below shows",
@@ -10797,6 +10818,7 @@ def unregister():
     del bpy.types.Scene.wfc_export_binary
     del bpy.types.Scene.wfc_export_include_lights
     del bpy.types.Scene.wfc_active_tab
+    del bpy.types.Scene.wfc_structure_kind
 
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

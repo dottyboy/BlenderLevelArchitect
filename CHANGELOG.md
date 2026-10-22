@@ -9,6 +9,9 @@ reproduced exactly from its settings (see **Debug: Last Generation Params** in t
   UV Tile Size and Isometric Mode moved to a closed *Advanced* section; Separate by Floor/Room and Freeze for Texture Work
   moved into a closed *Tools* section. Walls: the flat list is now *Shape*, *Masonry* (styles, ruin, brick colours) and
   *Windows*. Doors: UPBGE Hinge Physics moved to *Advanced*. All property names are unchanged, so saved scenes and presets work as before.
+- **Step 2: fewer, labelled tabs.** Tabs now show text and sit in a 3-column grid: Setup, Walls, Stairs & Doors, Props,
+  Export, Structures. *Stairs* and *Doors* are one tab (each keeps its own Step button); *Tower* and *Castle* are one
+  *Structures* tab with a Tower/Castle switch. A scene saved with a removed tab name simply opens on the first tab.
 - New headless test draws every tab on a stub layout and checks that each control is still reachable.
 
 ## 0.42.0

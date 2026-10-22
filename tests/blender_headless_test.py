@@ -3243,8 +3243,10 @@ def _draw_panel(layout):
     panel_cls.draw(fake, bpy.context)
 
 
-for tab in ('SETUP', 'WALLS', 'STAIRS', 'DOORS', 'PROPS', 'EXPORT', 'TOWER', 'CASTLE'):
-    scene.wfc_active_tab = tab
+for tab, kind in (('SETUP', 'TOWER'), ('WALLS', 'TOWER'), ('CONNECTIONS', 'TOWER'), ('PROPS', 'TOWER'),
+                  ('EXPORT', 'TOWER'), ('STRUCTURES', 'TOWER'), ('STRUCTURES', 'CASTLE')):
+    scene.wfc_active_tab, scene.wfc_structure_kind = tab, kind
+    tab = tab if tab != 'STRUCTURES' else 'STRUCTURES_' + kind
     log = {"props": [], "ops": [], "sections": []}
     try:
         _draw_panel(_FakeLayout(log, False))
@@ -3262,6 +3264,13 @@ for tab in ('SETUP', 'WALLS', 'STAIRS', 'DOORS', 'PROPS', 'EXPORT', 'TOWER', 'CA
         drew = False
         print("   draw error (collapsed):", repr(exc))
     check("Panel: tab %s draws with every section collapsed" % tab, drew)
+check("Panel: Stairs & Doors share one tab with both Step buttons",
+      {"wfc_stairs_per_level", "wfc_door_style", "wfc_stair_bend_chance"} <= panel_props['CONNECTIONS']
+      and {"LA_stairs", "LA_doors"} <= set(panel_sections['CONNECTIONS']))
+check("Panel: Structures tab shows Tower or Castle controls",
+      "wfc_tower_radius" in panel_props['STRUCTURES_TOWER']
+      and "wfc_castle_width" in panel_props['STRUCTURES_CASTLE']
+      and "wfc_structure_kind" in panel_props['STRUCTURES_CASTLE'])
 check("Panel: Walls tab is split into Shape / Masonry / Windows",
       {"LA_wall_shape", "LA_wall_masonry", "LA_wall_windows"} <= set(panel_sections['WALLS']))
 check("Panel: Setup has Floors & Elevation, Advanced and Tools sections",
@@ -3276,7 +3285,7 @@ check("Panel: every Walls prop still drawn",
        "wfc_window_chance", "wfc_window_width", "wfc_window_sill", "wfc_window_height"}
       <= panel_props['WALLS'])
 check("Panel: hinge physics + UV tile size + iso mode still reachable",
-      "wfc_upbge_hinge_physics" in panel_props['DOORS']
+      "wfc_upbge_hinge_physics" in panel_props['CONNECTIONS']
       and {"wfc_uv_tile_size", "wfc_iso_mode"} <= panel_props['SETUP'])
 
 # ==============================================================================

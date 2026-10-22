@@ -71,12 +71,12 @@ mode uses procedural dungeon/cave/open-area shaders; *Per-Floor Overrides* blend
 
 Both are standalone and built at the **3D cursor**, independent of the level blueprint.
 
-**Tower tab** — a round tower with a brick-textured shell, a real arched door, slit windows (kept clear of the stairs),
+**Structures tab, Tower** — a round tower with a brick-textured shell, a real arched door, slit windows (kept clear of the stairs),
 stone frames, plinth, cornice and battlements. **Brick Detail** (Low / Medium / High) sets how much real geometry is added to
 the textured shell. Inside: floors and **spiral stairs** with an optional **Stair Railing**, hanging **Lanterns** with real
 lights, and **Furniture** on every floor. **Brick Color** tints the bricks.
 
-**Castle tab** — four corner towers (with the same interiors), curtain walls with a parapet and a walkway behind it,
+**Structures tab, Castle** — four corner towers (with the same interiors), curtain walls with a parapet and a walkway behind it,
 arrow slits, an arched gate, a keep with a furnished hall (**Hall Furniture**), and a courtyard. Each tower has a floor at
 the wall-walk height with doors out onto both walls, so ground door → spiral stairs → wall walk is one continuous path.
 **Brick Color** is one tint for everything, or **Mixed** (walls, keep and each tower get their own).
@@ -85,7 +85,7 @@ the wall-walk height with doors out onto both walls, so ground door → spiral s
 
 ## Ruins
 
-The **Ruin** slider (Tower tab, Castle tab, and *Wall Ruin* / the Round-room ruin on the Walls tab) breaks masonry down: wall
+The **Ruin** slider (Structures tab, and *Wall Ruin* / the Round-room ruin on the Walls tab) breaks masonry down: wall
 tops become a jagged edge that steps along whole brick courses, deep breaches open up, an arch or window whose top fell away
 becomes a plain gap, battlements disappear, rubble lies around the base, and upper floors above the lowest broken wall are
 gone. Doorways stay passable. The result is seeded, so a ruin is reproducible.
@@ -103,7 +103,7 @@ gone. Doorways stay passable. The result is seeded, so a ruin is reproducible.
   coordinates (x right, y up, z = −Blender y).
 * **Export Package per Floor** — one `<name>_f0`, `_f1`… package per floor (or per sub-level), each with floor-relative
   positions and stair links to its neighbours. Needs Wall/Door/Stair grouping = Per Floor and *Separate by Floor/Room* run first.
-* **Export Castle Package** (Castle tab) — the same format for a castle: walkable courtyard, gate passage, apron, the furnished
+* **Export Castle Package** (Structures tab, Castle) — the same format for a castle: walkable courtyard, gate passage, apron, the furnished
   keep hall and its props.
 
 Worked example: the sibling game project *Vampire Adventure* loads these packages as playable locations (rectangle-based
