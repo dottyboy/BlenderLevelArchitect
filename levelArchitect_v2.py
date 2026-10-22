@@ -33,7 +33,7 @@ from bpy_extras.io_utils import ExportHelper, ImportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 53, 0),
+    "version": (0, 54, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -7365,7 +7365,7 @@ def _masonry_images(prefix, rows, row_h, lens_choices, palette, seed, joint_m=0.
     blotch = (g00 * (1 - fx) + g01 * fx) * (1 - fy) + (g10 * (1 - fx) + g11 * fx) * fy - 0.5
     base = palette(np, tint, tint2, hv)
     base = base * (1.0 + contrast * (0.80 + 0.40 * (hv[..., None] - 0.82) / 0.18 - 1.0)) * (1 + noise[..., None] * 0.5)
-    base = base * (1.0 + blotch[..., None] * wear * 4.0)
+    base = base * (1.0 + blotch[..., None] * wear * 2.6)
     mortar = np.array([0.20, 0.19, 0.17])
     albedo = np.where((d_edge < joint + 0.5)[..., None], mortar, base)
     albedo = np.clip(albedo * (0.55 + 0.45 * np.clip(height * 1.6, 0, 1))[..., None], 0, 1)
@@ -10105,6 +10105,400 @@ def plan_set_param(root, node_ref, key, value):
     return old
 
 
+# ------------------------------------------------------------------------------
+# Floor plans: SVG and DXF drawings become plans. Closed shapes are buildings (an oriented rectangle: width, depth,
+# rotation) or, when their label says "compound / yard / wall / fence", compounds that adopt the buildings inside
+# them; open lines are roads (one bare-road block); circles are trees or towers. A shape's kind comes from its label
+# (SVG id or inkscape:label, DXF layer): "house", "chapel_2", "stable-north" ...
+# ------------------------------------------------------------------------------
+PLAN_IMPORT_KINDS = {"house": "house", "cottage": "house", "home": "house", "chapel": "chapel", "church": "chapel", "stable": "stable",
+                     "stall": "stable", "barn": "barn", "shed": "barn", "well": "well", "hut": "hut", "tower": "tower", "keep": "keep",
+                     "tree": "tree", "barrel": "barrel", "crate": "crate", "haystack": "haystack", "hay": "haystack"}
+PLAN_IMPORT_YARDS = {"compound": "none", "yard": "none", "farm": "wood", "fence": "wood", "pen": "wood", "ward": "stone", "wall": "stone",
+                     "enclosure": "stone", "castle": "stone", "fortress": "stone"}
+
+
+def _svg_matrix(text):
+    """The 2D affine matrix (a, b, c, d, e, f) of an SVG transform attribute."""
+    m = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+
+    def mul(p, q):
+        return (p[0] * q[0] + p[2] * q[1], p[1] * q[0] + p[3] * q[1], p[0] * q[2] + p[2] * q[3], p[1] * q[2] + p[3] * q[3],
+                p[0] * q[4] + p[2] * q[5] + p[4], p[1] * q[4] + p[3] * q[5] + p[5])
+    for name, args in re.findall(r"(\w+)\s*\(([^)]*)\)", text or ""):
+        v = [float(x) for x in re.findall(r"-?\d*\.?\d+(?:[eE][-+]?\d+)?", args)]
+        if name == "translate" and v:
+            t = (1, 0, 0, 1, v[0], v[1] if len(v) > 1 else 0.0)
+        elif name == "scale" and v:
+            t = (v[0], 0, 0, v[1] if len(v) > 1 else v[0], 0, 0)
+        elif name == "rotate" and v:
+            a = math.radians(v[0])
+            c, s = math.cos(a), math.sin(a)
+            t = (c, s, -s, c, 0, 0)
+            if len(v) >= 3:
+                t = mul(mul((1, 0, 0, 1, v[1], v[2]), t), (1, 0, 0, 1, -v[1], -v[2]))
+        elif name == "matrix" and len(v) == 6:
+            t = tuple(v)
+        else:
+            continue
+        m = mul(m, t)
+    return m
+
+
+def _svg_path_points(d):
+    """Subpaths [(points, closed)] of an SVG path (curves are reduced to their end points)."""
+    tokens = re.findall(r"([MmLlHhVvZzCcSsQqTtAa])|(-?\d*\.?\d+(?:[eE][-+]?\d+)?)", d or "")
+    subs, cur, closed = [], [], False
+    cx = cy = 0.0
+    cmd, nums, i = None, [], 0
+    arity = {"M": 2, "L": 2, "H": 1, "V": 1, "C": 6, "S": 4, "Q": 4, "T": 2, "A": 7, "Z": 0}
+    seq = []
+    for c, n in tokens:
+        seq.append(c if c else float(n))
+    pos = 0
+    start = (0.0, 0.0)
+    while pos < len(seq):
+        if isinstance(seq[pos], str):
+            cmd = seq[pos]
+            pos += 1
+            if cmd in "Zz":
+                if cur:
+                    subs.append((cur, True))
+                    cx, cy = start
+                    cur = []
+                continue
+        k = arity.get(cmd.upper(), 2)
+        if cmd is None or pos + k > len(seq) or any(isinstance(x, str) for x in seq[pos:pos + k]):
+            pos += 1
+            continue
+        a = seq[pos:pos + k]
+        pos += k
+        rel = cmd.islower()
+        u = cmd.upper()
+        if u == "H":
+            cx = a[0] + (cx if rel else 0.0)
+        elif u == "V":
+            cy = a[0] + (cy if rel else 0.0)
+        else:
+            ex, ey = a[-2], a[-1]
+            cx, cy = (cx + ex, cy + ey) if rel else (ex, ey)
+        if u == "M":
+            if cur:
+                subs.append((cur, False))
+            cur, start = [], (cx, cy)
+            cmd = "l" if rel else "L"
+        cur.append((cx, cy))
+    if cur:
+        subs.append((cur, False))
+    return subs
+
+
+def plan_parse_svg(text):
+    """Shapes of an SVG drawing: [{'kind': 'poly'|'line'|'circle', 'pts': [...], 'r': float, 'label': str, 'width': float}]."""
+    import xml.etree.ElementTree as ET
+    try:
+        tree = ET.fromstring(text)
+    except ET.ParseError as exc:
+        raise PlanError("not a readable SVG file: %s" % exc)
+    shapes = []
+    ink = "{http://www.inkscape.org/namespaces/inkscape}label"
+
+    def tag(e):
+        return e.tag.split("}")[-1]
+
+    def stroke_width(e):
+        m = re.search(r"stroke-width:\s*([\d.]+)", e.get("style", "")) or None
+        return float(m.group(1)) if m else float(e.get("stroke-width", 0) or 0)
+
+    def walk(e, mat, inherited):
+        t = _svg_matrix(e.get("transform"))
+        a, b, c, d, ee, ff = mat
+        mat = (a * t[0] + c * t[1], b * t[0] + d * t[1], a * t[2] + c * t[3], b * t[2] + d * t[3], a * t[4] + c * t[5] + ee, b * t[4] + d * t[5] + ff)
+        label = e.get(ink) or e.get("data-kind") or e.get("id") or inherited
+        if tag(e) in ("defs", "metadata", "style", "title", "desc"):
+            return
+
+        def tr(x, y):
+            return (mat[0] * x + mat[2] * y + mat[4], mat[1] * x + mat[3] * y + mat[5])
+        scale = math.sqrt(abs(mat[0] * mat[3] - mat[1] * mat[2]))
+        name = tag(e)
+        sw = stroke_width(e) * scale
+        if name == "rect":
+            x, y, w, h = (float(e.get(k, 0) or 0) for k in ("x", "y", "width", "height"))
+            if w > 0 and h > 0:
+                shapes.append({"kind": "poly", "pts": [tr(x, y), tr(x + w, y), tr(x + w, y + h), tr(x, y + h)], "label": label or "", "width": sw})
+        elif name in ("polygon", "polyline"):
+            v = [float(q) for q in re.findall(r"-?\d*\.?\d+(?:[eE][-+]?\d+)?", e.get("points", ""))]
+            pts = [tr(v[i], v[i + 1]) for i in range(0, len(v) - 1, 2)]
+            if len(pts) >= 2:
+                shapes.append({"kind": "poly" if name == "polygon" and len(pts) >= 3 else "line", "pts": pts, "label": label or "", "width": sw})
+        elif name == "line":
+            x1, y1, x2, y2 = (float(e.get(k, 0) or 0) for k in ("x1", "y1", "x2", "y2"))
+            shapes.append({"kind": "line", "pts": [tr(x1, y1), tr(x2, y2)], "label": label or "", "width": sw})
+        elif name in ("circle", "ellipse"):
+            rx = float(e.get("r", e.get("rx", 0)) or 0)
+            ry = float(e.get("r", e.get("ry", rx)) or rx)
+            if rx > 0:
+                shapes.append({"kind": "circle", "pts": [tr(float(e.get("cx", 0) or 0), float(e.get("cy", 0) or 0))],
+                               "r": (rx + ry) / 2.0 * scale, "label": label or "", "width": sw})
+        elif name == "path":
+            for pts, closed in _svg_path_points(e.get("d", "")):
+                pts = [tr(x, y) for x, y in pts]
+                if len(pts) >= 3 and closed:
+                    shapes.append({"kind": "poly", "pts": pts, "label": label or "", "width": sw})
+                elif len(pts) >= 2:
+                    shapes.append({"kind": "line", "pts": pts, "label": label or "", "width": sw})
+        for child in e:
+            walk(child, mat, label if tag(e) == "g" else inherited)
+    walk(tree, (1.0, 0.0, 0.0, 1.0, 0.0, 0.0), "")
+    return shapes
+
+
+def plan_parse_dxf(text):
+    """Shapes of an ASCII DXF drawing (LINE, LWPOLYLINE, POLYLINE/VERTEX, CIRCLE); the layer name is the label."""
+    lines = [ln.strip() for ln in text.splitlines()]
+    pairs = []
+    for i in range(0, len(lines) - 1, 2):
+        try:
+            pairs.append((int(lines[i]), lines[i + 1]))
+        except ValueError:
+            raise PlanError("not a readable ASCII DXF file (line %d)" % (i + 1))
+    shapes, ent, in_entities = [], None, False
+
+    def flush(e):
+        if not e:
+            return
+        kind, d = e["type"], e["data"]
+        label = d.get("layer", "")
+        if kind == "LINE" and all(k in d for k in ("x", "y", "x2", "y2")):
+            shapes.append({"kind": "line", "pts": [(d["x"][0], d["y"][0]), (d["x2"][0], d["y2"][0])], "label": label, "width": 0.0})
+        elif kind in ("LWPOLYLINE", "POLYLINE"):
+            pts = list(zip(d.get("x", []), d.get("y", [])))
+            closed = bool(int(d.get("flag", [0])[0]) & 1)
+            if len(pts) >= 3 and closed:
+                shapes.append({"kind": "poly", "pts": pts, "label": label, "width": 0.0})
+            elif len(pts) >= 2:
+                shapes.append({"kind": "line", "pts": pts, "label": label, "width": 0.0})
+        elif kind == "CIRCLE" and "x" in d and "r" in d:
+            shapes.append({"kind": "circle", "pts": [(d["x"][0], d["y"][0])], "r": d["r"][0], "label": label, "width": 0.0})
+    for code, val in pairs:
+        if code == 0 and val == "SECTION":
+            continue
+        if code == 2 and val == "ENTITIES":
+            in_entities = True
+            continue
+        if code == 0 and val == "ENDSEC":
+            flush(ent)
+            ent, in_entities = None, False
+            continue
+        if not in_entities:
+            continue
+        if code == 0:
+            if val == "VERTEX" and ent and ent["type"] == "POLYLINE":
+                ent["vertex"] = True
+                continue
+            if val == "SEQEND":
+                flush(ent)
+                ent = None
+                continue
+            flush(ent)
+            ent = {"type": val, "data": {}} if val in ("LINE", "LWPOLYLINE", "POLYLINE", "CIRCLE") else None
+            continue
+        if ent is None:
+            continue
+        d = ent["data"]
+        if ent["type"] == "POLYLINE" and not ent.get("vertex") and code in (10, 20, 30):
+            continue                                              # the header's own point is not a vertex
+        try:
+            if code == 8:
+                d["layer"] = val
+            elif code == 70:
+                d["flag"] = [int(float(val))]
+            elif code == 10:
+                d.setdefault("x", []).append(float(val)) if ent["type"] != "LINE" else d.__setitem__("x", [float(val)])
+            elif code == 20:
+                d.setdefault("y", []).append(float(val)) if ent["type"] != "LINE" else d.__setitem__("y", [float(val)])
+            elif code == 11:
+                d["x2"] = [float(val)]
+            elif code == 21:
+                d["y2"] = [float(val)]
+            elif code == 40 and ent["type"] == "CIRCLE":
+                d["r"] = [float(val)]
+        except ValueError:
+            continue
+    flush(ent)
+    return shapes
+
+
+def _min_rect(points):
+    """(cx, cy, w, d, rot_degrees) of the smallest rectangle around a polygon (w >= d, rot = direction of w)."""
+    hull = _convex_hull(points)
+    best = None
+    for i in range(len(hull)):
+        a, b = hull[i], hull[(i + 1) % len(hull)]
+        ang = math.atan2(b[1] - a[1], b[0] - a[0])
+        c, s = math.cos(-ang), math.sin(-ang)
+        xs = [p[0] * c - p[1] * s for p in hull]
+        ys = [p[0] * s + p[1] * c for p in hull]
+        w, d = max(xs) - min(xs), max(ys) - min(ys)
+        if best is None or w * d < best[0]:
+            mx, my = (max(xs) + min(xs)) / 2.0, (max(ys) + min(ys)) / 2.0
+            cr, sr = math.cos(ang), math.sin(ang)
+            best = (w * d, mx * cr - my * sr, mx * sr + my * cr, w, d, math.degrees(ang))
+    _a, cx, cy, w, d, rot = best
+    if d > w:
+        w, d, rot = d, w, rot + 90.0
+    return cx, cy, w, d, rot % 360.0
+
+
+def plan_import_shapes(shapes, plan_id="imported", scale=1.0, flip_y=True, style=None):
+    """Turns parsed drawing shapes into a plan tree (a 'settlement' root). `scale` converts drawing units to metres;
+    SVG y points down, so flip_y mirrors it. Raises PlanError if nothing usable is found."""
+    if not shapes:
+        raise PlanError("the drawing has no shapes")
+    biome_words = {**{b: b for b in PLAN_BIOMES}, "mountains": "mountain", "region": None}
+    region_shapes, rest = [], []
+    for s_ in shapes:                          # closed shapes labelled with a biome ("desert", "forest_2") mark biome regions
+        word = next((w for w in re.split(r"[^a-zA-Z]+", (s_["label"] or "").lower()) if w in biome_words), None)
+        if word is not None and s_["kind"] == "poly":
+            region_shapes.append((biome_words[word], s_))
+        else:
+            rest.append(s_)
+    regions = [(b, s_) for b, s_ in region_shapes if b]
+    allp = [p for s_ in shapes for p in s_["pts"]]
+    shapes = rest
+    ox = (min(p[0] for p in allp) + max(p[0] for p in allp)) / 2.0
+    oy = (min(p[1] for p in allp) + max(p[1] for p in allp)) / 2.0
+    sy = -1.0 if flip_y else 1.0
+
+    def m(p):
+        return ((p[0] - ox) * scale, (p[1] - oy) * scale * sy)
+    counters, roads, buildings, yards = {}, [], [], []
+
+    def new_id(kind):
+        counters[kind] = counters.get(kind, 0) + 1
+        return "%s_%d" % (kind, counters[kind])
+
+    def kind_of(label, table):
+        for word in re.split(r"[^a-zA-Z]+", (label or "").lower()):
+            if word in table:
+                return table[word], word
+        return None, None
+    lo_hi = PLAN_HOUSE_RANGES
+    for s_ in shapes:
+        if s_["kind"] == "line":
+            roads.append(([m(p) for p in s_["pts"]], s_.get("width", 0.0) * scale))
+        elif s_["kind"] == "circle":
+            c = m(s_["pts"][0])
+            r = s_["r"] * scale
+            kind = kind_of(s_["label"], PLAN_IMPORT_KINDS)[0] or ("tree" if r < 2.2 else "tower")
+            if kind == "tower":
+                params = {"radius": round(min(max(r, 1.5), 12.0), 2)}
+            elif kind == "tree":
+                params = {"height": round(min(max(r * 3.0, 2.0), 20.0), 1)}
+            else:
+                params = {}
+            buildings.append(plan_node(new_id(kind), "building", kind, transform={"x": round(c[0], 3), "y": round(c[1], 3), "z": 0.0, "rot": 0.0},
+                                       params=params))
+        else:
+            pts = [m(p) for p in s_["pts"]]
+            if abs(_poly_area(pts)) < 1.0:
+                continue
+            yard, word = kind_of(s_["label"], PLAN_IMPORT_YARDS)
+            if yard is not None:
+                fence = yard
+                for w_ in re.split(r"[^a-zA-Z]+", (s_["label"] or "").lower()):
+                    if w_ in ("wood", "stone", "none"):
+                        fence = w_
+                if _poly_area(pts) < 0:
+                    pts = pts[::-1]
+                cx = sum(p[0] for p in pts) / len(pts)
+                cy = sum(p[1] for p in pts) / len(pts)
+                rel = [[round(p[0] - cx, 3), round(p[1] - cy, 3)] for p in pts]
+                node = plan_node(new_id("yard"), "compound", "yard", transform={"x": round(cx, 3), "y": round(cy, 3), "z": 0.0, "rot": 0.0},
+                                 footprint=rel, params={"fence": fence})
+                if fence != "none":                      # a gate in the middle of the southernmost edge
+                    edges = [(rel[i], rel[(i + 1) % len(rel)]) for i in range(len(rel))]
+                    a, b = min(edges, key=lambda e_: (e_[0][1] + e_[1][1]))
+                    mid = ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0)
+                    out_ang = math.degrees(math.atan2(-(b[0] - a[0]), b[1] - a[1])) % 360.0
+                    node["anchors"] = [{"id": "gate", "kind": "gate", "pos": [round(mid[0], 3), round(mid[1], 3), 0.0],
+                                        "dir": round(out_ang, 1), "width": 4.0, "level": 0}]
+                yards.append((node, pts))
+                continue
+            kind = kind_of(s_["label"], PLAN_IMPORT_KINDS)[0] or "house"
+            cx, cy, w, d, rot = _min_rect(pts)
+            if kind in ("house", "chapel", "stable", "barn", "hut"):
+                params = {"width": round(min(max(w, 2.5 if kind != "house" else 2.0), lo_hi["width"][1]), 2),
+                          "depth": round(min(max(d, 2.5 if kind != "house" else 2.0), lo_hi["depth"][1]), 2)}
+            elif kind == "keep":
+                params = {"size": round(min(max(max(w, d), 6.0), 30.0), 1)}
+            elif kind == "tower":
+                params = {"radius": round(min(max(math.sqrt(abs(_poly_area(pts)) / math.pi), 1.5), 12.0), 2)}
+            elif kind == "tree":
+                params = {"height": round(min(max(math.sqrt(abs(_poly_area(pts))) * 2.5, 2.0), 20.0), 1)}
+            else:
+                params = {}
+            buildings.append(plan_node(new_id(kind), "building", kind, transform={"x": round(cx, 3), "y": round(cy, 3), "z": 0.0, "rot": round(rot, 2)},
+                                       params=params))
+    children = []
+    for b in buildings:                                  # adopt buildings into the smallest yard that contains their centre
+        t = b["transform"]
+        holders = [(abs(_poly_area(pts)), node, pts) for node, pts in yards if _point_in_poly((t["x"], t["y"]), pts)]
+        if holders:
+            _a, node, _pts = min(holders, key=lambda h: h[0])
+            b["transform"] = {**t, "x": round(t["x"] - node["transform"]["x"], 3), "y": round(t["y"] - node["transform"]["y"], 3)}
+            node["children"].append(b)
+        else:
+            children.append(b)
+    children = [node for node, _p in yards] + children
+    if roads:
+        index, nodes_, edges_ = {}, {}, []
+
+        def node_id(p):
+            key = (round(p[0] / 0.5), round(p[1] / 0.5))
+            if key not in index:
+                index[key] = "n%d" % len(index)
+                nodes_[index[key]] = [round(p[0], 3), round(p[1], 3)]
+            return index[key]
+        for pts, _w in roads:
+            for a, b in zip(pts, pts[1:]):
+                ia, ib = node_id(a), node_id(b)
+                if ia != ib and [ia, ib] not in edges_ and [ib, ia] not in edges_:
+                    edges_.append([ia, ib])
+        widths = sorted(w for _p, w in roads if w > 0)
+        width = round(min(max(widths[len(widths) // 2] if widths else 5.0, 3.0), 9.0), 1)
+        if edges_:
+            children.append(plan_node("roads", "block", "street", params={"road_graph": {"nodes": nodes_, "edges": edges_}, "road_width": width,
+                                                                        "fill": []}))
+    if not children and not regions:
+        raise PlanError("no usable shapes (closed outlines, lines or circles) in the drawing")
+    if regions:                                # biome regions turn the plan into a terrain with a second biome inside them
+        biome = regions[0][0]
+        w = (max(p[0] for p in allp) - min(p[0] for p in allp)) * scale + 80.0
+        d = (max(p[1] for p in allp) - min(p[1] for p in allp)) * scale + 80.0
+        polys = [[m(p) for p in s_["pts"]] for b, s_ in regions if b == biome]
+        base = "meadow" if biome != "meadow" else "forest"
+        return plan_node(plan_id, "terrain", "terrain", style=style, children=children, params={
+            "biome": base, "region_biome": biome, "width": round(min(max(w, 40.0), 1000.0), 0), "depth": round(min(max(d, 40.0), 1000.0), 0),
+            "region_polygons": [{"polygon": [[round(q[0], 2), round(q[1], 2)] for q in poly], "blend": 14.0} for poly in polys],
+            "region_noise": False})
+    return plan_node(plan_id, "settlement", "imported", style=style, children=children)
+
+
+def plan_import_file(path, plan_id=None, scale=1.0, style=None):
+    """Reads an .svg or .dxf and returns the plan tree (not stored). Raises PlanError / OSError."""
+    ext = os.path.splitext(path)[1].lower()
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        text = fh.read()
+    base = re.sub(r"[^a-z0-9_]+", "_", os.path.splitext(os.path.basename(path))[0].lower()).strip("_") or "imported"
+    if ext == ".svg":
+        return plan_import_shapes(plan_parse_svg(text), plan_id or base, scale, True, style)
+    if ext == ".dxf":
+        return plan_import_shapes(plan_parse_dxf(text), plan_id or base, scale, False, style)
+    raise PlanError("only .svg and .dxf drawings can be imported (got %r)" % ext)
+
+
 def plan_to_json(root, revision=1):
     """The full tree as a gla-plan/1 JSON document (text)."""
     doc = dict(root)
@@ -11648,7 +12042,7 @@ def plan_terrain_params(params):
     """Terrain defaults + the biome's numbers + the node's own params, validated. Raises PlanError."""
     params = dict(params or {})
     merged = {**PLAN_TERRAIN_DEFAULTS, **{k: v for k, v in params.items() if k in PLAN_TERRAIN_DEFAULTS or k in PLAN_TERRAIN_OPTIONAL
-                                          or k in ("water", "rivers", "ridged", "region_biome", "region_scale", "region_bias", "region_blend")}}
+                                          or k in ("water", "rivers", "ridged", "region_polygons", "region_noise", "region_biome", "region_scale", "region_bias", "region_blend")}}
     if merged["biome"] not in PLAN_BIOMES:
         raise PlanError("params.biome = %r is not one of %s" % (merged["biome"], ", ".join(PLAN_BIOMES)))
     for key, (lo, hi) in {**PLAN_TERRAIN_RANGES, **{k: v for k, v in PLAN_TERRAIN_OPTIONAL.items() if k in params}}.items():
@@ -11686,6 +12080,26 @@ def plan_terrain_params(params):
     if other is not None and other not in PLAN_BIOMES:
         raise PlanError("params.region_biome = %r is not one of %s" % (other, ", ".join(PLAN_BIOMES)))
     merged["region_biome"] = other
+    polys = params.get("region_polygons")
+    if polys is not None:
+        if other is None:
+            raise PlanError("params.region_polygons needs params.region_biome (the biome that takes over inside them)")
+        if not isinstance(polys, list) or not polys:
+            raise PlanError("params.region_polygons must be a list of polygons")
+        clean = []
+        for item in polys:
+            pts = item.get("polygon") if isinstance(item, dict) else item
+            blend = float(item.get("blend", 12.0)) if isinstance(item, dict) else 12.0
+            if not (isinstance(pts, list) and len(pts) >= 3 and all(isinstance(q, (list, tuple)) and len(q) == 2
+                                                                     and all(isinstance(c, (int, float)) and not isinstance(c, bool) for c in q) for q in pts)):
+                raise PlanError("params.region_polygons: each region needs at least three [x, y] points")
+            if not 0.5 <= blend <= 100.0:
+                raise PlanError("params.region_polygons: blend must be 0.5..100 metres")
+            clean.append({"polygon": [(float(q[0]), float(q[1])) for q in pts], "blend": blend})
+        merged["region_polygons"] = clean
+        merged["region_noise"] = bool(params.get("region_noise", False))
+    else:
+        merged["region_polygons"], merged["region_noise"] = None, True
     for key, (lo, hi) in PLAN_TERRAIN_REGION.items():
         v = params.get(key, {"region_scale": 140.0, "region_bias": 0.0, "region_blend": 0.15}[key])
         if isinstance(v, bool) or not isinstance(v, (int, float)) or v < lo or v > hi:
@@ -11826,14 +12240,21 @@ def _terrain_region(tp, X, Y):
     import numpy as np
     if not tp.get("region_biome"):
         return np.zeros(X.shape)
-    sc = tp["region_scale"]
-    seed = tp.get("noise_seed", 0) + 311
-    n = np.array([plan_fbm2(x / sc, y / sc, seed, 3) for x, y in zip(X.tolist(), Y.tolist())]) + tp["region_bias"]
-    # fbm clusters near 0.5; stretch it so the two biomes get comparable shares
-    n = 0.5 + (n - 0.5) * 2.2
-    lo, hi = 0.5 - tp["region_blend"], 0.5 + tp["region_blend"]
-    t = np.clip((n - lo) / (hi - lo), 0.0, 1.0)
-    return t * t * (3.0 - 2.0 * t)
+    mask = np.zeros(X.shape)
+    if tp.get("region_noise", True):
+        sc = tp["region_scale"]
+        seed = tp.get("noise_seed", 0) + 311
+        n = np.array([plan_fbm2(x / sc, y / sc, seed, 3) for x, y in zip(X.tolist(), Y.tolist())]) + tp["region_bias"]
+        # fbm clusters near 0.5; stretch it so the two biomes get comparable shares
+        n = 0.5 + (n - 0.5) * 2.2
+        lo, hi = 0.5 - tp["region_blend"], 0.5 + tp["region_blend"]
+        t = np.clip((n - lo) / (hi - lo), 0.0, 1.0)
+        mask = t * t * (3.0 - 2.0 * t)
+    for item in tp.get("region_polygons") or []:               # inside a polygon the second biome rules; it fades out over `blend` metres
+        d = _np_poly_dist(X, Y, item["polygon"])
+        t = np.clip(d / item["blend"], 0.0, 1.0)
+        mask = np.maximum(mask, 1.0 - t * t * (3.0 - 2.0 * t))
+    return mask
 
 
 def _terrain_write_attributes(mesh, nx, ny, pad_w, pad_h, edge, region):
@@ -11892,7 +12313,7 @@ def _terrain_river_paths(tp, pads, seed):
         return []
     rng = random.Random(seed + 4242)
     w, d = tp["width"], tp["depth"]
-    best, best_clear = None, -1.0
+    best, best_clear = None, -1e9
     for attempt in range(8):
         x0 = rng.uniform(-w * 0.38, w * 0.38)
         wob = rng.uniform(18.0, 40.0)
@@ -12285,7 +12706,7 @@ def _terrain_scatter(context, tp, sampler, pads, seed, path, world, sea_level, r
         share = (1.0 - region_share) if side == 0 else region_share
         if not tp.get("region_biome"):
             share = 1.0
-        n_want = int(rule["per_ha"] * area_ha * tp["scatter"] * share)
+        n_want = int(round(rule["per_ha"] * area_ha * tp["scatter"] * share))
         if n_want <= 0:
             continue
         leaves = list(rule.get("leaf", ["GREEN"]))
@@ -12852,6 +13273,33 @@ class OBJECT_OT_PlanLoad(bpy.types.Operator, ImportHelper):
             self.report({'ERROR'}, str(exc))
             return {'CANCELLED'}
         self.report({'INFO'}, "Loaded plan '%s'." % root["id"])
+        return {'FINISHED'}
+
+
+class OBJECT_OT_PlanImport(bpy.types.Operator, ImportHelper):
+    """Imports a floor-plan drawing (.svg or .dxf) as a plan: closed shapes become buildings or yards, lines roads, circles trees or towers."""
+    bl_idname = "object.gla_plan_import"
+    bl_label = "Import Floor Plan"
+    bl_options = {'REGISTER', 'UNDO'}
+    filename_ext = ".svg"
+    filter_glob: StringProperty(default="*.svg;*.dxf", options={'HIDDEN'})
+    scale: FloatProperty(name="Metres per unit", default=1.0, min=0.001, max=1000.0,
+                         description="Size of one drawing unit in metres (SVG pixels / DXF units)")
+
+    def execute(self, context):
+        try:
+            root = plan_import_file(self.filepath, None, self.scale,
+                                    context.scene.wfc_plan_style if context.scene.wfc_plan_style != 'medieval' else None)
+            ids = set(plan_list_ids())
+            n, base = 1, root["id"]
+            while root["id"] in ids:
+                n += 1
+                root["id"] = "%s_%d" % (base, n)
+            plan_write_to_blend(context.scene, root)
+        except (PlanError, OSError) as exc:
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+        self.report({'INFO'}, "Imported plan '%s': %s." % (root["id"], plan_summary(root)))
         return {'FINISHED'}
 
 
@@ -14125,7 +14573,9 @@ class VIEW3D_PT_GLAPlans(bpy.types.Panel):
             box.prop(context.scene, "wfc_plan_edit_value", text="Value")
             for plan_id in plan_list_ids():
                 box.operator("object.gla_plan_set_param", text="Set on %s" % plan_id).plan_id = plan_id
-        layout.operator("object.gla_plan_load", text="Load Plan...", icon='IMPORT')
+        row = layout.row(align=True)
+        row.operator("object.gla_plan_load", text="Load Plan...", icon='IMPORT')
+        row.operator("object.gla_plan_import", text="Import SVG/DXF...", icon='IMPORT')
 
 
 # ==============================================================================
@@ -14148,6 +14598,7 @@ classes = (
     OBJECT_OT_PlanRemove,
     OBJECT_OT_PlanSave,
     OBJECT_OT_PlanLoad,
+    OBJECT_OT_PlanImport,
     OBJECT_OT_GenerateLevelTower,
     OBJECT_OT_GenerateLevelCastle,
     OBJECT_OT_ExportGamePackage,

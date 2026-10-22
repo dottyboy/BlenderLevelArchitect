@@ -108,7 +108,10 @@ placed on it and the ground is flattened under them.
   and rock/earth colours, floors the second biome at the first one's water line, and scatter uses each biome's rules in proportion.
 * **Bridges.** Roads of blocks give way to a river (their pad weight fades inside the river's bank); each crossing gets a stone bridge along the road.
 * **Ridged.** `"ridged": 0..1` turns the noise into crest lines (desert 0.85, mountains 0.5, others 0).
-* Not yet: polygon-shaped biome regions blended across one terrain, terrain from a heightmap image, roads that curve with the ground.
+* **Polygon regions.** `"region_polygons": [[[x, y], ...], {"polygon": [...], "blend": 12.0}]` (needs `region_biome`): the second biome rules inside the
+  polygons and fades out over `blend` metres; `"region_noise": true` combines them with the noise mask.
+* **Import.** `plan_import_file(path)` turns an `.svg` or `.dxf` into a `settlement` (or, with biome-labelled shapes, a `terrain`) tree — see the User Guide.
+* Not yet: more than one distinct region biome per terrain blended across one terrain, terrain from a heightmap image, roads that curve with the ground.
 
 ### Block extras
 

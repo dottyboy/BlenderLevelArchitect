@@ -97,6 +97,14 @@ meadow, forest, desert, tundra, mountains, island — bring their own palette, r
 
 <p align="center"><img src="docs/img/biomes_sheet.png" alt="The same hamlet, farm and watchtower in the meadow, forest, desert, tundra, mountains and island biomes" width="900"></p>
 
+### From a floor plan
+
+<p align="center"><img src="docs/img/svgplan.png" alt="A village built from an SVG floor plan: houses, a chapel, a walled farm, roads and a tower, with a desert region marked in the drawing" width="900"></p>
+
+Draw the site in Inkscape (or export a DXF from CAD), label the shapes (`house`, `chapel`, `farm_yard_wood`, `road_main`, `desert_dunes` ...) and import it —
+closed outlines become buildings or fenced yards, lines become roads, circles trees and towers, and a shape labelled with a biome becomes a terrain region.
+Try [docs/examples/village_plan.svg](docs/examples/village_plan.svg) with *Metres per unit* = 0.12.
+
 ### Seven style packs and a mix
 
 <p align="center"><img src="docs/img/styles_sheet.png" alt="The same village in Medieval, Egyptian, Mexican, Chinese, Inca, Futuristic and Alpine styles, and a mixed street" width="900"></p>

@@ -210,6 +210,27 @@ and the vegetation are placed at build time, so press **Build** again after big 
 `depth`, `resolution` (grid cell, smaller = finer and slower), `scatter` (vegetation density, 0 = none), and override the biome's numbers
 (`amplitude`, `feature_size`, `sea_level`, `island`, ...) — see [PLAN_FORMAT.md](PLAN_FORMAT.md).
 
+### Importing a floor plan (SVG / DXF)
+
+Draw the site in Inkscape (or any CAD that exports DXF) and press **Import SVG/DXF...** in the Plans panel; set *Metres per unit* so one drawing unit is
+the right size. Give each shape a label — in Inkscape the *Object ID* or *Label*, in DXF the layer name:
+
+| Shape | Label | Becomes |
+|---|---|---|
+| closed outline | `house`, `chapel`, `stable`, `barn`, `hut`, `keep`, `well`, `tower` (default `house`) | a building of that kind, sized and turned like the outline |
+| closed outline | `yard`, `farm`, `fence`, `ward`, `wall`, `compound` (+ `wood` / `stone` / `none`) | a compound with a fence and a gate that adopts the buildings inside |
+| closed outline | a biome: `desert`, `forest`, `tundra`, `mountain`, `island`, `meadow` | a terrain region of that biome (the plan becomes a terrain) |
+| open line / polyline | anything | roads (one bare-road block; crossing lines join) |
+| circle | `tree`, `tower` (small circles default to trees) | a tree or a tower |
+
+Then press **Build**. Edit the stored plan like any other (the *Edit a parameter* box), pick a **Style**, or add a terrain around it.
+
+### Biome regions
+
+Besides the noise mask, `region_polygons` puts the second biome exactly where you want it: a list of polygons (terrain coordinates, metres) or
+`{"polygon": [[x, y], ...], "blend": 12}` entries; the border fades over `blend` metres. Use it for a desert patch, a forest around a village or a
+mountain range along an edge.
+
 ### Cities and districts
 
 The **City** button makes a walled city: a ring-and-spoke market centre, a grid craft quarter, an organic old town, gardens and a harbour road, joined by two

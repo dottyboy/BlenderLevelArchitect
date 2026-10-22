@@ -4,7 +4,7 @@ Internal dev-facing doc: what's built, what's known-broken, what's next. Not for
 (see `dist/README.md` for that). Source of truth for the addon's actual behavior is always
 `levelArchitect_v2.py` — this file can drift out of date; the code can't.
 
-Current version: **0.53.0** (see `bl_info` in the source file).
+Current version: **0.54.0** (see `bl_info` in the source file).
 
 §2 (Development tree) was condensed 2026-08-21 — dropped the blow-by-blow investigation
 narrative and per-run stress-test numbers from older, fully-resolved entries, kept every
@@ -753,6 +753,7 @@ GN complexity there specifically.
       too zoomed-out to show doorway-level detail) confirmed the frame visibly follows the wall's
       curve right at the opening, not standing at a mismatched straight angle against it.
 
+- [x] **Floor-plan import, polygon regions (0.54.0).** `plan_parse_svg` (transforms, paths, rect/polygon/line/circle), `plan_parse_dxf` (LINE, LWPOLYLINE, POLYLINE, CIRCLE), `_min_rect`, `plan_import_shapes` (yards adopt buildings, road graph merge, biome-labelled shapes -> terrain regions), `plan_import_file`, `OBJECT_OT_PlanImport`; `region_polygons` in `plan_terrain_params` / `_terrain_region`.
 - [x] **Districts (0.53.0).** `_block_obstacles` (convex outlines of all other buildings/roads in the block frame) passed to `_expand_block(obstacles=)`; `CITY` example.
 - [x] **Bridges, ridged (0.52.0).** road capsule pads carry their road half-width (6-tuple) and are suppressed by the river weight in `_terrain_pad_weights(suppress=)`; `_terrain_bridges` finds crossings, `_build_bridge_mesh`; GN `Ridged` input (crest = 1 - 2.6|n-0.5| - 0.85).
 - [x] **Polish round 3 (0.51.0).** `plan_set_param` + `OBJECT_OT_PlanSetParam` + `wfc_plan_edit_*`; EARTH/EARTHBAG textures, bilinear blotches in `_masonry_images`; house wall runs E/W inset by the wall thickness (corner caps); `infill` pass in `_expand_block`; `_chaikin` for rivers.

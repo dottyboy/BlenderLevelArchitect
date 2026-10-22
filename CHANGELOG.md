@@ -3,6 +3,16 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.54.0 — plans: floor-plan import and polygon regions
+
+- **Import SVG / DXF floor plans** (*Import SVG/DXF...* in the Plans panel, or `plan_import_file`): closed shapes become buildings (the smallest rotated
+  rectangle gives width, depth and rotation), shapes labelled *yard / compound / farm / fence / ward / wall* become compounds with a fence and a gate that
+  adopt the buildings inside them, open lines become one bare-road block, circles become trees or towers. A shape's kind comes from its label (SVG id or
+  Inkscape label, DXF layer): `house`, `chapel_2`, `barn-north` ... Set *Metres per unit* to scale the drawing.
+- **Biome regions from a drawing**: a closed shape labelled with a biome (`desert`, `forest_2` ...) makes the plan a terrain whose second biome fills it.
+- **Polygon regions** on terrain: `params.region_polygons` (a list of polygons, or `{"polygon": [...], "blend": metres}`) says exactly where `region_biome`
+  rules; the border fades over `blend`. The noise mask is off unless `region_noise: true`.
+
 ## 0.53.0 — plans: districts and a city
 
 - **Blocks see each other**: a block now keeps its lots clear of every building and road of the rest of the plan (earlier districts, explicit buildings,

@@ -5019,6 +5019,109 @@ res = addon.plan_build(bpy.context, city)
 check("City: it builds (110+ parts)", len(res["built"]) >= 110, str(len(res["built"])))
 
 # ==============================================================================
+print("\n--- Plans: floor-plan import and polygon regions ---")
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+SVG = """<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="400" height="300">
+  <g id="layer">
+    <rect id="farm_yard" x="20" y="20" width="160" height="100" />
+    <rect id="barn_1" x="40" y="40" width="50" height="30" />
+    <rect id="house_a" x="110" y="50" width="30" height="40" />
+    <polygon id="chapel" points="250,40 290,40 290,100 250,100" />
+    <circle id="tree_1" cx="330" cy="200" r="8" />
+    <circle id="tower_1" cx="360" cy="40" r="18" />
+    <path id="road_main" d="M 0,150 L 400,150 L 400,250" style="stroke-width:6;fill:none" />
+    <line id="road_side" x1="200" y1="150" x2="200" y2="290" stroke-width="6" />
+    <rect id="cottage" x="220" y="180" width="40" height="30" transform="rotate(30 240 195)" />
+  </g>
+</svg>"""
+shapes = addon.plan_parse_svg(SVG)
+check("Import: SVG gives rects, a polygon, circles, a path and a line", len(shapes) >= 9 and {s_["kind"] for s_ in shapes} == {"poly", "circle", "line"}, str(len(shapes)))
+plan = addon.plan_import_shapes(shapes, "site", 0.1)
+ids = {c["id"] for c in plan["children"]}
+yard = [c for c in plan["children"] if c["type"] == "compound"][0]
+check("Import: the labelled yard becomes a compound with a fence and a gate", yard["params"]["fence"] == "wood" and yard["anchors"][0]["kind"] == "gate")
+check("Import: buildings inside the yard are adopted by it (barn_1, house_1)", {c["kind"] for c in yard["children"]} == {"barn", "house"}, str([c["id"] for c in yard["children"]]))
+loose = {c["kind"] for c in plan["children"] if c["type"] == "building"}
+check("Import: loose shapes become chapel, tree, tower and a rotated cottage", {"chapel", "tree", "tower", "house"} <= loose, str(loose))
+house = [c for c in plan["children"] if c["type"] == "building" and c["kind"] == "house"][0]
+check("Import: a rotated rectangle keeps its size and angle (4 x 3 m, turned 30 degrees; SVG y is flipped)",
+      abs(house["params"]["width"] - 4.0) < 0.05 and abs(house["params"]["depth"] - 3.0) < 0.05 and abs(((house["transform"]["rot"] - 150.0 + 90.0) % 180.0) - 90.0) < 1.0,
+      "%s %s" % (house["params"], house["transform"]["rot"]))
+roads = [c for c in plan["children"] if c["type"] == "block"][0]
+check("Import: lines become one bare-road block (the side road joins the main one)", len(roads["params"]["road_graph"]["edges"]) >= 3 and roads["params"]["fill"] == [])
+chapel = [c for c in plan["children"] if c["kind"] == "chapel"][0]
+check("Import: sizes are in metres via the scale (chapel 4 x 6 m)", abs(chapel["params"]["width"] - 6.0) < 0.05 and abs(chapel["params"]["depth"] - 4.0) < 0.05 or
+      (abs(chapel["params"]["width"] - 4.0) < 0.05 and abs(chapel["params"]["depth"] - 6.0) < 0.05))
+check("Import: the imported plan is valid", not addon.plan_validate(plan)[0], str(addon.plan_validate(plan)[0][:2]))
+check("Import: SVG y points down, so the road at the bottom is south (y < 0)", roads["params"]["road_graph"]["nodes"]["n0"][1] < 5.0 and
+      any(p[1] < 0 for p in roads["params"]["road_graph"]["nodes"].values()))
+res = addon.plan_build(bpy.context, plan)
+check("Import: the imported plan builds", len(res["built"]) >= 6, str(res["built"]))
+DXF = "0\nSECTION\n2\nENTITIES\n" + "".join(
+    "0\nLWPOLYLINE\n8\nhouse\n90\n4\n70\n1\n10\n%d\n20\n%d\n10\n%d\n20\n%d\n10\n%d\n20\n%d\n10\n%d\n20\n%d\n" % (x, y, x + 8, y, x + 8, y + 6, x, y + 6)
+    for x, y in ((0, 0), (20, 0))) + "0\nLINE\n8\nroad\n10\n-10\n20\n-5\n11\n40\n21\n-5\n0\nCIRCLE\n8\ntree\n10\n10\n20\n15\n40\n1.5\n0\nENDSEC\n0\nEOF\n"
+dshapes = addon.plan_parse_dxf(DXF)
+check("Import: DXF gives two closed polylines, a line and a circle", sorted(s_["kind"] for s_ in dshapes) == ["circle", "line", "poly", "poly"], str(dshapes))
+dplan = addon.plan_import_shapes(dshapes, "dxfsite", 1.0, flip_y=False)
+check("Import: DXF layers name the kinds (2 houses, a tree, a road block)", sorted(c["kind"] for c in dplan["children"]) == ["house", "house", "street", "tree"], str([c["kind"] for c in dplan["children"]]))
+check("Import: the DXF house is 8 x 6 m", [c for c in dplan["children"] if c["kind"] == "house"][0]["params"]["width"] == 8.0)
+for bad in ("<svg><rect", "not a drawing"):
+    try:
+        addon.plan_parse_svg(bad)
+        check("Import: rejects unreadable SVG %r" % bad, False)
+    except addon.PlanError:
+        check("Import: rejects unreadable SVG %r" % bad, True)
+try:
+    addon.plan_import_shapes([])
+    check("Import: rejects an empty drawing", False)
+except addon.PlanError:
+    check("Import: rejects an empty drawing", True)
+REG = SVG.replace('<g id="layer">', '<g id="layer"><polygon id="desert_zone" points="260,160 390,160 390,290 260,290" />')
+rplan = addon.plan_import_shapes(addon.plan_parse_svg(REG), "reg", 0.5)
+check("Import: a shape labelled with a biome makes a terrain with that region", rplan["type"] == "terrain" and rplan["params"]["region_biome"] == "desert"
+      and len(rplan["params"]["region_polygons"]) == 1 and rplan["params"]["region_noise"] is False, str(rplan["params"])[:120])
+check("Import: the region plan validates", not addon.plan_validate(rplan)[0], str(addon.plan_validate(rplan)[0][:2]))
+
+# polygon regions
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+for bad in ({"region_polygons": [[[0, 0], [1, 1], [2, 0]]]}, {"region_biome": "desert", "region_polygons": []}, {"region_biome": "desert", "region_polygons": [[[0, 0], [1, 1]]]},
+            {"region_biome": "desert", "region_polygons": [{"polygon": [[0, 0], [9, 0], [9, 9]], "blend": 0.1}]}):
+    try:
+        addon.plan_terrain_params(bad)
+        check("Regions: rejects %s" % str(bad)[:50], False)
+    except addon.PlanError:
+        check("Regions: rejects %s" % str(bad)[:50], True)
+tpoly = addon.plan_terrain_params({"region_biome": "mountain", "region_polygons": [[[10, 10], [60, 10], [60, 60], [10, 60]]]})
+check("Regions: a polygon list switches the noise mask off by default", tpoly["region_noise"] is False and tpoly["region_polygons"][0]["blend"] == 12.0)
+import numpy as _np
+tpoly["noise_seed"] = 1
+rx, ry = _np.array([35.0, 80.0, -40.0]), _np.array([35.0, 80.0, -40.0])
+mask = addon._terrain_region(tpoly, rx, ry)
+check("Regions: the mask is 1 inside the polygon and 0 far outside", mask[0] > 0.99 and mask[1] < 0.01 and mask[2] < 0.01, str(mask))
+edge = addon._terrain_region(tpoly, _np.array([66.0]), _np.array([35.0]))[0]
+check("Regions: the border fades smoothly (6 m outside is between 0 and 1)", 0.05 < edge < 0.95, str(edge))
+addon.plan_build(bpy.context, _terrain_plan(biome="meadow", region_biome="desert", region_polygons=[[[-60, -60], [-10, -60], [-10, 0], [-60, 0]]], rivers="none", scatter=4.0))
+bpy.context.view_layer.update()
+terr = bpy.data.objects["PB_land_Terrain_land"]
+reg = terr.data.attributes.get("region")
+vals = [d.value for d in reg.data]
+check("Regions: the built terrain has the polygon region (some vertices 1, most 0)", max(vals) > 0.99 and sum(1 for v in vals if v > 0.5) < 0.2 * len(vals))
+check("Regions: cacti grow only in and next to the desert polygon (its 12 m fade)", all(-76 < v.co.x < 4 and -76 < v.co.y < 14 for o in bpy.data.objects if "cactus" in o.name for v in o.data.vertices) and
+      any("cactus" in o.name for o in bpy.data.objects))
+
+# a plan that covers most of the terrain must not break the automatic river (every route is "close" to a pad)
+big = addon.plan_node("yard", "compound", "yard", footprint=[[-70, -70], [70, -70], [70, 70], [-70, 70]], params={"fence": "none"})
+addon.plan_build(bpy.context, addon.plan_node("land", "terrain", "terrain", params={"biome": "forest", "width": 160.0, "depth": 160.0,
+                                                                                     "resolution": 4.0, "scatter": 0.0}, children=[big]))
+check("Rivers: the automatic river copes with a plan covering most of the terrain", any(o.name.startswith("PB_land.river") for o in bpy.data.objects))
+
+# ==============================================================================
 print("\n--- Plans: walled town ---")
 for o in list(bpy.data.objects):
     bpy.data.objects.remove(o, do_unlink=True)
