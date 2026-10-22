@@ -3392,6 +3392,75 @@ check("Plans: levels field is preserved unchanged",
 del site, castle_n, chapel_n, back
 
 # ==============================================================================
+print("\n--- Plans: storage in the .blend and JSON files ---")
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+farm = addon.plan_node("farm", "compound", "farm", footprint=[[-20, -15], [20, -15], [20, 15], [-20, 15]], seed=5,
+                       anchors=[{"id": "gate", "kind": "gate", "pos": [0, -15, 0], "dir": 270, "width": 3}])
+farm["children"] = [
+    addon.plan_node("barn", "building", "barn", footprint=[[-5, -3], [5, -3], [5, 3], [-5, 3]],
+                    transform={"x": 8, "y": 5, "z": 0, "rot": 0}),
+    addon.plan_node("house", "building", "house", footprint=[[-3, -3], [3, -3], [3, 3], [-3, 3]],
+                    transform={"x": -8, "y": 5, "z": 0, "rot": 0}),
+]
+farm["children"][0]["children"] = [addon.plan_node("silo", "building", "silo", footprint=[[-1, -1], [1, -1], [1, 1], [-1, 1]])]
+addon.plan_write_to_blend(scene, farm)
+check("Plan store: plan is listed", addon.plan_list_ids() == ["farm"])
+check("Plan store: nested collections and root empties exist",
+      all(bpy.data.collections.get("Plan_" + n) for n in ("farm", "farm.barn", "farm.house", "farm.barn.silo"))
+      and bpy.data.objects.get("PlanRoot_farm.barn.silo") is not None)
+check("Plan store: child collections sit under their parent",
+      bpy.data.collections["Plan_farm.barn"] in list(bpy.data.collections["Plan_farm"].children))
+check("Plan store: root empty carries the JSON, children excluded",
+      "children" not in json.loads(bpy.data.objects["PlanRoot_farm"]["gla_plan"]))
+check("Plan store: round trip from the .blend equals the original", addon.plan_read_from_blend("farm") == farm)
+check("Plan store: sibling order is kept",
+      [c["id"] for c in addon.plan_read_from_blend("farm")["children"]] == ["barn", "house"])
+check("Plan store: empty mirrors the world position",
+      tuple(round(v, 3) for v in bpy.data.objects["PlanRoot_farm.barn"].location) == (8.0, 5.0, 0.0))
+# overwrite
+farm2 = json.loads(json.dumps(farm))
+farm2["children"].pop()
+addon.plan_write_to_blend(scene, farm2)
+check("Plan store: rewriting replaces the old plan", bpy.data.objects.get("PlanRoot_farm.house") is None
+      and len(addon.plan_read_from_blend("farm")["children"]) == 1)
+check("Plan store: no leftover duplicate collections",
+      len([c for c in bpy.data.collections if c.name.startswith("Plan_")]) == 3)
+# file round trip + revision
+with tempfile.TemporaryDirectory() as tmp:
+    fp = os.path.join(tmp, "farm.plan.json")
+    r1 = addon.plan_save_file("farm", fp)
+    r2 = addon.plan_save_file("farm", fp)
+    check("Plan file: revision increases on every save", (r1, r2) == (1, 2))
+    saved = json.load(open(fp))
+    check("Plan file: carries format, revision and add-on version",
+          saved["format"] == "gla-plan/1" and saved["revision"] == 2 and saved["saved_with"].startswith("0."))
+    addon.plan_clear_stored("farm")
+    check("Plan file: clearing removes the stored plan", addon.plan_list_ids() == [])
+    loaded = addon.plan_load_file(scene, fp)
+    check("Plan file: loading restores the tree and revision",
+          addon.plan_read_from_blend("farm")["children"][0]["id"] == "barn" and loaded["revision"] == 2
+          and bpy.data.objects["PlanRoot_farm"]["gla_plan_revision"] == 2)
+    broken = os.path.join(tmp, "bad.plan.json")
+    bad_doc = json.loads(open(fp).read())
+    bad_doc["children"][0]["footprint"] = [[0, 0], [1, 0]]
+    open(broken, "w").write(json.dumps(bad_doc))
+    try:
+        addon.plan_load_file(scene, broken)
+        refused = False
+    except addon.PlanError:
+        refused = True
+    check("Plan file: a plan with errors is refused", refused)
+    check("Plan file: refusing leaves the stored plan untouched", len(addon.plan_read_from_blend("farm")["children"]) == 1)
+addon.plan_clear_stored("farm")
+check("Plan store: nothing left after clearing",
+      not [c for c in bpy.data.collections if c.name.startswith("Plan_")]
+      and not [o for o in bpy.data.objects if o.name.startswith("PlanRoot_")])
+del farm, farm2
+
+# ==============================================================================
 print()
 if failures:
     print(f"{len(failures)} CHECK(S) FAILED:")

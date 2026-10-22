@@ -9127,6 +9127,133 @@ def plan_from_json(text):
     return doc
 
 
+# ------------------------------------------------------------------------------
+# Plans stored in the .blend: one Collection per plan node, nested like the tree.
+# The node's JSON (children excluded) lives on a root Empty as custom property
+# `gla_plan`. Built geometry goes in separate `Built_<path>` collections so a
+# rebuild removes only what it made. The .blend is the source of truth while open.
+# ------------------------------------------------------------------------------
+PLAN_COLLECTION_PREFIX = "Plan_"
+PLAN_ROOT_PREFIX = "PlanRoot_"
+PLAN_BUILT_PREFIX = "Built_"
+
+
+def _plan_key(path):
+    return ".".join(path)
+
+
+def _plan_root_empty(collection):
+    for obj in collection.objects:
+        if obj.name.startswith(PLAN_ROOT_PREFIX) and "gla_plan" in obj.keys():
+            return obj
+    return None
+
+
+def _plan_write_node(parent_collection, node, path, order, resolved):
+    key = _plan_key(path)
+    coll = bpy.data.collections.new(PLAN_COLLECTION_PREFIX + key)
+    parent_collection.children.link(coll)
+    empty = bpy.data.objects.new(PLAN_ROOT_PREFIX + key, None)
+    empty.empty_display_type = 'PLAIN_AXES'
+    empty.empty_display_size = 1.0
+    coll.objects.link(empty)
+    empty["gla_plan"] = json.dumps({k: v for k, v in node.items() if k != "children"})
+    empty["gla_plan_order"] = order
+    wx, wy, wz, wrot = resolved[path]["world"]
+    empty.location = (wx, wy, wz)          # display only; the JSON stays authoritative
+    empty.rotation_euler = (0.0, 0.0, math.radians(wrot))
+    for i, child in enumerate(node.get("children", [])):
+        _plan_write_node(coll, child, path + (child["id"],), i, resolved)
+    return coll
+
+
+def plan_clear_built(plan_id):
+    """Removes every object (and its data) in this plan's Built_ collections, then the collections."""
+    for coll in [c for c in bpy.data.collections
+                 if c.name == PLAN_BUILT_PREFIX + plan_id or c.name.startswith(PLAN_BUILT_PREFIX + plan_id + ".")]:
+        for obj in list(coll.all_objects):
+            data = obj.data
+            kind = obj.type
+            bpy.data.objects.remove(obj, do_unlink=True)
+            if data is not None and data.users == 0:
+                if kind == 'MESH':
+                    bpy.data.meshes.remove(data)
+                elif kind == 'LIGHT':
+                    bpy.data.lights.remove(data)
+        bpy.data.collections.remove(coll)
+
+
+def plan_clear_stored(plan_id):
+    """Removes the stored plan (collections and root empties); leaves Built_ geometry alone."""
+    name = PLAN_COLLECTION_PREFIX + plan_id
+    colls = [c for c in bpy.data.collections if c.name == name or c.name.startswith(name + ".")]
+    for coll in colls:
+        for obj in list(coll.objects):
+            bpy.data.objects.remove(obj, do_unlink=True)
+    for coll in colls:
+        bpy.data.collections.remove(coll)
+
+
+def plan_write_to_blend(scene, root, revision=None):
+    """Stores the whole tree in the file, replacing any stored plan with the same root id."""
+    old = bpy.data.collections.get(PLAN_COLLECTION_PREFIX + root["id"])
+    if revision is None:
+        empty = _plan_root_empty(old) if old else None
+        revision = int(empty.get("gla_plan_revision", 0)) if empty else 0
+    plan_clear_stored(root["id"])
+    resolved = plan_resolve(root)
+    top = _plan_write_node(scene.collection, root, (root["id"],), 0, resolved)
+    _plan_root_empty(top)["gla_plan_revision"] = int(revision)
+    return top
+
+
+def _plan_read_node(coll):
+    empty = _plan_root_empty(coll)
+    if empty is None:
+        raise PlanError("Collection %s has no plan root." % coll.name)
+    node = json.loads(empty["gla_plan"])
+    kids = [c for c in coll.children if c.name.startswith(PLAN_COLLECTION_PREFIX) and _plan_root_empty(c)]
+    kids.sort(key=lambda c: _plan_root_empty(c).get("gla_plan_order", 0))
+    node["children"] = [_plan_read_node(c) for c in kids]
+    return node
+
+
+def plan_read_from_blend(plan_id):
+    coll = bpy.data.collections.get(PLAN_COLLECTION_PREFIX + plan_id)
+    if coll is None:
+        raise PlanError("No stored plan %r in this file." % plan_id)
+    return _plan_read_node(coll)
+
+
+def plan_list_ids():
+    """Ids of the plans stored in this file (top-level plan collections only)."""
+    plan_colls = [c for c in bpy.data.collections if c.name.startswith(PLAN_COLLECTION_PREFIX) and _plan_root_empty(c)]
+    nested = {child.name for c in plan_colls for child in c.children}
+    return sorted(c.name[len(PLAN_COLLECTION_PREFIX):] for c in plan_colls if c.name not in nested)
+
+
+def plan_save_file(plan_id, filepath):
+    """Writes the stored plan to a .plan.json file and bumps its revision. Returns the new revision."""
+    root = plan_read_from_blend(plan_id)
+    empty = _plan_root_empty(bpy.data.collections[PLAN_COLLECTION_PREFIX + plan_id])
+    revision = int(empty.get("gla_plan_revision", 0)) + 1
+    with open(filepath, "w", encoding="utf-8") as fh:
+        fh.write(plan_to_json(root, revision))
+    empty["gla_plan_revision"] = revision
+    return revision
+
+
+def plan_load_file(scene, filepath):
+    """Reads a .plan.json into the file, replacing a stored plan of the same id. Returns the root node."""
+    with open(filepath, "r", encoding="utf-8") as fh:
+        root = plan_from_json(fh.read())
+    errors, _warnings = plan_validate(root)
+    if errors:
+        raise PlanError("Plan has errors: " + "; ".join(errors))
+    plan_write_to_blend(scene, root, revision=int(root.get("revision", 0)))
+    return root
+
+
 # ==============================================================================
 # 8. GAME PACKAGE EXPORT (glb + JSON description)
 # ==============================================================================
