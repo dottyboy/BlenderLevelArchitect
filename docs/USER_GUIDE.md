@@ -225,9 +225,18 @@ the right size. Give each shape a label — in Inkscape the *Object ID* or *Labe
 
 Then press **Build**. Edit the stored plan like any other (the *Edit a parameter* box), pick a **Style**, or add a terrain around it.
 
+### Heightmaps
+
+Give a terrain real relief from a picture: `"heightmap": {"file": "map.png", "height": 40}` (a path next to your .blend, or `"image": "name"` for an image already loaded
+in Blender). Dark pixels are low and bright ones high, `height` is the metres between them, `mix` (0..1) blends the picture with the biome's noise (1 = picture only),
+`invert` flips it. The top of the image is north (+y). Pads still flatten the ground under your plans, rivers cut through it and the palette follows the real heights.
+
+With a heightmap you usually want `"pad_mode": "terrain"`: the plans are then lifted onto the ground where they stand instead of the ground being cut to the plans' height.
+
 ### Biome regions
 
-Besides the noise mask, `region_polygons` puts the second biome exactly where you want it: a list of polygons (terrain coordinates, metres) or
+Use `regions` for several biomes at once — `[{"biome": "desert", "polygon": [...]}, {"biome": "mountain", "polygon": [...]}, {"biome": "tundra", "noise": true}]` — up to three
+besides the terrain's own; a drawing with several differently labelled biome shapes does the same on import. Besides the noise mask, `region_polygons` puts the second biome exactly where you want it: a list of polygons (terrain coordinates, metres) or
 `{"polygon": [[x, y], ...], "blend": 12}` entries; the border fades over `blend` metres. Use it for a desert patch, a forest around a village or a
 mountain range along an edge.
 

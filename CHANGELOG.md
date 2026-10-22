@@ -3,6 +3,19 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.55.0 — plans: heightmaps and several region biomes
+
+- **Heightmap terrain**: `params.heightmap` = `{"file": "map.png"}` (relative to the .blend, or absolute) or `{"image": "name in this file"}`, with `height`
+  (metres from the darkest to the brightest pixel), `mix` (0 = noise relief only, 1 = heightmap only; between blends them) and `invert`. The image is
+  stretched over the terrain (top of the image = +y), sampled bilinearly, stored per vertex and combined with the noise in the Geometry Nodes tree
+  (*Heightmap Height* / *Heightmap Mix* inputs). Pads, rivers, bridges, colours and vegetation follow the real heights.
+- **Several biomes in regions**: `params.regions` is a list of `{"biome": "desert", "polygon": [...], "blend": 12}` or `{"biome": "tundra", "noise": {"scale", "bias",
+  "blend"}}` entries — up to three different biomes besides the terrain's own (entries with the same biome join up). Each biome brings its relief, palette and
+  vegetation; later ones override earlier ones where they overlap. `region_biome` and friends still work and count first.
+- **`pad_mode: "terrain"`**: instead of cutting the ground to each plan's `z`, every plan takes the ground height where it stands — buildings, yards and street
+  networks are lifted (with everything below them), and a road between two plans slopes between the ground heights at its ends. The default, `"plan"`, keeps the old behaviour.
+- **Drawing import**: several differently labelled biome shapes in an SVG now give several regions.
+
 ## 0.54.0 — plans: floor-plan import and polygon regions
 
 - **Import SVG / DXF floor plans** (*Import SVG/DXF...* in the Plans panel, or `plan_import_file`): closed shapes become buildings (the smallest rotated

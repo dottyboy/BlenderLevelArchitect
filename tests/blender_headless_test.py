@@ -5081,8 +5081,10 @@ except addon.PlanError:
     check("Import: rejects an empty drawing", True)
 REG = SVG.replace('<g id="layer">', '<g id="layer"><polygon id="desert_zone" points="260,160 390,160 390,290 260,290" />')
 rplan = addon.plan_import_shapes(addon.plan_parse_svg(REG), "reg", 0.5)
-check("Import: a shape labelled with a biome makes a terrain with that region", rplan["type"] == "terrain" and rplan["params"]["region_biome"] == "desert"
-      and len(rplan["params"]["region_polygons"]) == 1 and rplan["params"]["region_noise"] is False, str(rplan["params"])[:120])
+check("Import: a shape labelled with a biome makes a terrain with that region", rplan["type"] == "terrain" and [r["biome"] for r in rplan["params"]["regions"]] == ["desert"], str(rplan["params"])[:120])
+REG2 = REG.replace('<g id="layer">', '<g id="layer"><polygon id="forest_a" points="20,160 120,160 120,290 20,290" />')
+rplan2 = addon.plan_import_shapes(addon.plan_parse_svg(REG2), "reg2", 0.5)
+check("Import: two differently labelled shapes give two region biomes", sorted(r["biome"] for r in rplan2["params"]["regions"]) == ["desert", "forest"] and not addon.plan_validate(rplan2)[0])
 check("Import: the region plan validates", not addon.plan_validate(rplan)[0], str(addon.plan_validate(rplan)[0][:2]))
 
 # polygon regions
@@ -5120,6 +5122,108 @@ big = addon.plan_node("yard", "compound", "yard", footprint=[[-70, -70], [70, -7
 addon.plan_build(bpy.context, addon.plan_node("land", "terrain", "terrain", params={"biome": "forest", "width": 160.0, "depth": 160.0,
                                                                                      "resolution": 4.0, "scatter": 0.0}, children=[big]))
 check("Rivers: the automatic river copes with a plan covering most of the terrain", any(o.name.startswith("PB_land.river") for o in bpy.data.objects))
+
+# ==============================================================================
+print("\n--- Plans: several region biomes and heightmaps ---")
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+multi = {"biome": "meadow", "rivers": "none", "regions": [
+    {"biome": "desert", "polygon": [[-70, -70], [-20, -70], [-20, -20], [-70, -20]], "blend": 8.0},
+    {"biome": "mountain", "polygon": [[20, 20], [70, 20], [70, 70], [20, 70]], "blend": 8.0},
+    {"biome": "tundra", "polygon": [[20, -70], [70, -70], [70, -20], [20, -20]], "blend": 8.0},
+    {"biome": "desert", "polygon": [[-70, 20], [-20, 20], [-20, 70], [-70, 70]], "blend": 8.0}]}
+tm = addon.plan_terrain_params(multi)
+check("Multi: three distinct extra biomes (desert polygons merged)", [e["biome"] for e in tm["extras"]] == ["desert", "mountain", "tundra"] and len(tm["extras"][0]["polygons"]) == 2)
+for bad in ({"regions": []}, {"regions": [{"biome": "moon"}]}, {"regions": [{"biome": "desert"}, {"biome": "forest"}, {"biome": "tundra"}, {"biome": "island"}]},
+            {"regions": [{"biome": "desert", "polygon": [[0, 0], [1, 1]]}]}, {"heightmap": {"height": 10}}, {"heightmap": {"file": "x.png", "height": 0.1}}):
+    try:
+        addon.plan_terrain_params(bad)
+        check("Multi: rejects %s" % str(bad)[:60], False)
+    except addon.PlanError:
+        check("Multi: rejects %s" % str(bad)[:60], True)
+legacy = addon.plan_terrain_params({"region_biome": "mountain", "regions": [{"biome": "desert", "noise": {"scale": 90.0}}]})
+check("Multi: the legacy region_biome comes first and noise settings are read", [e["biome"] for e in legacy["extras"]] == ["mountain", "desert"] and legacy["extras"][1]["scale"] == 90.0)
+addon.plan_build(bpy.context, _terrain_plan(scatter=3.0, **multi))
+bpy.context.view_layer.update()
+terr = bpy.data.objects["PB_land_Terrain_land"]
+check("Multi: a mask attribute per extra biome", all(terr.data.attributes.get(n) for n in ("region", "region_2", "region_3")))
+ng = terr.modifiers[0].node_group
+check("Multi: three extra colour ramps and the C and D inputs", len([n for n in ng.nodes if n.bl_idname == "ShaderNodeValToRGB"]) == 4 and
+      {"Amplitude B", "Amplitude C", "Amplitude D"} <= {i.name for i in ng.interface.items_tree})
+names = " ".join(o.name for o in bpy.data.objects if "scatter" in o.name)
+check("Multi: vegetation of several biomes (cacti from the desert, trees from the tundra or meadow)", "cactus" in names and "tree" in names, names)
+zs_m = [_terrain_z(x, y) for x in range(30, 66, 6) for y in range(30, 66, 6)]
+zs_d = [_terrain_z(x, y) for x in range(-65, -25, 6) for y in range(-65, -25, 6)]
+check("Multi: the mountain corner stands higher than the desert corner", sum(zs_m) / len(zs_m) > sum(zs_d) / len(zs_d) + 2.0, "%.1f vs %.1f" % (sum(zs_m) / len(zs_m), sum(zs_d) / len(zs_d)))
+
+# heightmap
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+import numpy as _np2
+hm_img = bpy.data.images.new("gla_test_hm", 64, 64)
+ramp_px = _np2.zeros((64, 64, 4), dtype=_np2.float32)
+ramp_px[..., 0] = ramp_px[..., 1] = ramp_px[..., 2] = _np2.linspace(0.0, 1.0, 64)[None, :]     # dark on the left, bright on the right
+ramp_px[..., 3] = 1.0
+hm_img.pixels.foreach_set(ramp_px.ravel())
+hm_plan = lambda **kw: _terrain_plan(scatter=0.0, rivers="none", **kw)
+addon.plan_build(bpy.context, hm_plan(heightmap={"image": "gla_test_hm", "height": 40.0, "mix": 1.0}))
+bpy.context.view_layer.update()
+zl, zr = _terrain_z(-70.0, -60.0), _terrain_z(70.0, -60.0)
+check("Heightmap: a left-dark, right-bright image rises from west to east (about 40 m)", zr - zl > 30.0, "%.1f -> %.1f" % (zl, zr))
+check("Heightmap: the ground under the house is still flattened to its z", abs(_terrain_z(20.0, 10.0) - 2.0) < 0.05)
+check("Heightmap: the colour range follows the heightmap (not 4 m of meadow relief)",
+      addon.plan_terrain_params({"heightmap": {"image": "x", "height": 40.0}})["heightmap"]["height"] == 40.0 and "Heightmap Height" in {i.name for i in bpy.data.objects["PB_land_Terrain_land"].modifiers[0].node_group.interface.items_tree})
+addon.plan_build(bpy.context, hm_plan(heightmap={"image": "gla_test_hm", "height": 40.0, "mix": 1.0, "invert": True}))
+bpy.context.view_layer.update()
+check("Heightmap: invert flips it", _terrain_z(-70.0, -60.0) - _terrain_z(70.0, -60.0) > 30.0)
+addon.plan_build(bpy.context, hm_plan(heightmap={"image": "gla_test_hm", "height": 40.0, "mix": 0.5}))
+bpy.context.view_layer.update()
+dz = _terrain_z(70.0, -60.0) - _terrain_z(-70.0, -60.0)
+check("Heightmap: mix 0.5 blends it with the noise relief (half the climb, within a noise margin)", 8.0 < dz < 30.0, "%.1f" % dz)
+tmp_png = os.path.join(bpy.app.tempdir or "/tmp", "gla_test_hm.png")
+hm_img.filepath_raw = tmp_png
+hm_img.file_format = 'PNG'
+hm_img.save()
+addon.plan_build(bpy.context, hm_plan(heightmap={"file": tmp_png, "height": 40.0}))
+bpy.context.view_layer.update()
+check("Heightmap: a PNG file works too", _terrain_z(70.0, -60.0) - _terrain_z(-70.0, -60.0) > 30.0)
+# pad_mode "terrain": the plans are lifted to the ground instead of the ground being cut to the plans
+h_w = addon.plan_node("cw", "building", "house", transform={"x": -50.0, "y": -40.0, "z": 0.0, "rot": 0.0})
+h_e = addon.plan_node("ce", "building", "house", transform={"x": 50.0, "y": -40.0, "z": 0.0, "rot": 0.0})
+lane2 = addon.plan_node("lane2", "block", "path", params={"from": "cw/door", "to": "ce/door", "road_width": 3.0, "fill": []})
+h_w["anchors"] = [{"id": "door", "kind": "door", "pos": [0.0, 0.0, 0.0], "dir": 0.0, "width": 1.0, "level": 0}]
+h_e["anchors"] = [{"id": "door", "kind": "door", "pos": [0.0, 0.0, 0.0], "dir": 0.0, "width": 1.0, "level": 0}]
+tplan = addon.plan_node("land", "terrain", "terrain", params={"biome": "meadow", "width": 160.0, "depth": 160.0, "resolution": 2.0, "scatter": 0.0, "rivers": "none",
+                        "pad_mode": "terrain", "heightmap": {"image": "gla_test_hm", "height": 40.0, "mix": 1.0}}, children=[h_w, h_e, lane2])
+addon.plan_build(bpy.context, tplan)
+bpy.context.view_layer.update()
+pv_w, pv_e = bpy.data.objects["PlanBuilt_land.cw"], bpy.data.objects["PlanBuilt_land.ce"]
+check("Heightmap: pad_mode terrain lifts the eastern house to the high ground and leaves the western low", pv_e.location.z - pv_w.location.z > 20.0,
+      "%.1f %.1f" % (pv_w.location.z, pv_e.location.z))
+check("Heightmap: each house stands on the ground (pivot z = terrain z at its place)", abs(pv_w.location.z - _terrain_z(-50.0, -40.0)) < 0.4 and abs(pv_e.location.z - _terrain_z(50.0, -40.0)) < 0.4,
+      "%.1f/%.1f %.1f/%.1f" % (pv_w.location.z, _terrain_z(-50.0, -40.0), pv_e.location.z, _terrain_z(50.0, -40.0)))
+road2 = [o for o in bpy.data.objects if o.name.startswith("PB_land.lane2_Road")][0]
+rz2 = [v.co.z for v in road2.data.vertices]
+check("Heightmap: the path between them climbs with the ground", max(rz2) - min(rz2) > 15.0, "%.1f..%.1f" % (min(rz2), max(rz2)))
+try:
+    addon.plan_terrain_params({"pad_mode": "sideways"})
+    check("Heightmap: rejects an unknown pad_mode", False)
+except addon.PlanError:
+    check("Heightmap: rejects an unknown pad_mode", True)
+for bad in ({"image": "no_such_image"}, {"file": "/no/such/file.png"}):
+    try:
+        addon.plan_build(bpy.context, hm_plan(heightmap=bad))
+        check("Heightmap: a missing source is refused %s" % str(bad), False)
+    except addon.PlanError:
+        check("Heightmap: a missing source is refused %s" % str(bad), True)
+try:
+    os.remove(tmp_png)
+except OSError:
+    pass
 
 # ==============================================================================
 print("\n--- Plans: walled town ---")

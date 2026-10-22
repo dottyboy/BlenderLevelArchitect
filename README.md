@@ -97,6 +97,13 @@ meadow, forest, desert, tundra, mountains, island — bring their own palette, r
 
 <p align="center"><img src="docs/img/biomes_sheet.png" alt="The same hamlet, farm and watchtower in the meadow, forest, desert, tundra, mountains and island biomes" width="900"></p>
 
+### Heightmaps and mixed biomes
+
+<p align="center"><img src="docs/img/heightmap_terrain.png" alt="A terrain shaped by a greyscale heightmap, with desert, mountain and forest regions and a hamlet standing on the ground" width="900"></p>
+
+A greyscale picture can shape the ground (`heightmap`, see [docs/examples/heightmap.png](docs/examples/heightmap.png)), `pad_mode: "terrain"` lifts the plans onto it,
+and up to three more biomes can take over inside polygons or noise-made patches (`regions`).
+
 ### From a floor plan
 
 <p align="center"><img src="docs/img/svgplan.png" alt="A village built from an SVG floor plan: houses, a chapel, a walled farm, roads and a tower, with a desert region marked in the drawing" width="900"></p>

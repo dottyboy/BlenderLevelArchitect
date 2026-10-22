@@ -4,7 +4,7 @@
 
 Jobs: castle_still, castle_turntable, ruin_slider, tint_cycle, tower_trio, tower_cutaway, hall_cutaway,
       level_still, round_rooms_still, seeds_gallery, houses_still, grounds_still, fortress_still, fortress_turntable, block_still, farm_still,
-      styles_still, hutforms_still, organic_still, roundtown_still, mixed_still, hutcluster_still, biomes_still, townland_still, svgplan_still
+      styles_still, hutforms_still, organic_still, roundtown_still, mixed_still, hutcluster_still, biomes_still, townland_still, svgplan_still, heightmap_still
 quality: draft (default, 16 samples) or final (64 samples).
 The frames land as PNGs; tools/make_gif.sh turns a frame folder into a GIF with ffmpeg.
 """
@@ -355,5 +355,21 @@ elif JOB == "svgplan_still":
     la.plan_build(bpy.context, plan)
     camera((0, -92, 58), (0, 0, 0), lens=32)
     render("svgplan")
+elif JOB == "heightmap_still":
+    setup_render(1280, 720)
+    clear_scene()
+    world_and_sun(ground=None)
+    hamlet = la.plan_new_example(sc, 'HAMLET', set())
+    hamlet.update(id="hamlet", transform={"x": -40.0, "y": -20.0, "z": 0.0, "rot": 0.0})
+    land = la.plan_node("land", "terrain", "terrain", params={
+        "biome": "meadow", "width": 320.0, "depth": 320.0, "resolution": 2.0, "rivers": "none", "scatter": 1.2, "pad_mode": "terrain",
+        "heightmap": {"file": os.path.join(ROOT, "docs", "examples", "heightmap.png"), "height": 38.0, "mix": 0.85},
+        "sea_level": 2.0,
+        "regions": [{"biome": "mountain", "polygon": [[-30, 40], [110, 40], [110, 150], [-30, 150]], "blend": 25.0},
+                    {"biome": "desert", "polygon": [[-150, -150], [-40, -150], [-40, -70], [-150, -70]], "blend": 20.0},
+                    {"biome": "forest", "polygon": [[40, -150], [150, -150], [150, -30], [40, -30]], "blend": 20.0}]}, children=[hamlet])
+    la.plan_build(bpy.context, land)
+    camera((0, -280, 190), (0, 0, 5), lens=30)
+    render("heightmap")
 else:
     raise SystemExit("unknown job " + JOB)

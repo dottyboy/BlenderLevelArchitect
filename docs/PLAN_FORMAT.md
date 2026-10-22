@@ -111,7 +111,14 @@ placed on it and the ground is flattened under them.
 * **Polygon regions.** `"region_polygons": [[[x, y], ...], {"polygon": [...], "blend": 12.0}]` (needs `region_biome`): the second biome rules inside the
   polygons and fades out over `blend` metres; `"region_noise": true` combines them with the noise mask.
 * **Import.** `plan_import_file(path)` turns an `.svg` or `.dxf` into a `settlement` (or, with biome-labelled shapes, a `terrain`) tree — see the User Guide.
-* Not yet: more than one distinct region biome per terrain blended across one terrain, terrain from a heightmap image, roads that curve with the ground.
+* **Several region biomes.** `"regions": [{"biome": "desert", "polygon": [[x, y], ...], "blend": 12}, {"biome": "tundra", "noise": {"scale": 140, "bias": 0, "blend": 0.15}}]`
+  — at most three distinct biomes besides `biome`; entries of the same biome join; a later biome overrides an earlier one where they overlap. The masks are the point
+  attributes `region`, `region_2`, `region_3`; the tree blends relief, palette and rock/earth colours, scatter draws each biome's vegetation by weight.
+* **Heightmap.** `"heightmap": {"file": "terrain.png" | "image": "name", "height": 40.0, "mix": 1.0, "invert": false}` — the image (greyscale or the mean of RGB, normalised to
+  its own darkest/brightest) is stretched over the terrain (top = +y). `mix` blends it with the noise relief; the heights feed pads, rivers, bridges, colours and scatter.
+* **Pad mode.** `"pad_mode": "plan"` (default) cuts the ground to each plan's world `z`; `"terrain"` lifts each plan (and its descendants) to the natural ground height at its
+  centre instead, streets flat at the mean height under their roads, from/to paths sloping between their ends.
+* Not yet: heightmaps tiled or larger than one terrain, region biomes with their own water level blended across one terrain, terrain from a heightmap image, roads that curve with the ground.
 
 ### Block extras
 
