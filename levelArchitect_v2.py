@@ -10047,7 +10047,8 @@ PLAN_HOUSE_DEFAULTS = {
                    roof_pitch=0.55, door='S', door_style='rect', door_width=2.6, door_height=2.1,
                    window_kind='rect', window_width=0.6, window_height=0.5, window_sill=1.6, windows=True),
 }
-PLAN_HOUSE_COMMON = dict(brick_color='PLAIN', ruin=0.0, detail='MEDIUM', chimney=False, roof_overhang=0.45, parapet=0.0)
+PLAN_HOUSE_COMMON = dict(brick_color='PLAIN', ruin=0.0, detail='MEDIUM', chimney=False, roof_overhang=0.45, parapet=0.0,
+                         stairs=True, door_leaf=True)
 PLAN_HOUSE_RANGES = {
     "width": (2.0, 60.0), "depth": (2.0, 60.0), "wall_height": (1.8, 10.0), "floors": (1, 4),
     "wall_thickness": (0.2, 1.4), "roof_pitch": (0.2, 1.6), "ruin": (0.0, 1.0),
@@ -10173,7 +10174,7 @@ def plan_house_params(kind, params, style=None):
             raise PlanError("params.%s = %r is not one of %s" % (key, merged[key], ", ".join(allowed)))
     if merged["brick_color"] not in BRICK_COLOR_INDEX and merged["brick_color"] != 'MIXED':
         raise PlanError("params.brick_color = %r is not a known brick colour" % (merged["brick_color"],))
-    for key in ("windows", "chimney"):
+    for key in ("windows", "chimney", "stairs", "door_leaf"):
         if not isinstance(merged[key], bool):
             raise PlanError("params.%s must be true or false" % key)
     if min(merged["width"], merged["depth"]) < 2.0 * merged["wall_thickness"] + 1.2:
@@ -10254,7 +10255,8 @@ def _build_house_mesh(kind, p, seed):
         tint = (2, 3, 4, 6, 1, 5)[seed % 6]
     if p.get("style", "medieval") != 'medieval':
         tint = 0                                   # style packs have their own wall materials
-    mat_map = {0: tint, 1: len(BRICK_TINTS), ROOF_SOURCE_SLOT: len(BRICK_TINTS) + 1} if tint else None
+    mat_map = ({0: tint, 1: len(BRICK_TINTS), ROOF_SOURCE_SLOT: len(BRICK_TINTS) + 1, WOOD_SOURCE_SLOT: len(BRICK_TINTS) + 2}
+               if tint else None)
     stones_scale = {'LOW': 0.0, 'MEDIUM': 1.0, 'HIGH': 3.0}[p["detail"]]
     parapet = p["parapet"] if p["roof"] == 'FLAT' else 0.0
     corners = [(-W / 2, -D / 2), (W / 2, -D / 2), (W / 2, D / 2), (-W / 2, D / 2)]
@@ -10277,20 +10279,67 @@ def _build_house_mesh(kind, p, seed):
         big.append(wb.mb, rot=rot, offset=(cx - dx * t / 2.0, cy - dy * t / 2.0, 0.0), mat_map=mat_map)
     iw, idp = W / 2.0 - t / 2.0, D / 2.0 - t / 2.0
     tile = TOWER_TILE_W
+    # straight stair along the wall opposite the door (when there is room); the slabs get an opening above it
+    stair = None
+    if floors > 1 and p["stairs"]:
+        n_steps = int(math.ceil(h / 0.2))
+        run = n_steps * 0.27
+        xs0 = -iw + 0.35
+        if xs0 + run + 0.4 <= iw - 1.0 and idp > 1.6:
+            north = p["door"] != 'N'
+            band = (idp - 0.95, idp - 0.05) if north else (-idp + 0.05, -idp + 0.95)
+            stair = dict(n=n_steps, rise=h / n_steps, x0=xs0, run=run, band=band, ox=(xs0 + 0.3 * run, min(iw, xs0 + run + 0.5)))
+            for k in range(floors - 1):
+                for i in range(n_steps):
+                    _soup_box(big, xs0 + (i + 0.5) * 0.27, (band[0] + band[1]) / 2.0, k * h, 0.27, band[1] - band[0],
+                              (i + 1) * stair["rise"], 1)
+
+    def slab_rects(b):
+        """Rectangles (x0, y0, x1, y1) covering the inner floor area minus the stair opening."""
+        if stair is None:
+            return [(-iw, -idp, iw, idp)]
+        y0, y1 = stair["band"]
+        ox0, ox1 = stair["ox"]
+        rects = []
+        if y0 > -idp + 1e-6:
+            rects.append((-iw, -idp, iw, y0))
+        if y1 < idp - 1e-6:
+            rects.append((-iw, y1, iw, idp))
+        rects += [(-iw, y0, ox0, y1), (ox1, y0, iw, y1)]
+        return [r for r in rects if r[2] - r[0] > 1e-3 and r[3] - r[1] > 1e-3]
+
     for k in range(floors + 1):
         z = k * h
-        fl = [(-iw, -idp, z), (iw, -idp, z), (iw, idp, z), (-iw, idp, z)]
-        uvs = [(q[0] / tile, q[1] / tile) for q in fl]
         if k == 0:
-            big.poly('floor', fl, uvs, (0.0, 0.0, 1.0), 1)
+            fl = [(-iw, -idp, z), (iw, -idp, z), (iw, idp, z), (-iw, idp, z)]
+            big.poly('floor', fl, [(q[0] / tile, q[1] / tile) for q in fl], (0.0, 0.0, 1.0), 1)
             continue
         zt = z - 0.2
         roofed = p["roof"] != 'NONE' and ruin < 0.35
         if k == floors and not roofed:
             continue                                  # open top (ruin / no roof): no ceiling slab floating above the walls
-        if k < floors:
-            big.poly('slab', [(q[0], q[1], z) for q in fl], uvs, (0.0, 0.0, 1.0), 1)
-        big.poly('slabu', [(q[0], q[1], zt) for q in fl], uvs, (0.0, 0.0, -1.0), 1)
+        rects = slab_rects(k) if k < floors else [(-iw, -idp, iw, idp)]
+        for (x0, y0, x1, y1) in rects:
+            quad = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+            uvs = [(q[0] / tile, q[1] / tile) for q in quad]
+            if k < floors:
+                big.poly('slab', [(q[0], q[1], z) for q in quad], uvs, (0.0, 0.0, 1.0), 1)
+            big.poly('slabu', [(q[0], q[1], zt) for q in quad], uvs, (0.0, 0.0, -1.0), 1)
+        if stair is not None and k < floors:
+            y0, y1 = stair["band"]
+            ox0, ox1 = stair["ox"]
+            for (ax, ay, bx, by, nrm) in ((ox0, y0, ox1, y0, (0, -1, 0)), (ox0, y1, ox1, y1, (0, 1, 0)), (ox1, y0, ox1, y1, (1, 0, 0)),
+                                          (ox0, y0, ox0, y1, (-1, 0, 0))):
+                edge = [(ax, ay, z), (bx, by, z), (bx, by, zt), (ax, ay, zt)]
+                big.poly('slabe', edge, [(0.0, 0.0), (0.5, 0.0), (0.5, 0.1), (0.0, 0.1)], nrm, 1)
+    # the door leaf, standing open beside the doorway (built on the south side, then turned to the door's side)
+    if p["door"] != 'NONE' and p["door_leaf"] and ruin < 0.35:
+        dw = p["door_width"]
+        dh = min(p["door_height"], H - 0.5) - 0.1
+        out = (D if p["door"] in ("S", "N") else W) / 2.0 + t / 2.0
+        leaf = _TowerMesh()
+        _soup_box(leaf, -dw / 2.0 - 0.03, -out - dw * 0.475, 0.05, 0.06, dw * 0.95, dh, WOOD_SOURCE_SLOT)
+        big.append(leaf, rot={"S": 0.0, "E": math.pi / 2.0, "N": math.pi, "W": 3.0 * math.pi / 2.0}[p["door"]], mat_map=mat_map)
     if p["roof"] != 'NONE' and ruin < 0.35:
         if p["roof"] == 'FLAT':
             slab = [(-W / 2 - 0.2, -D / 2 - 0.2, H), (W / 2 + 0.2, -D / 2 - 0.2, H),
@@ -10566,6 +10615,11 @@ def _build_road_mesh(nodes, edges):
             for j, rect in enumerate(rects):
                 if j == i:
                     continue
+                if {a, b} & {edges[j][0], edges[j][1]}:                  # shares a node: skip a straight continuation
+                    cx_, cy_ = nodes[edges[j][1]][0] - nodes[edges[j][0]][0], nodes[edges[j][1]][1] - nodes[edges[j][0]][1]
+                    cl = math.hypot(cx_, cy_)
+                    if abs((ux * cy_ - uy * cx_) / cl) < 1e-6:
+                        continue
                 hull = _convex_hull(rect)
                 clip = _clip_segment_to_convex(p0, q0, hull)
                 if clip is not None:
@@ -10621,6 +10675,121 @@ def _plan_build_keep(context, node, world, seed, path):
                                   style=style)]
 
 
+# ------------------------------------------------------------------------------
+# Trees and small props (barrel, crate, haystack): simple low-poly shapes placed like any building.
+# ------------------------------------------------------------------------------
+LEAF_SOURCE_SLOT = 4
+LEAF_COLORS = {'GREEN': (0.17, 0.34, 0.11), 'AUTUMN': (0.62, 0.30, 0.07), 'DARK': (0.09, 0.22, 0.12), 'DRY': (0.45, 0.42, 0.18)}
+PLAN_TREE_DEFAULTS = dict(height=6.0, crown='CONE', leaf='GREEN')
+PLAN_TREE_RANGES = {"height": (2.0, 20.0)}
+PLAN_DEFAULT_FOOTPRINTS["tree"] = lambda params: _footprint_rect(
+    {"width": max(1.6, 0.45 * float(params.get("height", 6.0))), "depth": max(1.6, 0.45 * float(params.get("height", 6.0)))})
+for _k, _sz in (("barrel", 1.0), ("crate", 1.1), ("haystack", 2.6)):
+    PLAN_DEFAULT_FOOTPRINTS[_k] = (lambda sz: lambda params: _footprint_rect({"width": sz, "depth": sz}))(_sz)
+
+
+def get_or_create_leaf_material(color='GREEN'):
+    name = "LA_Leaf_" + color.title()
+    mat = bpy.data.materials.get(name)
+    if mat is not None:
+        return mat
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    bsdf = next((n for n in mat.node_tree.nodes if n.type == 'BSDF_PRINCIPLED'), None)
+    rgb = LEAF_COLORS[color]
+    if bsdf is not None:
+        _set_input(bsdf, 'Base Color', (*rgb, 1.0))
+        _set_input(bsdf, 'Roughness', 0.9)
+    mat.diffuse_color = (*rgb, 1.0)
+    return mat
+
+
+def _cone(mesh, cx, cy, z0, radius, height, sides, mat):
+    ring = [(cx + radius * math.cos(2 * math.pi * i / sides), cy + radius * math.sin(2 * math.pi * i / sides)) for i in range(sides)]
+    apex = (cx, cy, z0 + height)
+    for i in range(sides):
+        a, b = ring[i], ring[(i + 1) % sides]
+        mid = ((a[0] + b[0]) / 2.0 - cx, (a[1] + b[1]) / 2.0 - cy)
+        mesh.poly('cone', [(a[0], a[1], z0), (b[0], b[1], z0), apex], [(0.0, 0.0), (1.0, 0.0), (0.5, 1.0)], (mid[0], mid[1], radius / max(height, 1e-3)), mat)
+    mesh.poly('conebase', [(p[0], p[1], z0) for p in ring], [(p[0] - cx, p[1] - cy) for p in ring], (0.0, 0.0, -1.0), mat)
+
+
+def _build_tree_mesh(p, seed):
+    soup = _TowerMesh()
+    rng = random.Random(seed)
+    h = p["height"]
+    trunk_h = h * (0.35 if p["crown"] == 'CONE' else 0.45)
+    _soup_box(soup, 0.0, 0.0, 0.0, 0.34 + h * 0.015, 0.34 + h * 0.015, trunk_h, WOOD_SOURCE_SLOT)
+    if p["crown"] == 'ROUND':
+        rows, sides = 5, 9
+        r = h * 0.28
+        zc = trunk_h + r * 0.75
+        for ri in range(rows):
+            a0, a1 = math.pi * (ri / rows - 0.5), math.pi * ((ri + 1) / rows - 0.5)
+            for i in range(sides):
+                t0, t1 = 2 * math.pi * i / sides, 2 * math.pi * (i + 1) / sides
+                pts = [(r * math.cos(a) * math.cos(t), r * math.cos(a) * math.sin(t), zc + r * 0.85 * math.sin(a))
+                       for a, t in ((a0, t0), (a0, t1), (a1, t1), (a1, t0))]
+                nrm = (sum(q[0] for q in pts), sum(q[1] for q in pts), sum(q[2] - zc for q in pts))
+                soup.poly('crown', pts, [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)], nrm, LEAF_SOURCE_SLOT)
+    else:
+        tiers = 3
+        for ti in range(tiers):
+            z0 = trunk_h * 0.8 + ti * (h - trunk_h) * 0.27
+            radius = h * (0.27 - 0.06 * ti) * rng.uniform(0.92, 1.08)
+            _cone(soup, 0.0, 0.0, z0, radius, (h - z0) * (0.55 if ti < tiers - 1 else 1.0), 8, LEAF_SOURCE_SLOT)
+    return soup
+
+
+def _build_prop_mesh(kind, seed):
+    soup = _TowerMesh()
+    if kind == 'crate':
+        _soup_box(soup, 0.0, 0.0, 0.0, 0.8, 0.8, 0.8, WOOD_SOURCE_SLOT)
+    elif kind == 'barrel':
+        sides, r, hh = 10, 0.38, 0.95
+        ring = lambda z, rr: [(rr * math.cos(2 * math.pi * i / sides), rr * math.sin(2 * math.pi * i / sides), z) for i in range(sides)]
+        levels = [ring(0.0, r * 0.85), ring(hh * 0.5, r), ring(hh, r * 0.85)]
+        for lv in range(2):
+            for i in range(sides):
+                a, b = levels[lv][i], levels[lv][(i + 1) % sides]
+                c, d = levels[lv + 1][(i + 1) % sides], levels[lv + 1][i]
+                soup.poly('barrel', [a, b, c, d], [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)], ((a[0] + b[0]), (a[1] + b[1]), 0.0), WOOD_SOURCE_SLOT)
+        soup.poly('lid', levels[2], [(q[0], q[1]) for q in levels[2]], (0.0, 0.0, 1.0), WOOD_SOURCE_SLOT)
+    else:                                                  # haystack: a squat cone with a rounded shoulder
+        sides = 10
+        _cone(soup, 0.0, 0.0, 0.0, 1.2, 0.7, sides, ROOF_SOURCE_SLOT)
+        _cone(soup, 0.0, 0.0, 0.7, 0.95, 1.1, sides, ROOF_SOURCE_SLOT)
+    return soup
+
+
+def _plan_build_prop(context, node, world, seed, path):
+    where = "/".join(path)
+    kind = node["kind"]
+    params = node.get("params") or {}
+    style = plan_style_name(node.get("style"))
+    if kind == 'tree':
+        try:
+            p = _plan_checked({**PLAN_TREE_DEFAULTS, "brick_color": 'PLAIN', **params}, PLAN_TREE_RANGES,
+                              {"crown": ('CONE', 'ROUND'), "leaf": tuple(LEAF_COLORS)})
+        except PlanError as exc:
+            raise PlanError("%s: %s" % (where, exc))
+        soup = _build_tree_mesh(p, int(seed) % 1_000_000)
+        leaf = p["leaf"]
+    else:
+        soup = _build_prop_mesh(kind, int(seed) % 1_000_000)
+        leaf = None
+    mesh = soup.to_mesh("%s_%s" % (kind.capitalize(), node["id"]))
+    obj = bpy.data.objects.new(mesh.name, mesh)
+    context.scene.collection.objects.link(obj)
+    for mat_ in plan_material_slots(style, 'PLAIN', params.get("roof_color", 'THATCH') if kind == 'haystack' else None, True):
+        mesh.materials.append(mat_)
+    if leaf:
+        mesh.materials.append(get_or_create_leaf_material(leaf))
+    _add_viewport_color_attribute(mesh)
+    _plan_adopt_objects(context.scene, path, world, [obj])
+    return [obj]
+
+
 def _plan_build_house(context, node, world, seed, path):
     where = "/".join(path)
     try:
@@ -10630,12 +10799,13 @@ def _plan_build_house(context, node, world, seed, path):
     soup = _build_house_mesh(node["kind"], params, int(seed) % 1_000_000)
     name = "%s_%s" % (node["kind"].capitalize(), node["id"])
     return [_plan_add_mesh_object(context, soup, name, params["brick_color"], path, world, params["roof_color"],
-                                  style=params["style"])]
+                                  wood=True, style=params["style"])]
 
 
 PLAN_BUILDERS = {"tower": _plan_build_tower, "castle": _plan_build_castle,
                  "house": _plan_build_house, "chapel": _plan_build_house, "stable": _plan_build_house,
-                 "barn": _plan_build_house, "well": _plan_build_well, "keep": _plan_build_keep}
+                 "barn": _plan_build_house, "well": _plan_build_well, "keep": _plan_build_keep,
+                 "tree": _plan_build_prop, "barrel": _plan_build_prop, "crate": _plan_build_prop, "haystack": _plan_build_prop}
 
 
 def plan_build(context, root):
@@ -10726,6 +10896,9 @@ def plan_new_example(scene, kind, existing_ids):
                 {"kind": "house", "count": 1, "near": "wall"},
                 {"kind": "stable", "count": [0, 1], "near": "wall"},
                 {"kind": "well", "count": 1, "near": "ring", "ring": [0.0, 5.0]},
+                {"kind": "haystack", "count": [1, 3], "near": "wall"},
+                {"kind": "barrel", "count": [2, 4], "near": "wall", "min_gap": 0.6},
+                {"kind": "crate", "count": [1, 3], "near": "wall", "min_gap": 0.6},
             ]},
             anchors=[{"id": "gate", "kind": "gate", "pos": [0.0, -16.0, 0.0], "dir": 270.0, "width": 4.0, "level": 0}])
     if kind == 'HAMLET':
@@ -10736,6 +10909,8 @@ def plan_new_example(scene, kind, existing_ids):
                 {"kind": "chapel", "count": 1, "near": "ring", "ring": [10.0, 20.0], "min_gap": 3.0},   # the big one first
                 {"kind": "house", "count": [5, 7], "near": "ring", "ring": [8.0, 19.0], "min_gap": 3.0,
                  "vary": {"brick_color": ["PLAIN", "OCHRE", "SAND", "SLATE"], "roof_color": ["TERRACOTTA", "SLATE"]}},
+                {"kind": "tree", "count": [6, 10], "near": "ring", "ring": [19.0, 23.0], "min_gap": 0.5,
+                 "vary": {"leaf": ["GREEN", "DARK", "AUTUMN"], "crown": ["CONE", "ROUND"]}, "params": {"height": 6.5}},
             ]},
             children=[plan_node("well", "building", "well")])
     if kind in ('HOUSE', 'CHAPEL', 'STABLE'):
@@ -10756,6 +10931,7 @@ def plan_new_example(scene, kind, existing_ids):
                             {"kind": "chapel", "count": 1, "near": "wall"},
                             {"kind": "stable", "count": [1, 2], "near": "wall"},
                             {"kind": "house", "count": [2, 4]},
+                            {"kind": "tree", "count": 4, "near": "wall", "min_gap": 0.5, "vary": {"leaf": ["GREEN", "DARK"]}},
                         ]},
                         anchors=[{"id": "gate", "kind": "gate", "pos": [0.0, -half_d, 0.0], "dir": 270.0,
                                   "width": 4.0, "level": 0}],

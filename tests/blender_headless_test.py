@@ -3639,7 +3639,7 @@ def _ray(origin, direction):
     return loc if hit else None
 
 
-h1 = addon.plan_node("h1", "building", "house", params={})
+h1 = addon.plan_node("h1", "building", "house", params={"door_leaf": False})
 addon.plan_build(bpy.context, h1)
 x0, x1, y0, y1, z0, z1 = _bounds_of("h1")
 d = addon.PLAN_HOUSE_DEFAULTS["house"]
@@ -3665,7 +3665,7 @@ addon.plan_build(bpy.context, hr)
 _, _, _, _, _, rz = _bounds_of("hr")
 check("House: a ruin has no roof or floating slab", rz <= d["wall_height"] + 0.4, str(rz))
 # rotation and position
-hp = addon.plan_node("hp", "building", "house", transform={"x": 50.0, "y": 20.0, "z": 3.0, "rot": 90.0})
+hp = addon.plan_node("hp", "building", "house", transform={"x": 50.0, "y": 20.0, "z": 3.0, "rot": 90.0}, params={"door_leaf": False})
 addon.plan_build(bpy.context, hp)
 x0, x1, y0, y1, z0, z1 = _bounds_of("hp")
 check("House: placed at its plan position and rotated (7 m side now along y)",
@@ -3871,7 +3871,7 @@ def _roof_mesh(plan):
 
 rt = _roof_mesh(addon.plan_node("rt", "building", "house"))
 mats = [m.name if m else None for m in rt.data.materials]
-check("Roof: a default house has brick, stone and terracotta slots", mats[-1] == "LA_Roof_Terracotta" and len(mats) == 3, str(mats))
+check("Roof: a default house has brick, stone, terracotta and wood slots", mats[2] == "LA_Roof_Terracotta" and mats[3] == "LA_Wood" and len(mats) == 4, str(mats))
 roof_polys = [p for p in rt.data.polygons if p.material_index == 2]
 check("Roof: roof faces use the roof slot and sit above the walls",
       len(roof_polys) >= 8 and all(p.center.z >= addon.PLAN_HOUSE_DEFAULTS["house"]["wall_height"] - 0.3 for p in roof_polys))
@@ -3880,12 +3880,12 @@ check("Roof: the walls keep the brick slot (nothing below the eaves uses the roo
 img = bpy.data.images.get("LA_Roof_Terracotta_Albedo")
 check("Roof: tile texture is generated and packed", img is not None and img.packed_file is not None)
 ch = _roof_mesh(addon.plan_node("rc", "building", "chapel"))
-check("Roof: the chapel defaults to slate", ch.data.materials[-1].name == "LA_Roof_Slate")
+check("Roof: the chapel defaults to slate", ch.data.materials[2].name == "LA_Roof_Slate")
 st = _roof_mesh(addon.plan_node("rs", "building", "house", params={"roof_color": "STONE"}))
-check("Roof: roof_color STONE keeps the dressed-stone look", st.data.materials[-1].name == "LA_Tower_Stone")
+check("Roof: roof_color STONE keeps the dressed-stone look", st.data.materials[2].name == "LA_Tower_Stone")
 tinted = _roof_mesh(addon.plan_node("rtn", "building", "house", params={"brick_color": "SLATE"}))
 check("Roof: a tinted house has tints + stone + roof slots and roof faces still use the last one",
-      len(tinted.data.materials) == len(addon.BRICK_TINTS) + 2
+      len(tinted.data.materials) == len(addon.BRICK_TINTS) + 3
       and any(p.material_index == len(addon.BRICK_TINTS) + 1 for p in tinted.data.polygons))
 w = _roof_mesh(addon.plan_node("rw", "building", "well"))
 check("Roof: the well roof uses the roof material", w.data.materials[-1].name == "LA_Roof_Terracotta"
@@ -3975,7 +3975,7 @@ ham = addon.plan_new_example(scene, 'HAMLET', set())
 exp, warns = addon.plan_expand_layout(ham)
 houses = [c for c in exp["children"] if c["kind"] == "house"]
 check("Hamlet: 5-7 houses and a chapel around the well", 5 <= len(houses) <= 7 and any(c["kind"] == "chapel" for c in exp["children"]), str(warns))
-ringd = [math.hypot(c["transform"]["x"], c["transform"]["y"]) for c in exp["children"] if c.get("generated")]
+ringd = [math.hypot(c["transform"]["x"], c["transform"]["y"]) for c in exp["children"] if c.get("generated") and c["kind"] != "tree"]
 check("Hamlet: everything sits inside the ring radii (8-20 m)", all(7.5 <= d <= 20.5 for d in ringd), str(ringd))
 check("Hamlet: house doors face the well", all(
     abs(((math.degrees(math.atan2(-c["transform"]["y"], -c["transform"]["x"])) % 360.0) - (c["transform"]["rot"] - 90.0) % 360.0) + 180.0) % 360.0 - 180.0 <= 46.0
@@ -4228,7 +4228,7 @@ for i, style in enumerate(addon.PLAN_STYLES):
     house = next(o for o in bpy.data.objects if o.name.startswith("PB_st_%s.house" % style) and o.type == 'MESH')
     names = [m.name for m in house.data.materials]
     if style == "medieval":
-        check("Styles: medieval keeps the brick/stone/roof list", names[0] == "LA_Tower_Brick" and len(names) == 3, str(names))
+        check("Styles: medieval keeps the brick/stone/roof list", names[0] == "LA_Tower_Brick" and len(names) == 4, str(names))
     else:
         spec = addon.PLAN_STYLES[style]
         check("Styles: %s house has wall, trim, roof and wood slots" % style,
@@ -4303,6 +4303,85 @@ check("Styles: the Plans panel draws with the style dropdown",
 check("Styles: every style material is generated and packed",
       all(addon.get_style_material(k).node_tree is not None for k in addon._STYLE_TEXTURES)
       and all(bpy.data.images.get("LA_Style_%s_Albedo" % k.title().replace("_", "")).packed_file is not None for k in addon._STYLE_TEXTURES))
+
+# ==============================================================================
+print("\n--- Plans: polish round 2 (stairs, door leaf, kerb joins, trees and props) ---")
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+# stairs in a two-storey house
+two = addon.plan_node("two", "building", "house", params={"floors": 2, "door_leaf": False, "width": 9.0, "depth": 6.0},
+                      transform={"x": 0.0, "y": 0.0, "z": 0.0, "rot": 0.0})
+addon.plan_build(bpy.context, two)
+bpy.context.view_layer.update()
+d2 = 2.8
+band_y = 3.0 - 0.225 - 0.5                      # middle of the stair band along the north wall
+hit = _ray((-1.0, band_y, 4.0), (0.0, 0.0, -1.0))
+check("Stairs: the opening above the stair is open (a ray from the upper floor reaches a step, not the slab)",
+      hit is not None and 0.3 < hit.z < d2 - 0.3, str(hit))
+hit = _ray((0.0, -1.5, 1.0), (0.0, 0.0, 1.0))
+check("Stairs: the rest of the ceiling is still closed", hit is not None and abs(hit.z - (d2 - 0.2)) < 0.05, str(hit))
+hit = _ray((-3.9, band_y, 0.5), (0.0, 0.0, 1.0))
+check("Stairs: the stair starts low and rises (a ray over the first step meets the slab)", hit is not None and hit.z <= d2 + 0.01, str(hit))
+check("Stairs: a single-storey house has no stair (nothing blocks a ray along the north wall)",
+      addon.plan_house_params("house", {"floors": 1}, None)["stairs"] is True)
+tiny = addon.plan_node("tiny2", "building", "house", params={"floors": 2, "width": 4.2, "depth": 4.0, "door_leaf": False},
+                       transform={"x": 300.0, "y": 0.0, "z": 0.0, "rot": 0.0})
+check("Stairs: a house too small for a stair still builds (the slab stays closed)", addon.plan_build(bpy.context, tiny)["built"] == ["tiny2"])
+# door leaf
+lf = addon.plan_node("lf", "building", "house", transform={"x": 400.0, "y": 0.0, "z": 0.0, "rot": 0.0})
+nl = addon.plan_node("nl", "building", "house", params={"door_leaf": False}, transform={"x": 500.0, "y": 0.0, "z": 0.0, "rot": 0.0})
+addon.plan_build(bpy.context, lf)
+addon.plan_build(bpy.context, nl)
+check("Door leaf: the open leaf sticks out in front of the door", _bounds_of("lf")[2] < _bounds_of("nl")[2] - 0.5,
+      str((_bounds_of("lf")[2], _bounds_of("nl")[2])))
+hit = _ray((400.0, -9.0, 1.0), (0.0, 1.0, 0.0))
+check("Door leaf: the doorway itself stays open", hit is not None and hit.y > 1.5, str(hit))
+leaf_obj = next(o for o in bpy.data.objects if o.name.startswith("PB_lf") and o.type == 'MESH')
+check("Door leaf: it uses the wood slot", any(p.material_index == 3 for p in leaf_obj.data.polygons))
+for side in ("E", "N", "W"):
+    n_ = addon.plan_node("s_" + side.lower(), "building", "house", params={"door": side}, transform={"x": 600.0 + 40 * "ENW".index(side), "y": 0.0, "z": 0.0, "rot": 0.0})
+    check("Door leaf: a house with its door on the %s side builds" % side, addon.plan_build(bpy.context, n_)["built"] == ["s_" + side.lower()])
+# kerb continues across a straight joint
+line = addon.plan_node("ln", "block", "street", params={
+    "road_graph": {"nodes": {"a": [-20, 0], "m": [0, 0], "b": [20, 0]}, "edges": [["a", "m"], ["m", "b"]]}, "skip_chance": 1.0},
+    transform={"x": 800.0, "y": 0.0, "z": 0.0, "rot": 0.0})
+addon.plan_build(bpy.context, line)
+bpy.context.view_layer.update()
+hit = _ray((800.0, 2.45, 2.0), (0.0, 0.0, -1.0))
+check("Kerb: no gap in the kerb where two collinear road segments meet", hit is not None and hit.z > 0.12, str(hit))
+# trees and props
+for kind, params in (("tree", {}), ("tree", {"crown": "ROUND", "leaf": "AUTUMN", "height": 9.0}), ("barrel", {}), ("crate", {}), ("haystack", {})):
+    n_ = addon.plan_node("pr_" + kind, "building", kind, params=params, transform={"x": 900.0, "y": 0.0, "z": 0.0, "rot": 0.0})
+    check("Props: %s %s builds" % (kind, params), addon.plan_build(bpy.context, n_)["built"] == ["pr_" + kind])
+bpy.context.view_layer.update()
+tree = addon.plan_node("tr", "building", "tree", params={"height": 8.0}, transform={"x": 950.0, "y": 0.0, "z": 0.0, "rot": 0.0})
+addon.plan_build(bpy.context, tree)
+x0, x1, y0, y1, z0, z1 = _bounds_of("tr")
+check("Props: a tree is as tall as asked and has a crown wider than its trunk", abs(z1 - 8.0) < 0.3 and (x1 - x0) > 2.0, str((x1 - x0, z1)))
+tobj = next(o for o in bpy.data.objects if o.name.startswith("PB_tr") and o.type == 'MESH')
+check("Props: tree material slots end with the leaf colour", tobj.data.materials[-1].name == "LA_Leaf_Green" and any(p.material_index == 4 for p in tobj.data.polygons))
+check("Props: a tree stays cheap (< 400 vertices)", len(tobj.data.vertices) < 400, str(len(tobj.data.vertices)))
+try:
+    addon.plan_build(bpy.context, addon.plan_node("tb", "building", "tree", params={"leaf": "PINK"}))
+    refused = False
+except addon.PlanError as exc:
+    refused = "leaf" in str(exc)
+check("Props: an unknown leaf colour is refused", refused)
+hay = addon.plan_node("hy", "building", "haystack", transform={"x": 1000.0, "y": 0.0, "z": 0.0, "rot": 0.0})
+addon.plan_build(bpy.context, hay)
+hobj = next(o for o in bpy.data.objects if o.name.startswith("PB_hy") and o.type == 'MESH')
+check("Props: a haystack uses the thatch roof material", hobj.data.materials[2].name == "LA_Style_Thatch")
+# hamlet and farm now have trees and props
+ham = addon.plan_new_example(scene, 'HAMLET', set())
+exp, _ = addon.plan_expand_layout(ham)
+check("Props: the hamlet gets trees around its edge", sum(c["kind"] == "tree" for c in exp["children"]) >= 3)
+farm = addon.plan_new_example(scene, 'FARM', set())
+exp, _ = addon.plan_expand_layout(farm)
+check("Props: the farm gets haystacks, barrels and crates", {c["kind"] for c in exp["children"]} >= {"haystack", "barrel", "crate"})
+check("Props: farm and hamlet still build", len(addon.plan_build(bpy.context, farm)["built"]) > 6
+      and len(addon.plan_build(bpy.context, ham)["built"]) > 10)
 
 # ==============================================================================
 print()
