@@ -4,7 +4,7 @@ Internal dev-facing doc: what's built, what's known-broken, what's next. Not for
 (see `dist/README.md` for that). Source of truth for the addon's actual behavior is always
 `levelArchitect_v2.py` — this file can drift out of date; the code can't.
 
-Current version: **0.55.0** (see `bl_info` in the source file).
+Current version: **0.56.0** (see `bl_info` in the source file).
 
 §2 (Development tree) was condensed 2026-08-21 — dropped the blow-by-blow investigation
 narrative and per-run stress-test numbers from older, fully-resolved entries, kept every
@@ -753,6 +753,7 @@ GN complexity there specifically.
       too zoomed-out to show doorway-level detail) confirmed the frame visibly follows the wall's
       curve right at the opening, not standing at a mismatched straight angle against it.
 
+- [x] **Pictures, instancing, rounded roads, hut UVs (0.56.0).** `plan_parse_raster` (legend classify -> block-reduce -> flood-fill components -> min rect / hull / circle; roads via `_thin_mask` + `_trace_skeleton` + `_simplify_line`), `_plan_image_pixels` (linear -> sRGB), `_PLAN_INSTANCING` + `_plan_instance_key` / `_plan_instance_params` / `_plan_add_instance` (houses, huts), `plan_build` split into `_plan_build_nodes`; `_build_road_mesh` rounded nodes (discs + kerb arcs); `_grid_shell` ring/meridian UVs for wrapped shells.
 - [x] **Heightmaps, multi-biome regions (0.55.0).** (+ `pad_mode: terrain`: `_terrain_retarget` lifts plan nodes via `resolved` world z and rewrites `road_graph.z`.) `plan_terrain_params` builds `extras` (legacy region_biome + `regions`, max 3); `_terrain_masks` (one mask per extra, attributes `region`, `region_2`, `region_3`), `_terrain_heightmap` (file or datablock -> bilinear 0..1 -> `hm` attribute); GN: `chain()` pulls amplitude/feature/base/sea toward each extra, ramp/rock/earth mixes per extra, heightmap mix + colour range; scatter uses cascade weights per biome.
 - [x] **Floor-plan import, polygon regions (0.54.0).** `plan_parse_svg` (transforms, paths, rect/polygon/line/circle), `plan_parse_dxf` (LINE, LWPOLYLINE, POLYLINE, CIRCLE), `_min_rect`, `plan_import_shapes` (yards adopt buildings, road graph merge, biome-labelled shapes -> terrain regions), `plan_import_file`, `OBJECT_OT_PlanImport`; `region_polygons` in `plan_terrain_params` / `_terrain_region`.
 - [x] **Districts (0.53.0).** `_block_obstacles` (convex outlines of all other buildings/roads in the block frame) passed to `_expand_block(obstacles=)`; `CITY` example.

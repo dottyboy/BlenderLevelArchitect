@@ -3,6 +3,17 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.56.0 — plans: pictures, instancing, rounded roads, round-hut UVs
+
+- **Import a floor plan from a picture** (PNG, JPG, BMP, TIFF, WebP — *Import Plan (SVG, DXF, image)...*): a colour legend says what each colour is
+  (`PLAN_RASTER_LEGEND`: red house, magenta chapel, orange barn, yellow stable, purple tower, green tree, brown/grey yard, dark grey road, sand / dark green / pale blue /
+  light grey desert / forest / tundra / mountain regions). Filled areas become buildings (smallest rotated rectangle) or yards and regions (outline), blobs trees
+  or towers, strokes of the road colour are thinned to centre lines (Zhang-Suen) and simplified. Example: `docs/examples/village_plan.png` (0.15 m per pixel).
+- **Instancing**: `params.instancing` on a plan's root (`true` = 4 variants, or a number) makes houses and huts of the same kind and parameters share a few meshes
+  (sizes snap to whole metres); a city is stored once per variant instead of once per house. The City example uses it.
+- **Rounded road corners**: at dead ends and bends (> 12 degrees) the ribbon now ends in a disc with a curved kerb instead of a square corner; junctions of three or more roads keep the overlap.
+- **Round huts (dome, silo)**: textures run around each ring in whole tiles and along the meridian — no diagonal planar smear, no seam.
+
 ## 0.55.0 — plans: heightmaps and several region biomes
 
 - **Heightmap terrain**: `params.heightmap` = `{"file": "map.png"}` (relative to the .blend, or absolute) or `{"image": "name in this file"}`, with `height`

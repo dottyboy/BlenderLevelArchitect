@@ -120,6 +120,10 @@ placed on it and the ground is flattened under them.
   centre instead, streets flat at the mean height under their roads, from/to paths sloping between their ends.
 * Not yet: heightmaps tiled or larger than one terrain, region biomes with their own water level blended across one terrain, terrain from a heightmap image, roads that curve with the ground.
 
+### Instancing
+
+`"instancing": true | N` on the root node: buildings of the same kind and the same (size-snapped) parameters share `N` meshes (default 4), chosen by seed; each building is still its own object.
+
 ### Block extras
 
 `"infill": 1.0` (default 0) adds a second pass: random spots inside the block outline, up to `infill_reach` (24 m) from a road, turned toward the nearest road,

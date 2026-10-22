@@ -108,9 +108,12 @@ and up to three more biomes can take over inside polygons or noise-made patches 
 
 <p align="center"><img src="docs/img/svgplan.png" alt="A village built from an SVG floor plan: houses, a chapel, a walled farm, roads and a tower, with a desert region marked in the drawing" width="900"></p>
 
-Draw the site in Inkscape (or export a DXF from CAD), label the shapes (`house`, `chapel`, `farm_yard_wood`, `road_main`, `desert_dunes` ...) and import it —
+Draw the site in Inkscape (or export a DXF from CAD — or paint a PNG with the colour legend), label the shapes (`house`, `chapel`, `farm_yard_wood`, `road_main`, `desert_dunes` ...) and import it —
 closed outlines become buildings or fenced yards, lines become roads, circles trees and towers, and a shape labelled with a biome becomes a terrain region.
 Try [docs/examples/village_plan.svg](docs/examples/village_plan.svg) with *Metres per unit* = 0.12.
+The same village painted as a picture with the colour legend ([docs/examples/village_plan.png](docs/examples/village_plan.png), 0.15 m per pixel):
+
+<p align="center"><img src="docs/img/picplan.png" alt="A village imported from a coloured PNG: houses, a barn, a wooden yard, a tower, roads with rounded ends and a desert region" width="900"></p>
 
 ### Seven style packs and a mix
 

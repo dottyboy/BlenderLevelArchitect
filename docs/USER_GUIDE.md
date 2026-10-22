@@ -210,6 +210,17 @@ and the vegetation are placed at build time, so press **Build** again after big 
 `depth`, `resolution` (grid cell, smaller = finer and slower), `scatter` (vegetation density, 0 = none), and override the biome's numbers
 (`amplitude`, `feature_size`, `sea_level`, `island`, ...) — see [PLAN_FORMAT.md](PLAN_FORMAT.md).
 
+### Importing a picture
+
+A PNG or JPG works too, coloured by a legend: **red** house, **magenta** chapel, **orange** barn, **yellow** stable, **purple** tower, **green** tree, **brown** wooden yard,
+**blue-grey** stone yard, **dark grey** road (any thickness — it is thinned to a centre line), and for regions **sand** desert, **dark green** forest, **pale blue** tundra,
+**light grey** mountain. Colours need not be exact (about 55 levels of tolerance), white is empty. Set *Metres per pixel*; try `docs/examples/village_plan.png` with 0.15.
+
+### Big cities: instancing
+
+Put `"instancing": true` (or a number of variants) in the plan's root `params`: houses and huts of the same kind and parameters then share a few meshes
+(their sizes snap to whole metres), so a city of hundreds of buildings stays light. The City example has it on.
+
 ### Importing a floor plan (SVG / DXF)
 
 Draw the site in Inkscape (or any CAD that exports DXF) and press **Import SVG/DXF...** in the Plans panel; set *Metres per unit* so one drawing unit is

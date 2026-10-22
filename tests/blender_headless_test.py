@@ -5226,6 +5226,112 @@ except OSError:
     pass
 
 # ==============================================================================
+print("\n--- Plans: instancing, rounded roads, round-hut UVs, raster import ---")
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+import numpy as _np3
+street_i = lambda inst: addon.plan_node("st", "block", "street", params={"instancing": inst,
+    "road_graph": {"nodes": {"a": [-60.0, 0.0], "b": [60.0, 0.0]}, "edges": [["a", "b"]]}, "road_width": 5.0, "lot_width": 9.0, "lot_depth": 11.0, "skip_chance": 0.0,
+    "fill": [{"kind": "house", "weight": 1, "size": {"width": [6.0, 7.4], "depth": [5.0, 5.4], "floors": [1, 1]},
+              "vary": {"brick_color": ["PLAIN", "OCHRE"], "roof_color": ["TERRACOTTA", "SLATE"]}}]})
+addon.plan_build(bpy.context, street_i(0))
+plain = [o for o in bpy.data.objects if o.name.startswith("PB_st.") and "House_" in o.name]
+check("Instancing: without it every house has its own mesh", len(plain) >= 10 and len({o.data.name for o in plain}) == len(plain), "%d/%d" % (len({o.data.name for o in plain}), len(plain)))
+addon.plan_build(bpy.context, street_i(1))
+inst = [o for o in bpy.data.objects if o.name.startswith("PB_st.") and "House_" in o.name]
+check("Instancing: with it houses share meshes (far fewer meshes than houses)", len({o.data.name for o in inst}) <= len(inst) / 2.0 and len(inst) >= 10, "%d meshes for %d houses" % (len({o.data.name for o in inst}), len(inst)))
+check("Instancing: shared meshes have several users and keep their materials", max(o.data.users for o in inst) >= 2 and all(len(o.data.materials) >= 2 for o in inst))
+sizes = [round(max(v.co.x for v in o.data.vertices) - min(v.co.x for v in o.data.vertices), 1) for o in inst[:3]]
+z0 = len([m_ for m_ in bpy.data.meshes if m_.users == 0])
+addon.plan_build(bpy.context, street_i(1))
+check("Instancing: rebuilding the plan leaves no stale meshes behind", len([m_ for m_ in bpy.data.meshes if m_.users == 0]) == z0)
+check("Instancing: the City example turns it on", addon.plan_new_example(bpy.context.scene, 'CITY', set())["params"]["instancing"] == 4)
+
+# rounded roads
+rr = addon.plan_node("rr", "block", "street", params={"road_graph": {"nodes": {"a": [0.0, 0.0], "b": [30.0, 0.0], "c": [30.0, 30.0]}, "edges": [["a", "b"], ["b", "c"]]},
+                                                     "road_width": 6.0, "fill": []})
+addon.plan_build(bpy.context, rr)
+road = [o for o in bpy.data.objects if o.name.startswith("PB_rr")][0]
+xs = [v.co.x for v in road.data.vertices]
+check("Roads: a bend is rounded, not a square corner (nothing beyond the road's half width past the node)", max(xs) < 30.0 + 3.0 + 0.3, "%.2f" % max(xs))
+check("Roads: the dead ends are rounded caps (no square overshoot at the first node)", min(xs) > -3.0 - 0.3 and min(xs) < -2.0, "%.2f" % min(xs))
+tee = addon.plan_node("tee", "block", "street", params={"road_graph": {"nodes": {"a": [-20.0, 0.0], "b": [20.0, 0.0], "c": [0.0, 20.0], "m": [0.0, 0.0]},
+                                                                      "edges": [["a", "m"], ["m", "b"], ["m", "c"]]}, "road_width": 6.0, "fill": []})
+addon.plan_build(bpy.context, tee)
+check("Roads: a T-junction still builds", any(o.name.startswith("PB_tee") for o in bpy.data.objects))
+
+# round-hut UVs
+hut_i = addon.plan_node("dm", "building", "hut", params={"construction": "earth", "form": "DOME"})
+addon.plan_build(bpy.context, hut_i)
+dome = [o for o in bpy.data.objects if o.name.startswith("PB_dm")][0]
+uvl = dome.data.uv_layers.active
+us = [uvl.data[i].uv[0] for i in range(len(uvl.data))]
+check("UV: a dome's u runs around in whole tiles (range well above 1 and no planar diagonal)", max(us) > 1.5, "%.2f" % max(us))
+loops = {}
+ok_seam = True
+for poly in dome.data.polygons:
+    pu = [uvl.data[i].uv[0] for i in poly.loop_indices]
+    if max(pu) - min(pu) > 6.0:
+        ok_seam = False
+check("UV: no face is smeared across the whole texture (wrap seam is clean)", ok_seam)
+
+# raster import
+def _px(w, h):
+    return _np3.full((h, w, 3), 255.0, dtype=_np3.float32)
+img = _px(240, 160)
+def _fill(a, x0, y0, x1, y1, col):
+    a[y0:y1, x0:x1] = col
+_fill(img, 20, 20, 120, 100, (110, 110, 125))              # yard_stone
+_fill(img, 35, 35, 65, 60, (235, 140, 30))                 # barn inside
+_fill(img, 80, 40, 105, 75, (200, 50, 50))                 # house inside
+_fill(img, 150, 30, 190, 55, (200, 60, 200))               # chapel
+_fill(img, 0, 130, 240, 136, (70, 70, 70))                 # road, 6 px thick
+_fill(img, 120, 100, 126, 160, (70, 70, 70))               # side road
+for (cx, cy) in ((200, 100), (215, 112)):                  # trees
+    yy, xx = _np3.mgrid[0:160, 0:240]
+    img[(xx - cx) ** 2 + (yy - cy) ** 2 <= 36] = (50, 160, 60)
+_fill(img, 170, 120, 238, 158, (237, 201, 125))            # desert region
+rshapes = addon.plan_parse_raster(img)
+kinds = sorted(s_["label"] for s_ in rshapes)
+check("Raster: the legend finds yard, barn, house, chapel, trees, desert and roads", {"yard_stone", "barn", "house", "chapel", "tree", "desert", "road"} <= set(kinds), str(kinds))
+check("Raster: the two thick roads become lines (a junction in the middle of one)", len([s_ for s_ in rshapes if s_["kind"] == "line"]) >= 2)
+rplan = addon.plan_import_shapes(rshapes, "pic", 0.5)
+check("Raster: it imports as a terrain with the desert region (a biome-coloured area)", rplan["type"] == "terrain" and rplan["params"]["regions"][0]["biome"] == "desert")
+yard_r = [c for c in rplan["children"] if c["type"] == "compound"][0]
+check("Raster: the barn and the house are adopted by the yard", {c["kind"] for c in yard_r["children"]} == {"barn", "house"}, str([c["kind"] for c in yard_r["children"]]))
+h_r = [c for c in yard_r["children"] if c["kind"] == "house"][0]
+check("Raster: sizes follow the pixel scale (25 x 35 px at 0.5 m = 12.5 x 17.5 m)", sorted([round(h_r["params"]["width"]), round(h_r["params"]["depth"])]) in ([12, 18], [13, 18], [12, 17], [13, 17]), str(h_r["params"]))
+check("Raster: the plan validates and builds", not addon.plan_validate(rplan)[0] and len(addon.plan_build(bpy.context, rplan)["built"]) >= 5)
+try:
+    addon.plan_parse_raster(_px(40, 40))
+    check("Raster: an image with no legend colours is refused", False)
+except addon.PlanError:
+    check("Raster: an image with no legend colours is refused", True)
+# a PNG file round trip (sRGB colours survive the loader)
+png_img = bpy.data.images.new("gla_test_plan_png", 240, 160)
+lin = (img / 255.0)[::-1]                                  # 8-bit images hold the displayed (sRGB) values
+rgba = _np3.concatenate([lin, _np3.ones((160, 240, 1))], axis=2).astype(_np3.float32)
+png_img.pixels.foreach_set(rgba.ravel())
+png_path = os.path.join(bpy.app.tempdir or "/tmp", "gla_test_plan.png")
+png_img.filepath_raw = png_path
+png_img.file_format = 'PNG'
+png_img.save()
+fplan = addon.plan_import_file(png_path, "frompng", 0.5)
+fkinds = sorted(c["kind"] for c in fplan["children"])
+check("Raster: a PNG file imports the same way (colours survive the file, only the desert region)", fplan["type"] == "terrain" and "yard" in fkinds and "chapel" in fkinds
+      and [r["biome"] for r in fplan["params"]["regions"]] == ["desert"], str(fkinds) + str(fplan["params"].get("regions", ""))[:80])
+ex_plan = addon.plan_import_file(os.path.join(os.path.dirname(addon.__file__), "docs", "examples", "village_plan.png"), "ex", 0.15)
+check("Raster: the example picture gives a desert terrain with a farm yard, houses, a chapel, a tower and trees",
+      ex_plan["type"] == "terrain" and {"yard", "chapel", "tower", "tree", "house"} <= {c["kind"] for c in ex_plan["children"]} | {k["kind"] for c in ex_plan["children"] for k in c.get("children", [])},
+      str(sorted({c["kind"] for c in ex_plan["children"]})))
+try:
+    os.remove(png_path)
+except OSError:
+    pass
+
+# ==============================================================================
 print("\n--- Plans: walled town ---")
 for o in list(bpy.data.objects):
     bpy.data.objects.remove(o, do_unlink=True)

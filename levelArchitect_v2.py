@@ -33,7 +33,7 @@ from bpy_extras.io_utils import ExportHelper, ImportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 55, 0),
+    "version": (0, 56, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -10488,17 +10488,211 @@ def plan_import_shapes(shapes, plan_id="imported", scale=1.0, flip_y=True, style
     return plan_node(plan_id, "settlement", "imported", style=style, children=children)
 
 
-def plan_import_file(path, plan_id=None, scale=1.0, style=None):
-    """Reads an .svg or .dxf and returns the plan tree (not stored). Raises PlanError / OSError."""
+# Raster floor plans (PNG, JPG ...): a colour legend says what each colour is (red = house, grey = road ...); filled areas of a colour
+# become buildings / yards / biome regions, thin or thick grey strokes become roads (thinned to a centre line), blobs become trees or towers.
+PLAN_RASTER_LEGEND = {
+    "house": (200, 50, 50), "chapel": (200, 60, 200), "barn": (235, 140, 30), "stable": (235, 210, 40), "tower": (130, 70, 170),
+    "tree": (50, 160, 60), "yard_wood": (150, 100, 50), "yard_stone": (110, 110, 125), "road": (70, 70, 70),
+    "desert": (237, 201, 125), "forest": (20, 90, 40), "tundra": (200, 225, 240), "mountain": (160, 160, 165),
+}
+
+
+def _thin_mask(mask):
+    """Zhang-Suen thinning of a boolean image to one-pixel-wide centre lines."""
+    import numpy as np
+    img = mask.astype(np.int16)
+    changed = True
+    while changed:
+        changed = False
+        for step in (0, 1):
+            P = np.pad(img, 1)
+            p2, p3, p4, p5 = P[:-2, 1:-1], P[:-2, 2:], P[1:-1, 2:], P[2:, 2:]
+            p6, p7, p8, p9 = P[2:, 1:-1], P[2:, :-2], P[1:-1, :-2], P[:-2, :-2]
+            nb = p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9
+            ring = [p2, p3, p4, p5, p6, p7, p8, p9, p2]
+            trans = sum(((ring[k] == 0) & (ring[k + 1] == 1)).astype(np.int16) for k in range(8))
+            cond = (img == 1) & (nb >= 2) & (nb <= 6) & (trans == 1)
+            cond &= ((p2 * p4 * p6 == 0) & (p4 * p6 * p8 == 0)) if step == 0 else ((p2 * p4 * p8 == 0) & (p2 * p6 * p8 == 0))
+            if cond.any():
+                img[cond] = 0
+                changed = True
+    return img.astype(bool)
+
+
+def _trace_skeleton(skel):
+    """Polylines [(x, y), ...] (pixel centres) following a one-pixel skeleton from end to end and junction to junction."""
+    import numpy as np
+    pts = {(int(x), int(y)) for y, x in np.argwhere(skel)}
+    nbrs = {p: [(p[0] + dx, p[1] + dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1) if (dx or dy) and (p[0] + dx, p[1] + dy) in pts] for p in pts}
+    seen_edges, lines = set(), []
+
+    def walk(start, nxt):
+        line = [start, nxt]
+        seen_edges.add((start, nxt))
+        seen_edges.add((nxt, start))
+        prev, cur = start, nxt
+        while len(nbrs[cur]) == 2:
+            cand = [q for q in nbrs[cur] if q != prev and (cur, q) not in seen_edges]
+            if not cand:
+                break
+            nxt2 = cand[0]
+            seen_edges.add((cur, nxt2))
+            seen_edges.add((nxt2, cur))
+            line.append(nxt2)
+            prev, cur = cur, nxt2
+            if cur == start:
+                break
+        return line
+    for p in sorted(pts):
+        if len(nbrs[p]) != 2:
+            for q in nbrs[p]:
+                if (p, q) not in seen_edges:
+                    lines.append(walk(p, q))
+    for p in sorted(pts):                                      # closed loops without end or junction
+        for q in nbrs[p]:
+            if (p, q) not in seen_edges:
+                lines.append(walk(p, q))
+    return lines
+
+
+def _simplify_line(points, tol):
+    """Douglas-Peucker simplification."""
+    if len(points) <= 2:
+        return list(points)
+    (ax, ay), (bx, by) = points[0], points[-1]
+    L = math.hypot(bx - ax, by - ay) or 1e-9
+    far, idx = 0.0, 0
+    for i in range(1, len(points) - 1):
+        d = abs((points[i][0] - ax) * (by - ay) - (points[i][1] - ay) * (bx - ax)) / L if L > 1e-9 else math.hypot(points[i][0] - ax, points[i][1] - ay)
+        if d > far:
+            far, idx = d, i
+    if far <= tol:
+        return [points[0], points[-1]]
+    return _simplify_line(points[:idx + 1], tol)[:-1] + _simplify_line(points[idx:], tol)
+
+
+def plan_parse_raster(rgb, legend=None, tolerance=55.0, max_size=320, min_area=6):
+    """Shapes (like plan_parse_svg) from an RGB image array (rows top to bottom, 0..255). Each legend colour names a kind;
+    pixels farther than `tolerance` from every legend colour are ignored. Large images are reduced to `max_size` pixels."""
+    import numpy as np
+    from collections import deque
+    legend = legend or PLAN_RASTER_LEGEND
+    arr = np.asarray(rgb, dtype=np.float32)
+    if arr.ndim != 3 or arr.shape[2] < 3:
+        raise PlanError("the image needs colour (RGB) pixels")
+    arr = arr[..., :3]
+    names = list(legend)
+    cols = np.array([legend[n] for n in names], dtype=np.float32)
+    dist = np.sqrt(((arr[:, :, None, :] - cols[None, None, :, :]) ** 2).sum(axis=3))
+    cls = np.where(dist.min(axis=2) <= tolerance, dist.argmin(axis=2), -1)
+    h, w = cls.shape
+    f = max(1, int(math.ceil(max(h, w) / float(max_size))))
+    if f > 1:                                                     # reduce: a block takes the class that fills most of it (any class beats nothing)
+        h2, w2 = h // f, w // f
+        blocks = cls[:h2 * f, :w2 * f].reshape(h2, f, w2, f).transpose(0, 2, 1, 3).reshape(h2, w2, f * f)
+        counts = np.stack([(blocks == k).sum(axis=2) for k in range(len(names))], axis=2)
+        best = counts.argmax(axis=2)
+        cls = np.where(counts.max(axis=2) > 0, best, -1)
+        h, w = h2, w2
+    shapes = []
+    for k, name in enumerate(names):
+        mask = cls == k
+        if not mask.any():
+            continue
+        if name == "road":
+            for line in _trace_skeleton(_thin_mask(mask)):
+                pts = _simplify_line([(x + 0.5, y + 0.5) for x, y in line], 1.5)
+                if len(pts) >= 2 and math.hypot(pts[-1][0] - pts[0][0], pts[-1][1] - pts[0][1]) >= 2.0:
+                    shapes.append({"kind": "line", "pts": pts, "label": "road", "width": float(mask.sum()) / max(len(line), 1)})
+            continue
+        seen = np.zeros_like(mask)
+        for y0, x0 in np.argwhere(mask):
+            if seen[y0, x0]:
+                continue
+            comp, queue = [], deque([(int(x0), int(y0))])
+            seen[y0, x0] = True
+            while queue:
+                x, y = queue.popleft()
+                comp.append((x, y))
+                for nx_, ny_ in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                    if 0 <= nx_ < w and 0 <= ny_ < h and mask[ny_, nx_] and not seen[ny_, nx_]:
+                        seen[ny_, nx_] = True
+                        queue.append((nx_, ny_))
+            if len(comp) < min_area:
+                continue
+            if name in ("tree", "tower") and not name.startswith("yard"):
+                cx = sum(p[0] for p in comp) / len(comp) + 0.5
+                cy = sum(p[1] for p in comp) / len(comp) + 0.5
+                shapes.append({"kind": "circle", "pts": [(cx, cy)], "r": math.sqrt(len(comp) / math.pi), "label": name, "width": 0.0})
+                continue
+            corners = [(x + dx, y + dy) for x, y in comp for dx in (0, 1) for dy in (0, 1)]
+            if name.startswith("yard") or name in ("desert", "forest", "tundra", "mountain", "meadow", "island"):
+                poly = _convex_hull(corners)
+            else:
+                cx, cy, rw, rd, rot = _min_rect(corners)
+                c, s_ = math.cos(math.radians(rot)), math.sin(math.radians(rot))
+                poly = [(cx + (a * rw / 2.0) * c - (b * rd / 2.0) * s_, cy + (a * rw / 2.0) * s_ + (b * rd / 2.0) * c)
+                        for a, b in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
+            shapes.append({"kind": "poly", "pts": [(float(x) * f, float(y) * f) for x, y in poly], "label": name, "width": 0.0})
+    if not shapes:
+        raise PlanError("no legend colour found in the image (red = house, grey = road, green = tree ...)")
+    for s_ in shapes:                                          # back to the original pixel size
+        if s_["kind"] == "circle":
+            s_["pts"] = [(s_["pts"][0][0] * f, s_["pts"][0][1] * f)]
+            s_["r"] *= f
+        elif s_["kind"] == "line":
+            s_["pts"] = [(x * f, y * f) for x, y in s_["pts"]]
+            s_["width"] *= f
+    return shapes
+
+
+def _plan_image_pixels(path=None, name=None):
+    """(rows top to bottom, 0..255 RGB array) of an image file or of an image of the .blend."""
+    import numpy as np
+    img, loaded = None, False
+    if name:
+        img = bpy.data.images.get(name)
+        if img is None:
+            raise PlanError("no image named %r in this file" % name)
+    else:
+        known = {os.path.normpath(bpy.path.abspath(i.filepath)) for i in bpy.data.images if i.filepath}
+        try:
+            img = bpy.data.images.load(path, check_existing=True)
+        except RuntimeError as exc:
+            raise PlanError("cannot read the image %r (%s)" % (path, exc))
+        loaded = os.path.normpath(path) not in known
+        _set_prop(img.colorspace_settings, 'name', 'sRGB')
+    iw, ih = img.size
+    if iw < 2 or ih < 2:
+        raise PlanError("the image is empty")
+    px = np.empty(iw * ih * img.channels, dtype=np.float32)
+    img.pixels.foreach_get(px)
+    ch = img.channels
+    cs = img.colorspace_settings.name
+    is_float = bool(img.is_float)
+    arr = px.reshape(ih, iw, ch)[::-1]                           # Blender stores rows bottom-up
+    arr = arr[..., :3] if ch >= 3 else np.repeat(arr[..., :1], 3, axis=2)
+    if loaded:
+        bpy.data.images.remove(img)
+    arr = np.clip(arr, 0.0, 1.0)
+    if is_float and cs != 'Non-Color':                           # float images hold scene-linear values; 8-bit ones already hold the familiar sRGB values
+        arr = np.where(arr <= 0.0031308, arr * 12.92, 1.055 * np.power(arr, 1.0 / 2.4) - 0.055)
+    return arr * 255.0
+
+
+def plan_import_file(path, plan_id=None, scale=1.0, style=None, legend=None):
+    """Reads an .svg, .dxf or a picture (.png/.jpg ..., coloured by PLAN_RASTER_LEGEND) and returns the plan tree (not stored). Raises PlanError / OSError."""
     ext = os.path.splitext(path)[1].lower()
+    base = re.sub(r"[^a-z0-9_]+", "_", os.path.splitext(os.path.basename(path))[0].lower()).strip("_") or "imported"
+    if ext in (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"):
+        return plan_import_shapes(plan_parse_raster(_plan_image_pixels(path=path), legend), plan_id or base, scale, True, style)
     with open(path, "r", encoding="utf-8", errors="replace") as fh:
         text = fh.read()
-    base = re.sub(r"[^a-z0-9_]+", "_", os.path.splitext(os.path.basename(path))[0].lower()).strip("_") or "imported"
     if ext == ".svg":
         return plan_import_shapes(plan_parse_svg(text), plan_id or base, scale, True, style)
     if ext == ".dxf":
         return plan_import_shapes(plan_parse_dxf(text), plan_id or base, scale, False, style)
-    raise PlanError("only .svg and .dxf drawings can be imported (got %r)" % ext)
+    raise PlanError("only .svg, .dxf drawings and .png / .jpg pictures can be imported (got %r)" % ext)
 
 
 def plan_to_json(root, revision=1):
@@ -10758,6 +10952,39 @@ def _plan_run_scene_operator(context, node, world, seed, path, op, mapping, pref
             mesh.materials.append(get_style_material(spec["trim"]))
     _plan_adopt_objects(scene, path, world, new_objects, absolute=True)
     return new_objects
+
+
+_PLAN_INSTANCING = {"variants": 0, "cache": {}}          # filled by plan_build while a plan with params.instancing builds
+
+
+def _plan_instance_key(key, seed):
+    """With instancing on, buildings of the same kind and parameters share a handful of meshes (variants chosen by seed): returns
+    (seed to build with, cache slot or None). Without instancing: (seed, None)."""
+    variants = _PLAN_INSTANCING["variants"]
+    if not variants:
+        return seed, None
+    v = int(seed) % variants
+    slot = _PLAN_INSTANCING["cache"].setdefault(key + (v,), {"mesh": None})
+    return plan_child_seed(v, "|".join(str(k) for k in key)) % 1_000_000, slot
+
+
+def _plan_instance_params(params):
+    """With instancing on, sizes snap to whole metres (heights to half metres) so that houses that differ by centimetres share a mesh."""
+    if not _PLAN_INSTANCING["variants"]:
+        return params
+    out = dict(params)
+    for key, step in (("width", 1.0), ("depth", 1.0), ("wall_height", 0.5)):
+        if isinstance(out.get(key), (int, float)):
+            out[key] = max(step, round(out[key] / step) * step)
+    return out
+
+
+def _plan_add_instance(context, mesh, name, path, world):
+    """A new object that shares an existing mesh (a linked duplicate): the geometry is stored once."""
+    obj = bpy.data.objects.new(name, mesh)
+    context.scene.collection.objects.link(obj)
+    _plan_adopt_objects(context.scene, path, world, [obj])
+    return obj
 
 
 def _plan_adopt_objects(scene, path, world, objects, absolute=False):
@@ -11509,6 +11736,32 @@ def _build_road_mesh(nodes, edges, zs=None):
     soup = _TowerMesh()
     tile = TOWER_TILE_W
     rects = [_edge_rect(nodes[a], nodes[b], w / 2.0) for a, b, w in edges]
+    # Rounded corners: at a dead end and at a bend (more than 12 degrees) the ribbon stops at the node and a disc closes it,
+    # with a curved kerb around the outside; junctions of three or more roads keep the square overlap.
+    incident = {}
+    for idx, (a, b, w) in enumerate(edges):
+        incident.setdefault(a, []).append((idx, b, w))
+        incident.setdefault(b, []).append((idx, a, w))
+    rounded = {}
+    for n, lst in incident.items():
+        if len(lst) == 1:
+            rounded[n] = "end"
+        elif len(lst) == 2:
+            (_i1, o1, _w1), (_i2, o2, _w2) = lst
+            u1 = (nodes[n][0] - nodes[o1][0], nodes[n][1] - nodes[o1][1])
+            u2 = (nodes[o2][0] - nodes[n][0], nodes[o2][1] - nodes[n][1])
+            ang = math.atan2(u1[0] * u2[1] - u1[1] * u2[0], u1[0] * u2[0] + u1[1] * u2[1])
+            if abs(ang) > math.radians(12.0):
+                rounded[n] = "bend"
+    ribbons = []
+    for a, b, w in edges:
+        dx, dy = nodes[b][0] - nodes[a][0], nodes[b][1] - nodes[a][1]
+        ln = math.hypot(dx, dy)
+        ux, uy = dx / ln, dy / ln
+        pa = (nodes[a][0] - ux * (0.0 if a in rounded else w / 2.0), nodes[a][1] - uy * (0.0 if a in rounded else w / 2.0))
+        pb = (nodes[b][0] + ux * (0.0 if b in rounded else w / 2.0), nodes[b][1] + uy * (0.0 if b in rounded else w / 2.0))
+        hx, hy = -uy * w / 2.0, ux * w / 2.0
+        ribbons.append([(pa[0] + hx, pa[1] + hy), (pb[0] + hx, pb[1] + hy), (pb[0] - hx, pb[1] - hy), (pa[0] - hx, pa[1] - hy)])
     zs = zs or {}
 
     def ground(i, a, b, x, y):                                          # height of edge i at (x, y): linear between its nodes
@@ -11520,8 +11773,44 @@ def _build_road_mesh(nodes, edges, zs=None):
         return za + (zb - za) * min(max(t, 0.0), 1.0)
     for i, (a, b, w) in enumerate(edges):
         z = 0.03 + 0.0006 * (i % 40)
-        quad = [(x, y, z + ground(i, a, b, x, y)) for x, y in rects[i]]
+        quad = [(x, y, z + ground(i, a, b, x, y)) for x, y in ribbons[i]]
         soup.poly('road', quad, [(q[0] / tile, q[1] / tile) for q in quad], (0.0, 0.0, 1.0), 1)
+    for n, kind in rounded.items():
+        lst = incident[n]
+        r = max(w for _i, _o, w in lst) / 2.0
+        z = 0.03 + 0.0006 * (max(i for i, _o, _w in lst) % 40) + 0.0003 + zs.get(n, 0.0)
+        ring = [(nodes[n][0] + r * math.cos(2 * math.pi * k / 20), nodes[n][1] + r * math.sin(2 * math.pi * k / 20), z) for k in range(20)]
+        soup.poly('roadcap', ring, [(q[0] / tile, q[1] / tile) for q in ring], (0.0, 0.0, 1.0), 1)
+        if any(abs(zs.get(o, 0.0) - zs.get(n, 0.0)) > 0.05 for _i, o, _w in lst):
+            continue
+        kr = r - 0.1
+        outward = [(nodes[n][0] - nodes[o][0], nodes[n][1] - nodes[o][1]) for _i, o, _w in lst]      # direction away from each neighbour
+        if kind == "end":
+            ux, uy = outward[0]
+            ln = math.hypot(ux, uy)
+            a1 = math.atan2(ux / ln, -uy / ln)                             # the +side normal, swept clockwise round the tip to the -side normal
+            sweep = -math.pi
+        else:
+            (u1x, u1y), (u2x, u2y) = outward[0], (-(nodes[lst[1][1]][0] - nodes[n][0]), -(nodes[lst[1][1]][1] - nodes[n][1]))
+            # lst[0] is the road coming in; its far end direction is u1, the other road leaves along -u2'
+            l1, l2 = math.hypot(u1x, u1y), math.hypot(u2x, u2y)
+            d1 = (u1x / l1, u1y / l1)
+            d2 = (-u2x / l2, -u2y / l2)                                       # direction of the road leaving the node
+            cross = d1[0] * d2[1] - d1[1] * d2[0]
+            side = -1.0 if cross > 0 else 1.0                                 # the outside of the bend
+            a1 = math.atan2(d1[0] * side, -d1[1] * side)
+            a2 = math.atan2(d2[0] * side, -d2[1] * side)
+            sweep = (a2 - a1 + math.pi) % (2 * math.pi) - math.pi
+        steps = max(2, int(abs(sweep) / math.radians(15.0) + 0.999))
+        for k in range(steps):
+            t0, t1 = a1 + sweep * k / steps, a1 + sweep * (k + 1) / steps
+            p0 = (nodes[n][0] + kr * math.cos(t0), nodes[n][1] + kr * math.sin(t0))
+            p1 = (nodes[n][0] + kr * math.cos(t1), nodes[n][1] + kr * math.sin(t1))
+            seg = math.hypot(p1[0] - p0[0], p1[1] - p0[1]) + 0.04
+            local = _TowerMesh()
+            _soup_box(local, seg / 2.0, 0.0, 0.03, seg, 0.24, 0.13, 1)
+            soup.append(local, rot=math.atan2(p1[1] - p0[1], p1[0] - p0[0]), offset=(p0[0] - 0.02 * math.cos(math.atan2(p1[1] - p0[1], p1[0] - p0[0])),
+                                                                                    p0[1] - 0.02 * math.sin(math.atan2(p1[1] - p0[1], p1[0] - p0[0])), zs.get(n, 0.0)))
     for i, (a, b, w) in enumerate(edges):
         if abs(zs.get(a, 0.0) - zs.get(b, 0.0)) > 0.05:                 # no kerbs on a sloping path
             continue
@@ -11766,6 +12055,21 @@ def _grid_shell(mesh, O, I, wrap, inside_fn, skip, slot, jamb_slot, cap_slot=Non
 
     def uv(pts):
         return [(q[0] / tile + q[1] / tile, q[2] / th) for q in pts]
+    if wrap:
+        # round shells (domes, silos): u runs around each ring in a whole number of tiles (no seam), v along the meridian
+        ring_k = []
+        for j in range(nv + 1):
+            ln = sum(math.dist(O[i][j], O[(i + 1) % len(O)][j]) for i in range(len(O)))
+            ring_k.append(max(1, int(round(ln / tile))))
+        arc = [0.0]
+        for j in range(nv):
+            arc.append(arc[-1] + math.dist(O[0][j], O[0][j + 1]))
+
+        def uv_cell(i, j):
+            return [(i / nu * ring_k[j], arc[j] / th), ((i + 1) / nu * ring_k[j], arc[j] / th),
+                    ((i + 1) / nu * ring_k[j + 1], arc[j + 1] / th), (i / nu * ring_k[j + 1], arc[j + 1] / th)]
+    else:
+        uv_cell = None
     skipped = set()
     for i in range(nu):
         for j in range(nv):
@@ -11776,9 +12080,10 @@ def _grid_shell(mesh, O, I, wrap, inside_fn, skip, slot, jamb_slot, cap_slot=Non
                 continue
             ins = inside_fn(c)
             n_out = (c[0] - ins[0], c[1] - ins[1], c[2] - ins[2])
-            mesh.poly('shell', o, uv(o), n_out, slot)
+            uvs_o = uv_cell(i, j) if uv_cell else uv(o)
+            mesh.poly('shell', o, uvs_o, n_out, slot)
             inn = [I[i][j], I[ix(i + 1)][j], I[ix(i + 1)][j + 1], I[i][j + 1]]
-            mesh.poly('shellin', inn, uv(inn), (-n_out[0], -n_out[1], -n_out[2]), slot)
+            mesh.poly('shellin', inn, uvs_o if uv_cell else uv(inn), (-n_out[0], -n_out[1], -n_out[2]), slot)
     for (i, j) in skipped:
         o = [O[i][j], O[ix(i + 1)][j], O[ix(i + 1)][j + 1], O[i][j + 1]]
         c = tuple(sum(q[k] for q in o) / 4.0 for k in range(3))
@@ -11947,12 +12252,19 @@ def _plan_build_hut(context, node, world, seed, path):
         hut, house = plan_hut_params(node.get("params"), node.get("style"))
     except PlanError as exc:
         raise PlanError("%s: %s" % (where, exc))
+    hut, house = _plan_instance_params(hut), _plan_instance_params(house)
+    seed, shared = _plan_instance_key(("hut", json.dumps([hut, house], sort_keys=True, default=str)), seed)
+    if shared is not None and shared.get("mesh") is not None:
+        return [_plan_add_instance(context, shared["mesh"], "Hut_" + node["id"], path, world)]
     if hut["form"] == 'BOX':
         soup = _build_house_mesh('house', house, int(seed) % 1_000_000)
     else:
         soup = _build_hut_round(hut, house, int(seed) % 1_000_000)
-    return [_plan_add_mesh_object(context, soup, "Hut_" + node["id"], 'PLAIN', path, world, house["roof_color"], wood=True,
-                                  style=hut["construction"])]
+    obj = _plan_add_mesh_object(context, soup, "Hut_" + node["id"], 'PLAIN', path, world, house["roof_color"], wood=True,
+                                style=hut["construction"])
+    if shared is not None:
+        shared["mesh"] = obj.data
+    return [obj]
 
 
 def _hut_walls_of(child):
@@ -11968,10 +12280,17 @@ def _plan_build_house(context, node, world, seed, path):
         params = plan_house_params(node["kind"], node.get("params"), node.get("style"))
     except PlanError as exc:
         raise PlanError("%s: %s" % (where, exc))
-    soup = _build_house_mesh(node["kind"], params, int(seed) % 1_000_000)
     name = "%s_%s" % (node["kind"].capitalize(), node["id"])
-    return [_plan_add_mesh_object(context, soup, name, params["brick_color"], path, world, params["roof_color"],
-                                  wood=True, style=params["style"])]
+    params = _plan_instance_params(params)
+    seed, shared = _plan_instance_key(("house", node["kind"], json.dumps(params, sort_keys=True, default=str)), seed)
+    if shared is not None and shared.get("mesh") is not None:
+        return [_plan_add_instance(context, shared["mesh"], name, path, world)]
+    soup = _build_house_mesh(node["kind"], params, int(seed) % 1_000_000)
+    obj = _plan_add_mesh_object(context, soup, name, params["brick_color"], path, world, params["roof_color"],
+                                wood=True, style=params["style"])
+    if shared is not None:
+        shared["mesh"] = obj.data
+    return [obj]
 
 
 PLAN_BUILDERS = {"tower": _plan_build_tower, "castle": _plan_build_castle,
@@ -13076,6 +13395,16 @@ def plan_build(context, root):
     resolved = plan_resolve(root)
     plan_clear_built(root["id"])
     built, skipped = [], []
+    inst = (root.get("params") or {}).get("instancing")
+    _PLAN_INSTANCING["variants"] = 4 if inst is True else (int(inst) if isinstance(inst, int) and not isinstance(inst, bool) and inst > 0 else 0)
+    _PLAN_INSTANCING["cache"] = {}
+    try:
+        return _plan_build_nodes(context, root, resolved, built, skipped, warnings)
+    finally:
+        _PLAN_INSTANCING["variants"], _PLAN_INSTANCING["cache"] = 0, {}
+
+
+def _plan_build_nodes(context, root, resolved, built, skipped, warnings):
     for node, path in plan_iter(root):
         if node["type"] == "terrain":
             stats = _plan_build_terrain(context, root, resolved, {**node, "style": None}, path)
@@ -13206,7 +13535,7 @@ def plan_new_example(scene, kind, existing_ids):
                 "road_graph": {"nodes": {"a": [-125.0, 0.0], "b": [138.0, 0.0]}, "edges": [["a", "b"]]}, "road_width": 7.0, "fill": []})]
         return plan_node(
             unique("city"), "compound", "city", transform=transform, params={
-                "shape": shape, "fence": "stone", "fence_height": 6.0, "fence_thickness": 1.2, "gate_height": 4.6,
+                "instancing": 4, "shape": shape, "fence": "stone", "fence_height": 6.0, "fence_thickness": 1.2, "gate_height": 4.6,
                 "layout": [{"kind": "tower", "at": "corners", "every": max(1, n // 12),
                             "params": {"radius": 3.6, "height": 11.0, "interior": False, "props": False, "lights": False, "windows": 1}}]},
             anchors=[{"id": "gate", "kind": "gate", "pos": [0.0, -125.0, 0.0], "dir": 270.0, "width": 7.0, "level": 0},
@@ -13464,7 +13793,7 @@ class OBJECT_OT_PlanImport(bpy.types.Operator, ImportHelper):
     bl_label = "Import Floor Plan"
     bl_options = {'REGISTER', 'UNDO'}
     filename_ext = ".svg"
-    filter_glob: StringProperty(default="*.svg;*.dxf", options={'HIDDEN'})
+    filter_glob: StringProperty(default="*.svg;*.dxf;*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff;*.webp", options={'HIDDEN'})
     scale: FloatProperty(name="Metres per unit", default=1.0, min=0.001, max=1000.0,
                          description="Size of one drawing unit in metres (SVG pixels / DXF units)")
 
@@ -14757,7 +15086,7 @@ class VIEW3D_PT_GLAPlans(bpy.types.Panel):
                 box.operator("object.gla_plan_set_param", text="Set on %s" % plan_id).plan_id = plan_id
         row = layout.row(align=True)
         row.operator("object.gla_plan_load", text="Load Plan...", icon='IMPORT')
-        row.operator("object.gla_plan_import", text="Import SVG/DXF...", icon='IMPORT')
+        row.operator("object.gla_plan_import", text="Import Plan (SVG, DXF, image)...", icon='IMPORT')
 
 
 # ==============================================================================

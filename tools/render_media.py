@@ -4,7 +4,7 @@
 
 Jobs: castle_still, castle_turntable, ruin_slider, tint_cycle, tower_trio, tower_cutaway, hall_cutaway,
       level_still, round_rooms_still, seeds_gallery, houses_still, grounds_still, fortress_still, fortress_turntable, block_still, farm_still,
-      styles_still, hutforms_still, organic_still, roundtown_still, mixed_still, hutcluster_still, biomes_still, townland_still, svgplan_still, heightmap_still
+      styles_still, hutforms_still, organic_still, roundtown_still, mixed_still, hutcluster_still, biomes_still, townland_still, svgplan_still, heightmap_still, picplan_still
 quality: draft (default, 16 samples) or final (64 samples).
 The frames land as PNGs; tools/make_gif.sh turns a frame folder into a GIF with ffmpeg.
 """
@@ -371,5 +371,14 @@ elif JOB == "heightmap_still":
     la.plan_build(bpy.context, land)
     camera((0, -280, 190), (0, 0, 5), lens=30)
     render("heightmap")
+elif JOB == "picplan_still":
+    setup_render(1280, 720)
+    clear_scene()
+    world_and_sun(ground=None)
+    plan = la.plan_import_file(os.path.join(ROOT, "docs", "examples", "village_plan.png"), "picture", 0.15)
+    plan["params"]["scatter"] = 0.5
+    la.plan_build(bpy.context, plan)
+    camera((0, -62, 40), (0, 0, 0), lens=32)
+    render("picplan")
 else:
     raise SystemExit("unknown job " + JOB)
