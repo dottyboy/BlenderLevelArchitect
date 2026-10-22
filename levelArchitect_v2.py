@@ -9345,13 +9345,16 @@ def _plan_run_scene_operator(context, node, world, seed, path, op, mapping, pref
             setattr(scene, prop, value)
         scene.cursor.location = saved_cursor
     new_objects = [bpy.data.objects[n] for n in bpy.data.objects.keys() if n not in before]
-    _plan_adopt_objects(scene, path, world, new_objects)
+    _plan_adopt_objects(scene, path, world, new_objects, absolute=True)
     return new_objects
 
 
-def _plan_adopt_objects(scene, path, world, objects):
+def _plan_adopt_objects(scene, path, world, objects, absolute=False):
     """Moves freshly made objects into the plan's Built_ collection under a pivot Empty at the plan's world
-    position (rotated by its rotation), renaming them PB_<path>_<name> so later builds cannot clear them."""
+    position (rotated by its rotation), renaming them PB_<path>_<name> so later builds cannot clear them.
+    `absolute`: the objects were created at their world position (the wrapped operators place them at the
+    cursor), so the parent inverse cancels the pivot's translation; otherwise they sit at the pivot's origin."""
+    from mathutils import Matrix
     wx, wy, wz, wrot = world
     built = bpy.data.collections.new(PLAN_BUILT_PREFIX + _plan_key(path))
     scene.collection.children.link(built)
@@ -9365,7 +9368,7 @@ def _plan_adopt_objects(scene, path, world, objects):
         built.objects.link(obj)
         obj.name = "PB_%s_%s" % (_plan_key(path), obj.name)
         obj.parent = pivot
-        obj.matrix_parent_inverse = pivot.matrix_world.inverted()
+        obj.matrix_parent_inverse = Matrix.Translation((-wx, -wy, -wz)) if absolute else Matrix.Identity(4)
     pivot.rotation_euler = (0.0, 0.0, math.radians(wrot))
 
 
@@ -9527,6 +9530,158 @@ def _build_house_mesh(kind, p, seed):
     return big
 
 
+# ------------------------------------------------------------------------------
+# Well and stone enclosure. The enclosure belongs to a *compound* plan: its
+# `fence` parameter runs a wall along the compound's footprint, with an arched
+# opening wherever one of the compound's own `gate` anchors sits on an edge.
+# ------------------------------------------------------------------------------
+PLAN_WELL_DEFAULTS = dict(radius=1.0, wall_height=0.9, roof=True, brick_color='PLAIN', ruin=0.0)
+PLAN_WELL_RANGES = {"radius": (0.5, 3.0), "wall_height": (0.4, 1.5), "ruin": (0.0, 1.0)}
+PLAN_FENCE_DEFAULTS = dict(fence='none', fence_height=2.4, fence_thickness=0.5, gate_height=3.0,
+                           brick_color='PLAIN', ruin=0.0, detail='MEDIUM')
+PLAN_FENCE_RANGES = {"fence_height": (1.0, 6.0), "fence_thickness": (0.2, 1.2), "gate_height": (1.8, 6.0),
+                     "ruin": (0.0, 1.0)}
+PLAN_DEFAULT_FOOTPRINTS["well"] = lambda params: _footprint_rect(
+    {"width": 2 * float(params.get("radius", 1.0)) + 0.8, "depth": 2 * float(params.get("radius", 1.0)) + 0.8})
+
+
+def _plan_checked(merged, ranges, enums=None):
+    """Range/enum checks shared by the small plan builders; raises PlanError."""
+    for key, (lo, hi) in ranges.items():
+        v = merged[key]
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v < lo or v > hi:
+            raise PlanError("params.%s = %r is outside %s..%s" % (key, v, lo, hi))
+    for key, allowed in (enums or {}).items():
+        if merged[key] not in allowed:
+            raise PlanError("params.%s = %r is not one of %s" % (key, merged[key], ", ".join(allowed)))
+    if merged["brick_color"] not in BRICK_COLOR_INDEX and merged["brick_color"] != 'MIXED':
+        raise PlanError("params.brick_color = %r is not a known brick colour" % (merged["brick_color"],))
+    return merged
+
+
+def _soup_box(mesh, cx, cy, z0, sx, sy, sz, mat=1):
+    """Axis-aligned box into a _TowerMesh (all six faces, outward normals)."""
+    x0, x1, y0, y1, z1 = cx - sx / 2, cx + sx / 2, cy - sy / 2, cy + sy / 2, z0 + sz
+    tile = TOWER_TILE_W
+    faces = [
+        ([(x0, y0, z0), (x1, y0, z0), (x1, y0, z1), (x0, y0, z1)], (0, -1, 0)),
+        ([(x1, y0, z0), (x1, y1, z0), (x1, y1, z1), (x1, y0, z1)], (1, 0, 0)),
+        ([(x1, y1, z0), (x0, y1, z0), (x0, y1, z1), (x1, y1, z1)], (0, 1, 0)),
+        ([(x0, y1, z0), (x0, y0, z0), (x0, y0, z1), (x0, y1, z1)], (-1, 0, 0)),
+        ([(x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1)], (0, 0, 1)),
+        ([(x0, y0, z0), (x0, y1, z0), (x1, y1, z0), (x1, y0, z0)], (0, 0, -1)),
+    ]
+    for pts, nrm in faces:
+        mesh.poly('box', pts, [(q[0] / tile + q[1] / tile, q[2] / tile) for q in pts], nrm, mat)
+
+
+def _build_well_mesh(p, seed):
+    big = _TowerMesh()
+    r, h, n, tile = p["radius"], p["wall_height"], 14, TOWER_TILE_W
+    ri = r - 0.35
+    tint = BRICK_COLOR_INDEX.get(p["brick_color"], 0)
+    mat_map = {0: tint, 1: len(BRICK_TINTS)} if tint else None
+    ang = [2 * math.pi * i / n for i in range(n)]
+    for i in range(n):
+        a0, a1 = ang[i], ang[(i + 1) % n]
+        am = (a0 + a1) / 2
+        ro = (math.cos(am), math.sin(am), 0.0)
+        o0, o1 = (r * math.cos(a0), r * math.sin(a0)), (r * math.cos(a1), r * math.sin(a1))
+        i0, i1 = (ri * math.cos(a0), ri * math.sin(a0)), (ri * math.cos(a1), ri * math.sin(a1))
+        u0, u1 = i * 0.6, (i + 1) * 0.6
+        big.poly('wo', [(o0[0], o0[1], 0.0), (o1[0], o1[1], 0.0), (o1[0], o1[1], h), (o0[0], o0[1], h)],
+                 [(u0, 0.0), (u1, 0.0), (u1, h / tile), (u0, h / tile)], ro, 1, smooth=True)
+        big.poly('wi', [(i0[0], i0[1], 0.0), (i1[0], i1[1], 0.0), (i1[0], i1[1], h), (i0[0], i0[1], h)],
+                 [(u0, 0.0), (u1, 0.0), (u1, h / tile), (u0, h / tile)], (-ro[0], -ro[1], 0.0), 1, smooth=True)
+        big.poly('wt', [(o0[0], o0[1], h), (o1[0], o1[1], h), (i1[0], i1[1], h), (i0[0], i0[1], h)],
+                 [(q[0] / tile, q[1] / tile) for q in (o0, o1, i1, i0)], (0.0, 0.0, 1.0), 1)
+    shaft = [(ri * math.cos(a), ri * math.sin(a), h * 0.25) for a in ang]
+    big.poly('wd', shaft, [(q[0] / tile, q[1] / tile) for q in shaft], (0.0, 0.0, 1.0), 1)
+    if p["roof"] and p["ruin"] < 0.5:
+        px, top = r * 0.85, h + 1.45
+        for sx in (-px, px):
+            _soup_box(big, sx, 0.0, h, 0.16, 0.16, top - h, 1)
+        _soup_box(big, 0.0, 0.0, top, 2 * px + 0.16, 0.14, 0.14, 1)
+        hs, rise, over = 0.75, 0.55, 0.25
+        xe = px + 0.08 + over
+        for sgn in (-1.0, 1.0):
+            sl = [(-xe, sgn * hs, top + 0.14), (xe, sgn * hs, top + 0.14), (xe, 0.0, top + 0.14 + rise), (-xe, 0.0, top + 0.14 + rise)]
+            big.poly('wr', sl, [(q[0] / tile, q[1] / tile) for q in sl], (0.0, -sgn * rise, hs), 1)
+            big.poly('wru', [(q[0], q[1], q[2] - 0.08) for q in sl], [(q[0] / tile, q[1] / tile) for q in sl], (0.0, sgn * rise, -hs), 1)
+    out = _TowerMesh()
+    out.append(big, mat_map=mat_map)
+    return out
+
+
+def _build_fence_mesh(footprint, p, seed, gates):
+    """Stone wall along the polygon edges (counter-clockwise: the outside is on each edge's right)."""
+    big = _TowerMesh()
+    H, t, ruin = p["fence_height"], p["fence_thickness"], p["ruin"]
+    tint = BRICK_COLOR_INDEX.get(p["brick_color"], 0)
+    mat_map = {0: tint, 1: len(BRICK_TINTS)} if tint else None
+    stones_scale = {'LOW': 0.0, 'MEDIUM': 1.0, 'HIGH': 3.0}[p["detail"]]
+    n = len(footprint)
+    for i in range(n):
+        ax, ay = footprint[i]
+        bx, by = footprint[(i + 1) % n]
+        L0 = math.hypot(bx - ax, by - ay)
+        if L0 < 0.5:
+            continue
+        ux, uy = (bx - ax) / L0, (by - ay) / L0
+        wb = _WallRunBuilder(L0 + t, H, t, battlements=False, seed=seed + 17 * i, ruin=ruin,
+                             stones=int(L0 * H * 0.3 * stones_scale))
+        for gate in gates:
+            gx, gy = gate["pos"][0], gate["pos"][1]
+            u = (gx - ax) * ux + (gy - ay) * uy
+            v = -(gx - ax) * uy + (gy - ay) * ux
+            if abs(v) < 0.6 and 0.0 <= u <= L0:
+                gw = float(gate.get("width", 3.0))
+                gh = min(p["gate_height"], wb.Hs - 0.4)
+                # an arch needs (width / 2) of rise above its springing: narrow it to fit a low wall,
+                # and fall back to a plain rectangular, then a full-height gap, rather than drop the gate
+                gw_arch = min(gw, 2.0 * (wb.Hs - 0.9))
+                if not (gw_arch >= 1.0 and wb.add_opening(u + t / 2.0, gw_arch, 0.0, gh, 'arch')):
+                    if not wb.add_opening(u + t / 2.0, gw, 0.0, gh, 'rect'):
+                        wb.add_opening(u + t / 2.0, gw, 0.0, gh, 'gap')
+        wb.geometry()
+        big.append(wb.mb, rot=math.atan2(uy, ux), offset=(ax - ux * t / 2.0, ay - uy * t / 2.0, 0.0), mat_map=mat_map)
+    return big
+
+
+def _plan_add_mesh_object(context, soup, name, brick_color, path, world):
+    mesh = soup.to_mesh(name)
+    obj = bpy.data.objects.new(name, mesh)
+    context.scene.collection.objects.link(obj)
+    for mat_ in masonry_material_list(brick_color not in ('PLAIN',)):
+        mesh.materials.append(mat_)
+    _add_viewport_color_attribute(mesh)
+    _plan_adopt_objects(context.scene, path, world, [obj])
+    return obj
+
+
+def _plan_build_well(context, node, world, seed, path):
+    try:
+        p = _plan_checked({**PLAN_WELL_DEFAULTS, **(node.get("params") or {})}, PLAN_WELL_RANGES)
+    except PlanError as exc:
+        raise PlanError("%s: %s" % ("/".join(path), exc))
+    soup = _build_well_mesh(p, int(seed) % 1_000_000)
+    return [_plan_add_mesh_object(context, soup, "Well_" + node["id"], p["brick_color"], path, world)]
+
+
+def _plan_build_compound(context, node, world, seed, path):
+    """Builds what a compound itself owns (currently the stone enclosure); its children are built on their own."""
+    if (node.get("params") or {}).get("fence", "none") == "none":
+        return []
+    try:
+        p = _plan_checked({**PLAN_FENCE_DEFAULTS, **(node.get("params") or {})}, PLAN_FENCE_RANGES,
+                          {"fence": ('none', 'stone'), "detail": ('LOW', 'MEDIUM', 'HIGH')})
+    except PlanError as exc:
+        raise PlanError("%s: %s" % ("/".join(path), exc))
+    gates = [a for a in node.get("anchors", []) if a.get("kind") == "gate"]
+    soup = _build_fence_mesh(plan_footprint(node), p, int(seed) % 1_000_000, gates)
+    return [_plan_add_mesh_object(context, soup, "Fence_" + node["id"], p["brick_color"], path, world)]
+
+
 def _plan_build_house(context, node, world, seed, path):
     where = "/".join(path)
     try:
@@ -9546,7 +9701,8 @@ def _plan_build_house(context, node, world, seed, path):
 
 
 PLAN_BUILDERS = {"tower": _plan_build_tower, "castle": _plan_build_castle,
-                 "house": _plan_build_house, "chapel": _plan_build_house, "stable": _plan_build_house}
+                 "house": _plan_build_house, "chapel": _plan_build_house, "stable": _plan_build_house,
+                 "well": _plan_build_well}
 
 
 def plan_build(context, root):
@@ -9559,6 +9715,10 @@ def plan_build(context, root):
     plan_clear_built(root["id"])
     built, skipped = [], []
     for node, path in plan_iter(root):
+        if node["type"] == "compound":
+            if _plan_build_compound(context, node, resolved[path]["world"], resolved[path]["seed"], path):
+                built.append("/".join(path))
+            continue
         if node["type"] != "building":
             continue
         fn = PLAN_BUILDERS.get(node.get("kind"))
@@ -9594,9 +9754,13 @@ def plan_new_example(scene, kind, existing_ids):
     watch = plan_node("watchtower", "building", "tower", transform={"x": w / 2 + 12.0, "y": 0.0, "z": 0.0, "rot": 0.0},
                       params=plan_default_params(scene, PLAN_TOWER_PARAMS))
     half_w, half_d = w / 2 + 20.0, scene.wfc_castle_depth / 2 + 15.0
+    well = plan_node("well", "building", "well", transform={"x": -(w / 2 + 8.0), "y": -6.0, "z": 0.0, "rot": 0.0})
     grounds = plan_node(unique("grounds"), "compound", "castle_grounds", transform=transform,
                         footprint=[[-half_w, -half_d], [half_w, -half_d], [half_w, half_d], [-half_w, half_d]],
-                        children=[castle, watch])
+                        params={"fence": "stone"},
+                        anchors=[{"id": "gate", "kind": "gate", "pos": [0.0, -half_d, 0.0], "dir": 270.0,
+                                  "width": 4.0, "level": 0}],
+                        children=[castle, watch, well])
     return grounds
 
 

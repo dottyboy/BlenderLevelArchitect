@@ -10,6 +10,16 @@ reproduced exactly from its settings (see **Debug: Last Generation Params** in t
   ruin (roof and ceiling are dropped, walls break down), brick colour (incl. Mixed). Parameters are validated against ranges.
   New buttons House / Chapel / Stable in the Plans sub-panel.
 
+## Unreleased — plans (M2, step 2)
+
+- **Well** building plan (stone ring, shaft, posts with a small roof; ruin drops the roof).
+- **Stone enclosure** for compound plans: `params.fence = "stone"` runs a wall (height, thickness, brick colour, ruin) along
+  the compound's footprint, any counter-clockwise polygon; an arched opening is cut wherever one of the compound's `gate`
+  anchors sits on an edge (narrowed or turned into a plain opening when the wall is too low for a full arch).
+- The *Castle Grounds* example now has the enclosure with a south gate, the castle, a watchtower and a well.
+- Fix: buildings that the wrapped Tower/Castle operators place were offset twice when the plan had a non-zero position
+  (the parent inverse was computed from a stale matrix); tests now update the view layer before measuring.
+
 ## 0.44.0 — plans (M1)
 
 - **Plans, experimental.** A new collapsed *Plans (experimental)* sub-panel: create a starter plan at the 3D cursor

@@ -3469,6 +3469,7 @@ for c in list(bpy.data.collections):
 
 
 def _plan_signature(objs):
+    bpy.context.view_layer.update()
     sig = []
     for o in objs:
         if o.type == 'MESH':
@@ -3540,14 +3541,15 @@ for c in list(bpy.data.collections):
     bpy.data.collections.remove(c)
 scene.cursor.location = (0.0, 0.0, 0.0)
 grounds = addon.plan_new_example(scene, 'GROUNDS', set())
-check("Plan build: example grounds has a castle and a watchtower",
-      [c["id"] for c in grounds["children"]] == ["castle", "watchtower"])
+check("Plan build: example grounds has a castle, a watchtower and a well",
+      [c["id"] for c in grounds["children"]] == ["castle", "watchtower", "well"])
 addon.plan_write_to_blend(scene, grounds)
 res = addon.plan_build(bpy.context, addon.plan_read_from_blend(grounds["id"]))
-check("Plan build: nested plan builds every building", len(res["built"]) == 2, str(res))
+check("Plan build: nested plan builds the fence and every building", len(res["built"]) == 4, str(res))
 tower_objs = [o for o in bpy.data.objects if o.name.startswith("PB_%s.watchtower" % grounds["id"]) and o.type == 'MESH']
 castle_objs = [o for o in bpy.data.objects if o.name.startswith("PB_%s.castle" % grounds["id"]) and o.type == 'MESH']
 check("Plan build: both buildings exist as separate meshes", bool(tower_objs) and bool(castle_objs))
+bpy.context.view_layer.update()
 tx = sum((o.matrix_world @ v.co).x for o in tower_objs[:1] for v in o.data.vertices) / max(1, len(tower_objs[0].data.vertices))
 check("Plan build: the watchtower sits at its plan offset (x about %.0f)" % (scene.wfc_castle_width / 2 + 12.0),
       abs(tx - (scene.wfc_castle_width / 2 + 12.0)) < 1.0, str(tx))
@@ -3556,6 +3558,7 @@ grounds["transform"]["rot"] = 90.0
 addon.plan_write_to_blend(scene, grounds)
 addon.plan_build(bpy.context, addon.plan_read_from_blend(grounds["id"]))
 tower_objs = [o for o in bpy.data.objects if o.name.startswith("PB_%s.watchtower" % grounds["id"]) and o.type == 'MESH']
+bpy.context.view_layer.update()
 ty = sum((o.matrix_world @ v.co).y for o in tower_objs[:1] for v in o.data.vertices) / max(1, len(tower_objs[0].data.vertices))
 check("Plan build: a rotated compound turns its children (watchtower now on +y)",
       abs(ty - (scene.wfc_castle_width / 2 + 12.0)) < 1.0, str(ty))
@@ -3698,6 +3701,76 @@ check("House: MIXED brick colour builds", addon.plan_build(bpy.context,
       addon.plan_node("mx", "building", "house", params={"brick_color": "MIXED"}, seed=4))["built"] == ["mx"])
 check("House: vertex budget is modest (< 5000 for a default house)",
       all(len(o.data.vertices) < 5000 for o in bpy.data.objects if o.name.startswith("PB_h1") and o.type == 'MESH'))
+
+# ==============================================================================
+print("\n--- Plans: well and stone enclosure ---")
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+wl = addon.plan_node("wl", "building", "well", transform={"x": 0.0, "y": 0.0, "z": 0.0, "rot": 0.0})
+check("Well: builds", addon.plan_build(bpy.context, wl)["built"] == ["wl"])
+x0, x1, y0, y1, z0, z1 = _bounds_of("wl")
+check("Well: ring radius and a roof above the shaft", abs((x1 - x0) - 2.0) < 0.5 and z1 > 2.0, str((x1 - x0, z1)))
+hit = _ray((0.0, 0.0, 5.0), (0.0, 0.0, -1.0))
+check("Well: the roof covers the shaft from above", hit is not None and hit.z > 2.0, str(hit))
+hit = _ray((2.5, 0.0, 0.5), (-1.0, 0.0, 0.0))
+check("Well: the ring is solid at ground level", hit is not None and abs(hit.x - 1.0) < 0.1, str(hit))
+wr = addon.plan_node("wr", "building", "well", params={"ruin": 0.8, "roof": True}, transform={"x": 20.0, "y": 0.0, "z": 0.0, "rot": 0.0})
+addon.plan_build(bpy.context, wr)
+check("Well: a ruined well loses its roof", _bounds_of("wr")[5] < 1.5)
+try:
+    addon.plan_build(bpy.context, addon.plan_node("wb", "building", "well", params={"radius": 9.0}))
+    refused = False
+except addon.PlanError as exc:
+    refused = "radius" in str(exc)
+check("Well: out-of-range radius refused", refused)
+# enclosure
+yard = addon.plan_node("yard", "compound", "yard", footprint=[[-20, -15], [20, -15], [20, 15], [-20, 15]],
+                       params={"fence": "stone", "fence_height": 2.4, "fence_thickness": 0.5},
+                       transform={"x": 300.0, "y": 0.0, "z": 0.0, "rot": 0.0},
+                       anchors=[{"id": "gate", "kind": "gate", "pos": [0.0, -15.0, 0.0], "dir": 270.0, "width": 4.0}])
+res = addon.plan_build(bpy.context, yard)
+check("Fence: the compound builds its enclosure", res["built"] == ["yard"])
+x0, x1, y0, y1, z0, z1 = _bounds_of("yard")
+check("Fence: enclosure spans the footprint plus wall thickness",
+      abs((x1 - x0) - 40.5) < 0.6 and abs((y1 - y0) - 30.5) < 0.6 and abs(z1 - 2.4) < 0.3, str((x1 - x0, y1 - y0, z1)))
+hit = _ray((300.0, -20.0, 1.0), (0.0, 1.0, 0.0))
+check("Fence: a ray through the gate anchor runs through the south wall (passable)",
+      hit is not None and hit.y > 14.0, str(hit))
+hit = _ray((310.0, -20.0, 1.0), (0.0, 1.0, 0.0))
+check("Fence: the south wall is solid away from the gate", hit is not None and hit.y < -14.0, str(hit))
+hit = _ray((330.0, 0.0, 1.0), (-1.0, 0.0, 0.0))
+check("Fence: the east wall is solid", hit is not None and abs(hit.x - 320.25) < 0.4, str(hit))
+hit = _ray((300.0, 20.0, 1.0), (0.0, -1.0, 0.0))
+check("Fence: the north wall is solid", hit is not None and hit.y > 14.0, str(hit))
+# rotation: the gate turns with the compound
+yard["transform"]["rot"] = 90.0
+addon.plan_build(bpy.context, yard)
+hit = _ray((320.0, 0.0, 1.0), (-1.0, 0.0, 0.0))
+check("Fence: after a 90 degree turn the gate is on the east side (ray passes)", hit is not None and hit.x < 290.0, str(hit))
+# options
+nf = addon.plan_node("nf", "compound", "yard", footprint=[[-5, -5], [5, -5], [5, 5], [-5, 5]], params={"fence": "none"})
+check("Fence: fence none builds nothing", addon.plan_build(bpy.context, nf)["built"] == [])
+try:
+    addon.plan_build(bpy.context, addon.plan_node("wf", "compound", "yard", footprint=[[-5, -5], [5, -5], [5, 5], [-5, 5]],
+                                                  params={"fence": "wood"}))
+    refused = False
+except addon.PlanError as exc:
+    refused = "fence" in str(exc)
+check("Fence: an unavailable fence type is refused", refused)
+ruined = addon.plan_node("rn", "compound", "yard", footprint=[[-8, -8], [8, -8], [8, 8], [-8, 8]],
+                         params={"fence": "stone", "ruin": 0.7}, transform={"x": 400.0, "y": 0.0, "z": 0.0, "rot": 0.0})
+check("Fence: a ruined enclosure builds", addon.plan_build(bpy.context, ruined)["built"] == ["rn"])
+# non-rectangular footprint (L shape)
+lshape = addon.plan_node("ls", "compound", "yard", footprint=[[0, 0], [12, 0], [12, 5], [5, 5], [5, 12], [0, 12]],
+                         params={"fence": "stone"}, transform={"x": 500.0, "y": 0.0, "z": 0.0, "rot": 0.0})
+check("Fence: an L-shaped footprint builds", addon.plan_build(bpy.context, lshape)["built"] == ["ls"])
+x0, x1, y0, y1, z0, z1 = _bounds_of("ls")
+check("Fence: L-shape extents match", abs((x1 - x0) - 12.5) < 0.7 and abs((y1 - y0) - 12.5) < 0.7, str((x1 - x0, y1 - y0)))
+# vertex budget for the standard enclosure
+check("Fence: the 40 x 30 m enclosure stays under 8000 vertices",
+      all(len(o.data.vertices) < 8000 for o in bpy.data.objects if o.name.startswith("PB_yard") and o.type == 'MESH'))
 
 # ==============================================================================
 print()
