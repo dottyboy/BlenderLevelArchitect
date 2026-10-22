@@ -3312,6 +3312,86 @@ check("All Steps: the confirm path exists (invoke_confirm available or fallback)
       hasattr(bpy.context.window_manager, "invoke_confirm") or hasattr(bpy.context.window_manager, "invoke_props_dialog"))
 
 # ==============================================================================
+print("\n--- Plans: core (gla-plan/1) ---")
+site = addon.plan_node("site", "compound", "castle_grounds", footprint=[[-30, -25], [30, -25], [30, 25], [-30, 25]],
+                       anchors=[{"id": "gate", "kind": "gate", "pos": [0, -25, 0], "dir": 270, "width": 4}], seed=11)
+castle_n = addon.plan_node("castle", "building", "castle", params={"width": 30, "depth": 20})
+chapel_n = addon.plan_node("chapel", "building", "chapel", footprint=[[-3, -5], [3, -5], [3, 5], [-3, 5]],
+                           transform={"x": 22, "y": 14, "z": 0, "rot": 90})
+site["children"] = [castle_n, chapel_n]
+errs, warns = addon.plan_validate(site)
+check("Plans: a valid tree has no errors", errs == [], str(errs))
+check("Plans: castle footprint derived from width/depth",
+      addon.plan_footprint(castle_n) == [[-15.0, -10.0], [15.0, -10.0], [15.0, 10.0], [-15.0, 10.0]])
+# seeds
+res = addon.plan_resolve(site)
+check("Plans: root keeps its explicit seed", res[("site",)]["seed"] == 11)
+check("Plans: child seeds are derived and distinct",
+      res[("site", "castle")]["seed"] != res[("site", "chapel")]["seed"]
+      and res[("site", "castle")]["seed"] == addon.plan_child_seed(11, "castle"))
+site["children"].append(addon.plan_node("well", "building", "well", footprint=[[-1, -1], [1, -1], [1, 1], [-1, 1]]))
+check("Plans: adding a sibling does not change another child's seed",
+      addon.plan_resolve(site)[("site", "castle")]["seed"] == res[("site", "castle")]["seed"])
+site["children"].pop()
+# transforms
+wx, wy, wz, wrot = res[("site", "chapel")]["world"]
+check("Plans: child transform composes (offset and rotation)", (wx, wy, wrot) == (22.0, 14.0, 90.0))
+site["transform"] = {"x": 100.0, "y": 0.0, "z": 5.0, "rot": 90.0}
+wx, wy, wz, wrot = addon.plan_resolve(site)[("site", "chapel")]["world"]
+check("Plans: parent rotation rotates the child's offset",
+      abs(wx - (100 - 14)) < 1e-6 and abs(wy - 22) < 1e-6 and wz == 5.0 and wrot == 180.0, str((wx, wy, wz, wrot)))
+site["transform"] = {"x": 0.0, "y": 0.0, "z": 0.0, "rot": 0.0}
+# anchors
+check("Plans: anchor reference resolves", addon.plan_find_anchor(site, "site/gate")["kind"] == "gate")
+check("Plans: unknown anchor reference gives None", addon.plan_find_anchor(site, "site/nothing") is None)
+try:
+    addon.plan_parse_ref("gate")
+    bad_ref = False
+except addon.PlanError:
+    bad_ref = True
+check("Plans: reference without plan id is refused", bad_ref)
+# validation failures
+bad = addon.plan_node("Bad Id", "building", "house", footprint=[[0, 0], [0, 1], [1, 1]])
+check("Plans: bad id and clockwise footprint are errors", len(addon.plan_validate(bad)[0]) == 2)
+bowtie = addon.plan_node("b", "building", "house", footprint=[[0, 0], [4, 0], [4, 3], [1, 3], [1, -1]])
+check("Plans: self-crossing footprint is an error", any("crosses" in e for e in addon.plan_validate(bowtie)[0]))
+check("Plans: building without footprint is an error",
+      any("footprint" in e for e in addon.plan_validate(addon.plan_node("h", "building", "house"))[0]))
+dup = addon.plan_node("p", "compound", footprint=[[0, 0], [9, 0], [9, 9], [0, 9]],
+                      children=[addon.plan_node("a", "terrain"), addon.plan_node("a", "terrain")])
+check("Plans: duplicate sibling ids are an error", any("duplicate" in e for e in addon.plan_validate(dup)[0]))
+lv = addon.plan_node("l", "terrain", levels=[{"z": 2.0}, {"z": 1.0}])
+check("Plans: non-increasing level z is an error", any("increasing" in e for e in addon.plan_validate(lv)[0]))
+site["children"][1]["transform"]["x"] = 90.0
+check("Plans: child outside its parent is a warning, not an error",
+      addon.plan_validate(site)[0] == [] and len(addon.plan_validate(site)[1]) == 1)
+site["children"][1]["transform"]["x"] = 22.0
+conn = addon.plan_node("road", "block", params={"from": "site/gate", "to": "site/missing"})
+site["children"].append(conn)
+check("Plans: a connection to a missing anchor is an error",
+      any("missing" in e for e in addon.plan_validate(site)[0]))
+site["children"].pop()
+# JSON round trip keeps unknown fields
+site["extra_field"] = {"keep": [1, 2, 3]}
+site["children"][0]["params"]["future_param"] = 5
+text = addon.plan_to_json(site, revision=3)
+back = addon.plan_from_json(text)
+check("Plans: JSON round trip is lossless incl. unknown fields",
+      back["extra_field"] == {"keep": [1, 2, 3]} and back["children"][0]["params"]["future_param"] == 5
+      and back["revision"] == 3 and back["format"] == "gla-plan/1")
+for junk in ("{not json", json.dumps({"format": "other/1"})):
+    try:
+        addon.plan_from_json(junk)
+        refused = False
+    except addon.PlanError:
+        refused = True
+    check("Plans: junk document refused: " + junk[:12], refused)
+check("Plans: levels field is preserved unchanged",
+      addon.plan_from_json(addon.plan_to_json(addon.plan_node("t", "terrain", levels=[{"z": 0, "height": 4.0}])))
+      ["levels"] == [{"z": 0, "height": 4.0}])
+del site, castle_n, chapel_n, back
+
+# ==============================================================================
 print()
 if failures:
     print(f"{len(failures)} CHECK(S) FAILED:")

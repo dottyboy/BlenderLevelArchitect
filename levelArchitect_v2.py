@@ -8885,6 +8885,249 @@ class OBJECT_OT_GenerateLevelCastle(bpy.types.Operator):
 
 
 # ==============================================================================
+# 7b. PLANS (gla-plan/1) -- core data model
+# ==============================================================================
+# A plan is a plain dict (see docs/PLAN_FORMAT.md): type, kind, params, footprint,
+# anchors, children. This section is deliberately self-contained -- it needs
+# nothing from the dungeon solver and only touches `bpy` in the storage/build
+# functions further down -- so it can be lifted into other add-ons.
+import hashlib
+
+PLAN_FORMAT = "gla-plan/1"
+PLAN_TYPES = ("building", "compound", "block", "settlement", "terrain")
+PLAN_ANCHOR_KINDS = ("door", "gate", "road", "path", "water", "stairs")
+_PLAN_ID_RE = re.compile(r"^[a-z0-9_]+$")
+
+
+class PlanError(ValueError):
+    """A plan that cannot be read or built (malformed JSON, wrong format id...)."""
+
+
+def plan_child_seed(parent_seed, child_id):
+    """Seed derived from the parent's seed and the child's id (never Python's hash(), which
+    changes between runs). Adding or removing a sibling cannot change this child's result."""
+    digest = hashlib.sha1(("%d/%s" % (int(parent_seed), child_id)).encode("utf-8")).digest()
+    return int.from_bytes(digest[:4], "big") & 0x7FFFFFFF
+
+
+def plan_node(node_id, node_type, kind="", **fields):
+    """A new plan node with every standard field present. Extra keyword fields override defaults."""
+    node = {
+        "id": node_id, "type": node_type, "kind": kind, "name": fields.pop("name", node_id),
+        "style": None, "seed": None,
+        "transform": {"x": 0.0, "y": 0.0, "z": 0.0, "rot": 0.0},
+        "footprint": None, "levels": [], "params": {}, "anchors": [], "children": [],
+    }
+    node.update(fields)
+    return node
+
+
+def plan_iter(root):
+    """Pre-order walk yielding (node, path) where path is the tuple of ids from the root."""
+    stack = [(root, (root["id"],))]
+    while stack:
+        node, path = stack.pop()
+        yield node, path
+        for child in reversed(node.get("children", [])):
+            stack.append((child, path + (child["id"],)))
+
+
+def plan_resolve(root):
+    """Top-down inheritance: returns {path: dict(world=(x, y, z, rot_degrees), seed=int, style=str|None)}.
+    A child's transform is local to its parent (offset rotated by the parent's rotation); an explicit
+    `seed` wins, otherwise the seed is derived from the parent's; `style` is inherited when omitted."""
+    resolved = {}
+    for node, path in plan_iter(root):
+        t = node.get("transform") or {}
+        lx, ly, lz, lrot = (float(t.get("x", 0.0)), float(t.get("y", 0.0)),
+                            float(t.get("z", 0.0)), float(t.get("rot", 0.0)))
+        if len(path) == 1:
+            world = (lx, ly, lz, lrot)
+            seed = node["seed"] if node.get("seed") is not None else 0
+            style = node.get("style")
+        else:
+            parent = resolved[path[:-1]]
+            px, py, pz, prot = parent["world"]
+            c, s = math.cos(math.radians(prot)), math.sin(math.radians(prot))
+            world = (px + lx * c - ly * s, py + lx * s + ly * c, pz + lz, prot + lrot)
+            seed = node["seed"] if node.get("seed") is not None else plan_child_seed(parent["seed"], node["id"])
+            style = node.get("style") or parent["style"]
+        resolved[path] = {"world": world, "seed": int(seed), "style": style}
+    return resolved
+
+
+def plan_parse_ref(ref):
+    """'farm_1/gate' -> (('farm_1',), 'gate'); 'site/castle/gate' -> (('site', 'castle'), 'gate').
+    The only place the reference syntax is parsed, so it can be extended without changing stored data."""
+    parts = [p for p in str(ref).split("/") if p]
+    if len(parts) < 2:
+        raise PlanError("Anchor reference needs 'plan_id/anchor_id': %r" % (ref,))
+    return tuple(parts[:-1]), parts[-1]
+
+
+def plan_find_anchor(root, ref):
+    """The anchor dict a reference points at, or None. The plan part may be a suffix of the node's path."""
+    plan_path, anchor_id = plan_parse_ref(ref)
+    n = len(plan_path)
+    for node, path in plan_iter(root):
+        if path[-n:] == plan_path:
+            for anchor in node.get("anchors", []):
+                if anchor.get("id") == anchor_id:
+                    return anchor
+    return None
+
+
+def _poly_area(points):
+    return 0.5 * sum(points[i][0] * points[(i + 1) % len(points)][1]
+                     - points[(i + 1) % len(points)][0] * points[i][1] for i in range(len(points)))
+
+
+def _segments_cross(a, b, c, d):
+    def orient(p, q, r):
+        return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+    o1, o2, o3, o4 = orient(a, b, c), orient(a, b, d), orient(c, d, a), orient(c, d, b)
+    return o1 * o2 < 0 and o3 * o4 < 0
+
+
+def plan_polygon_problem(points):
+    """None if `points` is a usable footprint (>= 3 points, counter-clockwise, simple), else a short reason."""
+    try:
+        pts = [(float(p[0]), float(p[1])) for p in points]
+    except (TypeError, ValueError, IndexError):
+        return "footprint must be a list of [x, y] pairs"
+    if len(pts) < 3:
+        return "footprint needs at least 3 points"
+    if _poly_area(pts) <= 1e-9:
+        return "footprint must be counter-clockwise with area > 0"
+    n = len(pts)
+    for i in range(n):
+        for j in range(i + 1, n):
+            if abs(i - j) in (1, n - 1):
+                continue
+            if _segments_cross(pts[i], pts[(i + 1) % n], pts[j], pts[(j + 1) % n]):
+                return "footprint crosses itself"
+    return None
+
+
+def _point_in_poly(pt, poly):
+    x, y = pt
+    inside = False
+    for i in range(len(poly)):
+        x1, y1 = poly[i]
+        x2, y2 = poly[(i + 1) % len(poly)]
+        if (y1 > y) != (y2 > y) and x < (x2 - x1) * (y - y1) / (y2 - y1) + x1:
+            inside = not inside
+    return inside
+
+
+# Footprints for kinds that derive theirs from parameters (the node may still give its own).
+def _footprint_castle(params):
+    w, d = float(params.get("width", 30.0)), float(params.get("depth", 20.0))
+    return [[-w / 2, -d / 2], [w / 2, -d / 2], [w / 2, d / 2], [-w / 2, d / 2]]
+
+
+def _footprint_tower(params, sides=16):
+    r = float(params.get("radius", 3.0))
+    return [[r * math.cos(2 * math.pi * i / sides), r * math.sin(2 * math.pi * i / sides)] for i in range(sides)]
+
+
+PLAN_DEFAULT_FOOTPRINTS = {"castle": _footprint_castle, "tower": _footprint_tower}
+
+
+def plan_footprint(node):
+    """The node's own footprint, else the default derived from its kind and params, else None."""
+    if node.get("footprint"):
+        return node["footprint"]
+    maker = PLAN_DEFAULT_FOOTPRINTS.get(node.get("kind"))
+    return maker(node.get("params", {})) if maker else None
+
+
+def plan_validate(root):
+    """Returns (errors, warnings), lists of strings. Errors stop a build; warnings are reported only."""
+    errors, warnings = [], []
+    if not isinstance(root, dict):
+        return ["plan must be an object"], []
+    for node, path in plan_iter(root):
+        where = "/".join(path)
+        nid = node.get("id", "")
+        if not isinstance(nid, str) or not _PLAN_ID_RE.match(nid):
+            errors.append("%s: id must match [a-z0-9_]+" % where)
+        if node.get("type") not in PLAN_TYPES:
+            errors.append("%s: unknown type %r" % (where, node.get("type")))
+        seen = set()
+        for child in node.get("children", []):
+            if child.get("id") in seen:
+                errors.append("%s: duplicate child id %r" % (where, child.get("id")))
+            seen.add(child.get("id"))
+        fp = plan_footprint(node)
+        if fp is None:
+            if node.get("type") in ("building", "compound"):
+                errors.append("%s: %s needs a footprint" % (where, node.get("type")))
+        else:
+            problem = plan_polygon_problem(fp)
+            if problem:
+                errors.append("%s: %s" % (where, problem))
+        zs = [lv.get("z", 0.0) for lv in node.get("levels", [])]
+        if any(b <= a for a, b in zip(zs, zs[1:])):
+            errors.append("%s: levels must have strictly increasing z" % where)
+        for anchor in node.get("anchors", []):
+            if anchor.get("kind") not in PLAN_ANCHOR_KINDS:
+                errors.append("%s: anchor %r has unknown kind %r" % (where, anchor.get("id"), anchor.get("kind")))
+        for key in ("from", "to"):
+            ref = (node.get("params") or {}).get(key)
+            if ref is not None:
+                try:
+                    found = plan_find_anchor(root, ref)
+                except PlanError as exc:
+                    errors.append("%s: %s" % (where, exc))
+                    continue
+                if found is None:
+                    errors.append("%s: params.%s -> unknown anchor %r" % (where, key, ref))
+    # children inside the parent's footprint (warning), in the parent's local frame
+    for node, path in plan_iter(root):
+        parent_fp = plan_footprint(node)
+        if not parent_fp or plan_polygon_problem(parent_fp) or (node.get("params") or {}).get("allow_outside"):
+            continue
+        for child in node.get("children", []):
+            cfp = plan_footprint(child)
+            if not cfp or plan_polygon_problem(cfp):
+                continue
+            t = child.get("transform") or {}
+            c, s = math.cos(math.radians(t.get("rot", 0.0))), math.sin(math.radians(t.get("rot", 0.0)))
+            for px, py in cfp:
+                gx = t.get("x", 0.0) + px * c - py * s
+                gy = t.get("y", 0.0) + px * s + py * c
+                if not _point_in_poly((gx, gy), parent_fp):
+                    warnings.append("%s/%s: footprint reaches outside its parent" % ("/".join(path), child.get("id")))
+                    break
+    return errors, warnings
+
+
+def plan_to_json(root, revision=1):
+    """The full tree as a gla-plan/1 JSON document (text)."""
+    doc = dict(root)
+    doc["format"] = PLAN_FORMAT
+    doc["revision"] = int(revision)
+    doc["saved_with"] = ".".join(str(v) for v in bl_info["version"])
+    return json.dumps(doc, indent=2)
+
+
+def plan_from_json(text):
+    """Parses a gla-plan/1 document; unknown fields are kept untouched. Raises PlanError."""
+    try:
+        doc = json.loads(text)
+    except ValueError as exc:
+        raise PlanError("Not valid JSON: %s" % exc)
+    if not isinstance(doc, dict) or doc.get("format") != PLAN_FORMAT:
+        raise PlanError("Not a %s document." % PLAN_FORMAT)
+    for node, _path in plan_iter(doc):
+        for key, default in (("children", []), ("anchors", []), ("levels", []), ("params", {}),
+                             ("transform", {"x": 0.0, "y": 0.0, "z": 0.0, "rot": 0.0})):
+            node.setdefault(key, default)
+    return doc
+
+
+# ==============================================================================
 # 8. GAME PACKAGE EXPORT (glb + JSON description)
 # ==============================================================================
 # glTF carries the visuals; an engine also needs to know where a character may
