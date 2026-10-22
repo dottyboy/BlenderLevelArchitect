@@ -3356,7 +3356,7 @@ check("Plans: bad id and clockwise footprint are errors", len(addon.plan_validat
 bowtie = addon.plan_node("b", "building", "house", footprint=[[0, 0], [4, 0], [4, 3], [1, 3], [1, -1]])
 check("Plans: self-crossing footprint is an error", any("crosses" in e for e in addon.plan_validate(bowtie)[0]))
 check("Plans: building without footprint is an error",
-      any("footprint" in e for e in addon.plan_validate(addon.plan_node("h", "building", "house"))[0]))
+      any("footprint" in e for e in addon.plan_validate(addon.plan_node("h", "building", "hut"))[0]))
 dup = addon.plan_node("p", "compound", footprint=[[0, 0], [9, 0], [9, 9], [0, 9]],
                       children=[addon.plan_node("a", "terrain"), addon.plan_node("a", "terrain")])
 check("Plans: duplicate sibling ids are an error", any("duplicate" in e for e in addon.plan_validate(dup)[0]))
@@ -3561,7 +3561,7 @@ check("Plan build: a rotated compound turns its children (watchtower now on +y)"
       abs(ty - (scene.wfc_castle_width / 2 + 12.0)) < 1.0, str(ty))
 # unbuildable kinds are skipped, not fatal; bad plans refused
 mixed = addon.plan_node("mix", "compound", "yard", footprint=[[-30, -30], [30, -30], [30, 30], [-30, 30]],
-                        children=[addon.plan_node("hut", "building", "house", footprint=[[-2, -2], [2, -2], [2, 2], [-2, 2]]),
+                        children=[addon.plan_node("hut", "building", "windmill", footprint=[[-2, -2], [2, -2], [2, 2], [-2, 2]]),
                                   addon.plan_node("tow", "building", "tower", params={"radius": 3.0})])
 res = addon.plan_build(bpy.context, mixed)
 check("Plan build: a kind without a builder is skipped with a reason, the rest builds",
@@ -3612,6 +3612,92 @@ check("Plan ops: grounds and tower kinds create",
 check("Plan ops: the Plans sub-panel draws",
       (lambda: [addon.VIEW3D_PT_GLAPlans.draw(types.SimpleNamespace(layout=_FakeLayout({"props": [], "ops": [], "sections": []}, False)),
                                               bpy.context)] and True)())
+
+# ==============================================================================
+print("\n--- Plans: house, chapel, stable ---")
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+
+
+def _bounds_of(path_prefix):
+    bpy.context.view_layer.update()
+    objs = [o for o in bpy.data.objects if o.name.startswith("PB_" + path_prefix) and o.type == 'MESH']
+    pts = [o.matrix_world @ v.co for o in objs for v in o.data.vertices]
+    return (min(p.x for p in pts), max(p.x for p in pts), min(p.y for p in pts), max(p.y for p in pts),
+            min(p.z for p in pts), max(p.z for p in pts))
+
+
+def _ray(origin, direction):
+    bpy.context.view_layer.update()
+    hit, loc, _n, _i, _o, _m = scene.ray_cast(bpy.context.evaluated_depsgraph_get(), origin, direction)
+    return loc if hit else None
+
+
+h1 = addon.plan_node("h1", "building", "house", params={})
+addon.plan_build(bpy.context, h1)
+x0, x1, y0, y1, z0, z1 = _bounds_of("h1")
+d = addon.PLAN_HOUSE_DEFAULTS["house"]
+check("House: footprint matches width/depth (plus wall half-thickness)",
+      abs((x1 - x0) - (d["width"] + d["wall_thickness"] + 0.6)) < 0.35 and abs((y1 - y0) - (d["depth"] + d["wall_thickness"] + 0.9)) < 0.35,
+      "%.2f x %.2f" % (x1 - x0, y1 - y0))
+check("House: roof rises above the walls", z1 > d["wall_height"] + 0.8, str(z1))
+hit = _ray((0.0, -d["depth"] / 2 - 3.0, 1.0), (0.0, 1.0, 0.0))
+check("House: the south door is passable (ray runs through to the back wall)",
+      hit is not None and hit.y > d["depth"] / 2 - 0.6, str(hit))
+hit = _ray((d["width"] / 2 + 3.0, 0.0, 1.0), (-1.0, 0.0, 0.0))
+check("House: the east wall is solid", hit is not None and hit.x > d["width"] / 2 - 0.1, str(hit))
+hit = _ray((0.0, 0.0, 0.5), (0.0, 0.0, 1.0))
+check("House: a single-storey interior has a roof overhead", hit is not None and hit.z > d["wall_height"] - 0.3, str(hit))
+# two floors
+h2 = addon.plan_node("h2", "building", "house", params={"floors": 2})
+addon.plan_build(bpy.context, h2)
+hit = _ray((0.0, 0.0, 0.5), (0.0, 0.0, 1.0))
+check("House: two storeys have a ceiling slab between them", hit is not None and abs(hit.z - (d["wall_height"] - 0.2)) < 0.05, str(hit))
+# ruin: no roof, nothing above the wall top
+hr = addon.plan_node("hr", "building", "house", params={"ruin": 0.8})
+addon.plan_build(bpy.context, hr)
+_, _, _, _, _, rz = _bounds_of("hr")
+check("House: a ruin has no roof or floating slab", rz <= d["wall_height"] + 0.4, str(rz))
+# rotation and position
+hp = addon.plan_node("hp", "building", "house", transform={"x": 50.0, "y": 20.0, "z": 3.0, "rot": 90.0})
+addon.plan_build(bpy.context, hp)
+x0, x1, y0, y1, z0, z1 = _bounds_of("hp")
+check("House: placed at its plan position and rotated (7 m side now along y)",
+      abs((x0 + x1) / 2 - 50.0) < 0.1 and abs((y0 + y1) / 2 - 20.0) < 0.1 and (y1 - y0) > (x1 - x0) and abs(z0 - 3.0) < 0.2,
+      "%s" % ((x0, x1, y0, y1, z0),))
+# chapel and stable
+for kind in ("chapel", "stable"):
+    n = addon.plan_node("k_" + kind, "building", kind, transform={"x": 100.0 if kind == "chapel" else 200.0, "y": 0.0, "z": 0.0, "rot": 0.0})
+    check("House: %s builds with its own defaults" % kind, addon.plan_build(bpy.context, n)["built"] == ["k_" + kind])
+    dd = addon.PLAN_HOUSE_DEFAULTS[kind]
+    check("House: %s default footprint is its width x depth" % kind,
+          addon.plan_footprint(n) == addon._footprint_rect({"width": dd["width"], "depth": dd["depth"]}))
+x0, x1, y0, y1, z0, z1 = _bounds_of("k_chapel")
+check("House: the chapel is long along y and its roof ridge is taller than its walls",
+      (y1 - y0) > (x1 - x0) + 3.0 and z1 > addon.PLAN_HOUSE_DEFAULTS["chapel"]["wall_height"] + 1.5, str((x1 - x0, y1 - y0, z1)))
+hit = _ray((100.0, -addon.PLAN_HOUSE_DEFAULTS["chapel"]["depth"] / 2 - 3.0, 1.0), (0.0, 1.0, 0.0))
+check("House: the chapel door is passable", hit is not None and hit.y > 4.0, str(hit))
+# validation
+for bad_params, label in (({"floors": 9}, "floors out of range"), ({"door": "X"}, "unknown door side"),
+                          ({"roof": "DOME"}, "unknown roof"), ({"wall_thickness": 1.4, "width": 3.0, "depth": 3.0}, "walls too thick"),
+                          ({"brick_color": "PURPLE"}, "unknown colour"), ({"width": True}, "boolean as number")):
+    try:
+        addon.plan_build(bpy.context, addon.plan_node("bad", "building", "house", params=bad_params))
+        refused = False
+    except addon.PlanError as exc:
+        refused = "bad" in str(exc)
+    check("House: refused - " + label, refused)
+check("House: no door side builds a closed house", addon.plan_build(bpy.context,
+      addon.plan_node("nd", "building", "house", params={"door": "NONE", "windows": False}))["built"] == ["nd"])
+check("House: roof NONE and FLAT build",
+      all(addon.plan_build(bpy.context, addon.plan_node("rf", "building", "house", params={"roof": r}))["built"] == ["rf"]
+          for r in ("NONE", "FLAT")))
+check("House: MIXED brick colour builds", addon.plan_build(bpy.context,
+      addon.plan_node("mx", "building", "house", params={"brick_color": "MIXED"}, seed=4))["built"] == ["mx"])
+check("House: vertex budget is modest (< 5000 for a default house)",
+      all(len(o.data.vertices) < 5000 for o in bpy.data.objects if o.name.startswith("PB_h1") and o.type == 'MESH'))
 
 # ==============================================================================
 print()

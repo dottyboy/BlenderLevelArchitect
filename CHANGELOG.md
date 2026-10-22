@@ -3,6 +3,13 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## Unreleased — plans (M2, step 1)
+
+- **House, chapel and stable building plans.** Masonry buildings on a rectangular footprint: four wall runs with a door
+  (arched, pointed or rectangular) and windows per storey, stone floor, ceiling slabs between storeys, gable or flat roof,
+  ruin (roof and ceiling are dropped, walls break down), brick colour (incl. Mixed). Parameters are validated against ranges.
+  New buttons House / Chapel / Stable in the Plans sub-panel.
+
 ## 0.44.0 — plans (M1)
 
 - **Plans, experimental.** A new collapsed *Plans (experimental)* sub-panel: create a starter plan at the 3D cursor
