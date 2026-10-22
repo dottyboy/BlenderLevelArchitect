@@ -3,14 +3,30 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
-## Unreleased — plans (M2, step 1)
+## 0.45.0 — plans (M2)
+
+M2 in one list: house, chapel, stable and well plans; stone enclosure with gate anchors; automatic seeded layout with Freeze; roof tiles; corner towers and the Fortress example; fix for double-offset wrapped buildings.
+
+
+
+### plans (M2, step 4)
+
+- **Roof tiles.** Procedural terracotta and slate roof materials (packed like the masonry textures); houses, stables, the
+  chapel (slate by default) and the well use them. `roof_color` = `TERRACOTTA`, `SLATE` or `STONE` (the earlier stone look).
+  Brick tints do not affect the roof.
+- **Corner towers for compounds.** A layout rule with `"at": "corners"` puts one building (e.g. a tower) on every vertex of the
+  compound's footprint, so the stone enclosure becomes a curtain wall with towers. New **Fortress** example in the Plans panel:
+  an outer ward with corner towers and a gate, the castle inside as its keep, and a house or two.
+- tools/render_media.py: jobs `houses_still`, `grounds_still`, `fortress_still`, `fortress_turntable`.
+
+### plans (M2, step 1)
 
 - **House, chapel and stable building plans.** Masonry buildings on a rectangular footprint: four wall runs with a door
   (arched, pointed or rectangular) and windows per storey, stone floor, ceiling slabs between storeys, gable or flat roof,
   ruin (roof and ceiling are dropped, walls break down), brick colour (incl. Mixed). Parameters are validated against ranges.
   New buttons House / Chapel / Stable in the Plans sub-panel.
 
-## Unreleased — plans (M2, step 2)
+### plans (M2, step 2)
 
 - **Well** building plan (stone ring, shaft, posts with a small roof; ruin drops the roof).
 - **Stone enclosure** for compound plans: `params.fence = "stone"` runs a wall (height, thickness, brick colour, ruin) along
@@ -20,7 +36,7 @@ reproduced exactly from its settings (see **Debug: Last Generation Params** in t
 - Fix: buildings that the wrapped Tower/Castle operators place were offset twice when the plan had a non-zero position
   (the parent inverse was computed from a stale matrix); tests now update the view layer before measuring.
 
-## Unreleased — plans (M2, step 3)
+### plans (M2, step 3)
 
 - **Automatic layout for compound plans.** `params.layout` is a list of rules (`kind`, `count` as a number or `[min, max]`,
   `near` = `free` or `wall`, `min_gap`, `params`) that are expanded into child plans when the plan is built. Existing
@@ -29,16 +45,6 @@ reproduced exactly from its settings (see **Debug: Last Generation Params** in t
   arrangement. What does not fit is skipped with a warning.
 - **Freeze** button in the Plans panel writes the generated buildings into the stored plan as ordinary children.
 - The *Castle Grounds* example now lays out a chapel, stables and houses.
-
-## Unreleased — plans (M2, step 4)
-
-- **Roof tiles.** Procedural terracotta and slate roof materials (packed like the masonry textures); houses, stables, the
-  chapel (slate by default) and the well use them. `roof_color` = `TERRACOTTA`, `SLATE` or `STONE` (the earlier stone look).
-  Brick tints do not affect the roof.
-- **Corner towers for compounds.** A layout rule with `"at": "corners"` puts one building (e.g. a tower) on every vertex of the
-  compound's footprint, so the stone enclosure becomes a curtain wall with towers. New **Fortress** example in the Plans panel:
-  an outer ward with corner towers and a gate, the castle inside as its keep, and a house or two.
-- tools/render_media.py: jobs `houses_still`, `grounds_still`, `fortress_still`, `fortress_turntable`.
 
 ## 0.44.0 — plans (M1)
 

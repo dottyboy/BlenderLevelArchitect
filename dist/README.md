@@ -71,6 +71,28 @@ locations — walkable by rectangles, torches as real lights, doors that swing o
 </tr>
 </table>
 
+## Plans: from one building to a site (experimental)
+
+A **plan** describes a site as nested data — a fortress, a farmyard, later a village — and the generator builds it. Plans live
+in the .blend and as `.plan.json`, are fully seeded, and can place buildings for you.
+
+<table>
+<tr>
+<td width="50%"><img src="../docs/img/plans_fortress.gif" alt="A fortress turning: outer ward with corner towers and a gate, the castle as its keep"><br><sub><b>Fortress</b> — outer ward with corner towers and a gate, the castle as its keep</sub></td>
+<td width="50%"><img src="../docs/img/plans_grounds.png" alt="Castle grounds with a chapel, stables, houses, a well and a watchtower inside a stone enclosure"><br><sub><b>Castle grounds</b> — chapel, stable, houses, well and watchtower laid out automatically</sub></td>
+</tr>
+<tr>
+<td colspan="2"><img src="../docs/img/plans_houses.png" alt="A house, a two-storey house, a chapel, a stable and a ruin"><br><sub>Building plans: house, two-storey house, chapel (slate roof), stable, ruin</sub></td>
+</tr>
+</table>
+
+* **Building plans**: tower, castle, house, chapel, stable, well — masonry walls, doors, windows, terracotta or slate roofs, ruin.
+* **Compound plans**: a footprint with a stone enclosure and gate, and `layout` rules ("1 chapel on the wall, 1-2 stables, 3 houses")
+  that place buildings without overlap, keep the way from the gate to the castle free and turn doors toward it.
+* In Blender: sidebar **Level Architect > Plans (experimental)** — pick Tower, Castle, Grounds, Fortress, House, Chapel or
+  Stable at the 3D cursor, then **Build**. Format: [docs/PLAN_FORMAT.md](../docs/PLAN_FORMAT.md); roadmap towards farms, villages,
+  towns, culture styles and biomes: [docs/WORLD_GENERATOR_PLAN.md](../docs/WORLD_GENERATOR_PLAN.md).
+
 ## Install
 
 1. Download `game_level_architect.zip` from the [Releases page](https://github.com/dottyboy/BlenderLevelArchitect/releases/latest) (don't unzip it).
