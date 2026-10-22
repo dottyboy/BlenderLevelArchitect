@@ -3,6 +3,12 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.50.0 — plans: biome regions
+
+- **Two biomes on one terrain**: `params.region_biome` (any biome name) takes over where a slow noise mask says so — `region_scale`
+  (feature size, m), `region_bias` (share of each biome), `region_blend` (how soft the border is). Relief, feature size, palette, rock and
+  earth colours and vegetation all blend; the second biome never dips below the first one's water line, so mountains do not flood. Plan pads still win.
+
 ## 0.49.0 — plans: rivers
 
 - **Rivers** on terrain plans: `params.rivers` is `"auto"` (default: one meandering river in meadow, forest and mountains, routed to keep

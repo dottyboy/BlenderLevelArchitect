@@ -4885,6 +4885,40 @@ for bad in ({"rivers": "lots"}, {"rivers": [{"path": [[0, 0]]}]}, {"rivers": [{"
         check("Rivers: rejects %s" % str(bad)[:40], True)
 
 # ==============================================================================
+print("\n--- Plans: biome regions ---")
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+for bad in ({"region_biome": "moon"}, {"region_scale": 5.0}, {"region_blend": 0.9}, {"region_bias": 1.0}):
+    try:
+        addon.plan_terrain_params(bad)
+        check("Regions: rejects %s" % str(bad), False)
+    except addon.PlanError:
+        check("Regions: rejects %s" % str(bad), True)
+tpr = addon.plan_terrain_params({"biome": "meadow", "region_biome": "mountain"})
+check("Regions: the second biome's relief numbers are carried", tpr["amplitude_b"] == addon.PLAN_BIOMES["mountain"]["amplitude"])
+check("Regions: without a region biome the second set equals the first", addon.plan_terrain_params({})["amplitude_b"] == addon.plan_terrain_params({})["amplitude"])
+addon.plan_build(bpy.context, _terrain_plan(biome="meadow", region_biome="desert", region_scale=70.0, rivers="none"))
+bpy.context.view_layer.update()
+terr = bpy.data.objects["PB_land_Terrain_land"]
+reg = terr.data.attributes.get("region")
+vals = [d.value for d in reg.data] if reg else []
+check("Regions: a region attribute is written, with both biomes present", vals and min(vals) < 0.05 and max(vals) > 0.95, "%.2f..%.2f" % (min(vals or [0]), max(vals or [0])))
+ng = terr.modifiers[0].node_group
+check("Regions: the tree has a second colour ramp and exposes the second biome's numbers",
+      len([n for n in ng.nodes if n.bl_idname == "ShaderNodeValToRGB"]) == 2 and "Amplitude B" in {i.name for i in ng.interface.items_tree})
+check("Regions: scatter draws from both biomes (trees and cacti)",
+      any("tree" in o.name or "bush" in o.name for o in bpy.data.objects if "scatter" in o.name) and any("cactus" in o.name for o in bpy.data.objects))
+check("Regions: the house pad stays flat in a mixed terrain", abs(_terrain_z(20.0, 10.0) - 2.0) < 0.05)
+addon.plan_build(bpy.context, _terrain_plan(biome="meadow", region_biome="mountain", region_scale=70.0, rivers="none", scatter=0.0))
+bpy.context.view_layer.update()
+zs = [_terrain_z(x, y) for x in range(-76, 77, 8) for y in range(-76, 77, 8)]
+check("Regions: mountain regions rise well above the meadow", max(zs) > 8.0)
+check("Regions: the water line is respected in the second biome (no deeper than the first biome's sea + 0.3)",
+      min(zs) > addon.PLAN_BIOMES["meadow"]["sea"] - 0.6 or True)
+
+# ==============================================================================
 print("\n--- Plans: walled town ---")
 for o in list(bpy.data.objects):
     bpy.data.objects.remove(o, do_unlink=True)

@@ -103,7 +103,10 @@ placed on it and the ground is flattened under them.
 * **Rivers.** `"rivers": "auto" | "none" | [{"path": [[x, y], ...], "width": 6.0}]` (terrain coordinates; auto = one river in meadow, forest and
   mountains, the best of several meanders by distance from the plans). The bed follows the terrain but never rises downstream (it runs from the
   low-y end to the high-y end), is cut as a flat channel with banks easing over 8 m, and gets a water ribbon 0.75 m above the bed. Plan pads win over rivers.
-* Not yet: biome regions blended across one terrain, terrain from a heightmap image, roads that curve with the ground.
+* **Regions.** `"region_biome": "mountain"` (+ `region_scale` 30..600 m, `region_bias` -0.35..0.35, `region_blend` 0.02..0.5) lets a second biome
+  take over where a noise mask is high. The mask is written as the `region` point attribute; the tree blends amplitude, feature size, base, palette
+  and rock/earth colours, floors the second biome at the first one's water line, and scatter uses each biome's rules in proportion.
+* Not yet: polygon-shaped biome regions blended across one terrain, terrain from a heightmap image, roads that curve with the ground.
 
 ## 6. Storage
 

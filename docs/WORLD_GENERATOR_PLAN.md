@@ -63,7 +63,7 @@ footprint. First shared footprint/part placement code. First GIF for the README.
 **M5 — Style packs.** Extract today's medieval look into the first pack (data, not code), then a second, very different
 one (e.g. Egyptian) to learn how general the building plan must be (roof forms, columns, terraces). More cultures after.
 
-**M6 — Terrain.** *Done in 0.48.0:* Geometry Nodes heightfield around plans, flattening pads, sloped paths between plans, lakes/sea, six biomes with vegetation. Rivers done in 0.49.0. Later: biome regions on one terrain, heightmap import, curved roads.
+**M6 — Terrain.** *Done in 0.48.0:* Geometry Nodes heightfield around plans, flattening pads, sloped paths between plans, lakes/sea, six biomes with vegetation. Rivers done in 0.49.0, noise-based biome regions in 0.50.0. Later: polygon regions on one terrain, heightmap import, curved roads.
 
 **M7+ — Rungs 5-8.** Districts, settlements, town walls, instancing and per-district budgets, biomes.
 

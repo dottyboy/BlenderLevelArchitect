@@ -196,6 +196,9 @@ A path between two plans on different heights slopes from one to the other.
 | Mountains | tall relief, forest in the valleys, rock and snow above |
 | Island | land in the middle, sea all around, beach, trees and bushes |
 
+Set `region_biome` (for example `"mountain"` on a meadow) to mix two biomes on one terrain: hills and plains, forest edges, an oasis in a desert.
+`region_scale` sets the size of the patches, `region_bias` how much of the terrain each biome gets and `region_blend` how soft the border is.
+
 Meadow, forest and mountain terrains get a **river** by default (`rivers`: `"auto"`, `"none"`, or your own paths with a width); it meanders
 around your plans, always runs downhill and keeps trees off its banks.
 

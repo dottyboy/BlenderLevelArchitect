@@ -33,7 +33,7 @@ from bpy_extras.io_utils import ExportHelper, ImportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 49, 0),
+    "version": (0, 50, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -11518,6 +11518,7 @@ PLAN_BIOMES = {
 PLAN_TERRAIN_DEFAULTS = dict(biome="meadow", width=240.0, depth=240.0, resolution=2.0, pad_margin=10.0, scatter=1.0)
 PLAN_TERRAIN_RANGES = {"width": (40.0, 1000.0), "depth": (40.0, 1000.0), "resolution": (0.5, 10.0), "pad_margin": (2.0, 40.0),
                        "scatter": (0.0, 4.0)}
+PLAN_TERRAIN_REGION = {"region_scale": (30.0, 600.0), "region_bias": (-0.35, 0.35), "region_blend": (0.02, 0.5)}
 PLAN_TERRAIN_OPTIONAL = {"amplitude": (0.0, 120.0), "feature_size": (10.0, 400.0), "detail": (0.0, 8.0),
                          "roughness": (0.0, 1.0), "base": (-50.0, 50.0), "sea_level": (-150.0, 150.0), "island": (0.0, 1.0)}
 PLAN_BIOME_RIVERS = {"meadow": 1, "forest": 1, "mountain": 1}          # rivers made when params.rivers is "auto" (the default)
@@ -11528,7 +11529,7 @@ def plan_terrain_params(params):
     """Terrain defaults + the biome's numbers + the node's own params, validated. Raises PlanError."""
     params = dict(params or {})
     merged = {**PLAN_TERRAIN_DEFAULTS, **{k: v for k, v in params.items() if k in PLAN_TERRAIN_DEFAULTS or k in PLAN_TERRAIN_OPTIONAL
-                                          or k in ("water", "rivers")}}
+                                          or k in ("water", "rivers", "region_biome", "region_scale", "region_bias", "region_blend")}}
     if merged["biome"] not in PLAN_BIOMES:
         raise PlanError("params.biome = %r is not one of %s" % (merged["biome"], ", ".join(PLAN_BIOMES)))
     for key, (lo, hi) in {**PLAN_TERRAIN_RANGES, **{k: v for k, v in PLAN_TERRAIN_OPTIONAL.items() if k in params}}.items():
@@ -11558,6 +11559,25 @@ def plan_terrain_params(params):
             if not isinstance(r.get("width", 6.0), (int, float)) or not 2.0 <= r.get("width", 6.0) <= 40.0:
                 raise PlanError("params.rivers: width must be 2..40")
     merged["rivers"] = rivers
+    # a second biome that takes over where a slow noise mask says so (hills of one biome inside another, forest edges ...)
+    other = params.get("region_biome")
+    if other is not None and other not in PLAN_BIOMES:
+        raise PlanError("params.region_biome = %r is not one of %s" % (other, ", ".join(PLAN_BIOMES)))
+    merged["region_biome"] = other
+    for key, (lo, hi) in PLAN_TERRAIN_REGION.items():
+        v = params.get(key, {"region_scale": 140.0, "region_bias": 0.0, "region_blend": 0.15}[key])
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v < lo or v > hi:
+            raise PlanError("params.%s = %r is outside %s..%s" % (key, v, lo, hi))
+        merged[key] = float(v)
+    if other is not None:
+        spec_b = PLAN_BIOMES[other]
+        merged["amplitude_b"] = spec_b["amplitude"]
+        merged["feature_b"] = spec_b["feature"]
+        merged["base_b"] = spec_b["base"]
+        merged["sea_b"] = spec_b["sea"]
+    else:
+        merged["amplitude_b"], merged["feature_b"] = merged["amplitude"], merged["feature_size"]
+        merged["base_b"], merged["sea_b"] = merged["base"], merged["sea_level"]
     return merged
 
 
@@ -11671,15 +11691,30 @@ def _terrain_arrays(tp, pads, river_pads=()):
         pad_h = np.where(total > 1e-9, (pad_w * pad_h + (1.0 - pad_w) * rw * rh) / np.maximum(total, 1e-9), pad_h)
         pad_w = 1.0 - (1.0 - pad_w) * (1.0 - rw)
     edge = np.clip(np.sqrt((X / (w / 2.0)) ** 2 + (Y / (d / 2.0)) ** 2), 0.0, 1.5)
-    return nx, ny, X, Y, pad_w, pad_h, edge
+    return nx, ny, X, Y, pad_w, pad_h, edge, _terrain_region(tp, X, Y)
 
 
-def _terrain_write_attributes(mesh, nx, ny, pad_w, pad_h, edge):
+def _terrain_region(tp, X, Y):
+    """0 where the terrain's own biome rules, 1 where region_biome does (eased by region_blend); all zero without a region biome."""
+    import numpy as np
+    if not tp.get("region_biome"):
+        return np.zeros(X.shape)
+    sc = tp["region_scale"]
+    seed = tp.get("noise_seed", 0) + 311
+    n = np.array([plan_fbm2(x / sc, y / sc, seed, 3) for x, y in zip(X.tolist(), Y.tolist())]) + tp["region_bias"]
+    # fbm clusters near 0.5; stretch it so the two biomes get comparable shares
+    n = 0.5 + (n - 0.5) * 2.2
+    lo, hi = 0.5 - tp["region_blend"], 0.5 + tp["region_blend"]
+    t = np.clip((n - lo) / (hi - lo), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _terrain_write_attributes(mesh, nx, ny, pad_w, pad_h, edge, region):
     import numpy as np
     ring_idx = np.array(_terrain_ring(nx, ny))
     k, n_top = len(ring_idx), (nx + 1) * (ny + 1)
     # skirt: 0 on the sheet, a hair above 0 on the ring that carries the skirt colour, 1 on the ring that drops away
-    for attr, top in (("pad_h", pad_h), ("pad_w", pad_w), ("edge", edge), ("skirt", None)):
+    for attr, top in (("pad_h", pad_h), ("pad_w", pad_w), ("edge", edge), ("region", region), ("skirt", None)):
         a = mesh.attributes.get(attr) or mesh.attributes.new(attr, 'FLOAT', 'POINT')
         if top is None:
             vals = np.concatenate([np.zeros(n_top), np.full(k, 0.002), np.ones(k)])
@@ -11690,7 +11725,7 @@ def _terrain_write_attributes(mesh, nx, ny, pad_w, pad_h, edge):
 
 def _terrain_grid_mesh(tp, pads, name):
     """The ground sheet: (nx+1)*(ny+1) vertices at z = 0 plus two skirt rings, with the four attributes."""
-    nx, ny, X, Y, pad_w, pad_h, edge = _terrain_arrays(tp, pads)
+    nx, ny, X, Y, pad_w, pad_h, edge, region = _terrain_arrays(tp, pads)
     ring = _terrain_ring(nx, ny)
     n_top = (nx + 1) * (ny + 1)
     verts = ([(float(x), float(y), 0.0) for x, y in zip(X, Y)] + [(float(X[v]), float(Y[v]), 0.0) for v in ring]
@@ -11704,7 +11739,7 @@ def _terrain_grid_mesh(tp, pads, name):
     mesh.update()
     for poly in mesh.polygons:
         poly.use_smooth = True
-    _terrain_write_attributes(mesh, nx, ny, pad_w, pad_h, edge)
+    _terrain_write_attributes(mesh, nx, ny, pad_w, pad_h, edge, region)
     return mesh, (nx, ny)
 
 
@@ -11771,7 +11806,9 @@ def _terrain_node_group(name, tp):
                                    ("Detail", tp["detail"], 0.0, 12.0), ("Roughness", tp["roughness"], 0.0, 1.0),
                                    ("Seed", float(tp["noise_seed"]), 0.0, 10000.0), ("Base", tp["base"], -100.0, 100.0),
                                    ("Sea Level", tp["sea_level"], -200.0, 200.0), ("Island", tp["island"], 0.0, 1.0),
-                                   ("Skirt Depth", tp["amplitude"] * 1.5 + 8.0, 0.0, 400.0)):
+                                   ("Skirt Depth", max(tp["amplitude"], tp["amplitude_b"]) * 1.5 + 8.0, 0.0, 400.0),
+                                   ("Amplitude B", tp["amplitude_b"], 0.0, 200.0), ("Feature Size B", tp["feature_b"], 5.0, 600.0),
+                                   ("Base B", tp["base_b"], -100.0, 100.0), ("Sea Level B", tp["sea_b"], -200.0, 200.0)):
         sock = iface.new_socket(name=label, in_out='INPUT', socket_type='NodeSocketFloat')
         sock.default_value = default
         _set_prop(sock, 'min_value', lo)
@@ -11830,9 +11867,17 @@ def _terrain_node_group(name, tp):
                 links.new(v, sock)
         return n.outputs["Result"]
 
+    region = named("region", -1500, 600)
+
+    def lerp(a, b, x, y):                                              # a + (b - a) * region
+        return math_('ADD', a, math_('MULTIPLY', math_('SUBTRACT', b, a, x, y), region, x + 100, y), x + 200, y)
+    amp = lerp(gin.outputs["Amplitude"], gin.outputs["Amplitude B"], -1500, 450)
+    feat = lerp(gin.outputs["Feature Size"], gin.outputs["Feature Size B"], -1500, 350)
+    base_l = lerp(gin.outputs["Base"], gin.outputs["Base B"], -1500, 250)
+    sea_l = lerp(gin.outputs["Sea Level"], gin.outputs["Sea Level B"], -1500, 150)
     pos = nodes.new("GeometryNodeInputPosition")
     pos.location = (-1300, 300)
-    inv = math_('DIVIDE', 1.0, gin.outputs["Feature Size"], -1300, 150)
+    inv = math_('DIVIDE', 1.0, feat, -1300, 150)
     noise = nodes.new("ShaderNodeTexNoise")
     noise.noise_dimensions = '4D'
     noise.location = (-1100, 250)
@@ -11844,11 +11889,14 @@ def _terrain_node_group(name, tp):
     links.new(gin.outputs["Roughness"], noise.inputs["Roughness"])
     centred = math_('SUBTRACT', noise.outputs["Fac"], 0.5, -900, 250)
     doubled = math_('MULTIPLY', centred, 6.0, -750, 250)
-    scaled = math_('MULTIPLY', doubled, gin.outputs["Amplitude"], -600, 250)
-    based = math_('ADD', scaled, gin.outputs["Base"], -450, 250)
+    scaled = math_('MULTIPLY', doubled, amp, -600, 250)
+    based = math_('ADD', scaled, base_l, -450, 250)
     edge_t = map_range(named("edge", -900, -50), 0.45, 1.0, -750, -50, smooth=True)
     drop = math_('MULTIPLY', math_('MULTIPLY', edge_t, gin.outputs["Island"], -600, -50), gin.outputs["Skirt Depth"], -450, -50)
-    rolling = math_('SUBTRACT', based, drop, -300, 200)
+    low_ = math_('SUBTRACT', based, drop, -300, 200)
+    # inside a second biome the ground never dips below the first biome's water line (no flooded mountain valleys)
+    floored = math_('MAXIMUM', low_, math_('ADD', gin.outputs["Sea Level"], 0.4, -300, 330), -150, 300)
+    rolling = math_('ADD', low_, math_('MULTIPLY', math_('SUBTRACT', floored, low_, -150, 250), region, 0, 250), 100, 250)
     pad_h, pad_w = named("pad_h", -450, -250), named("pad_w", -450, -400)
     blended = math_('ADD', rolling, math_('MULTIPLY', math_('SUBTRACT', pad_h, rolling, -300, -250), pad_w, -150, -250), -0, 100)
     skirt = named("skirt", -300, -550)
@@ -11861,8 +11909,8 @@ def _terrain_node_group(name, tp):
     links.new(gin.outputs["Geometry"], setpos.inputs["Geometry"])
     links.new(offset.outputs["Vector"], setpos.inputs["Offset"])
     # Colours: altitude ramp -> rock on steep faces -> trodden earth under plans -> dark skirt.
-    lo = math_('SUBTRACT', gin.outputs["Sea Level"], 1.0, 150, -300)
-    hi = math_('ADD', math_('ADD', math_('MULTIPLY', gin.outputs["Amplitude"], 1.6, 0, -420), gin.outputs["Sea Level"], 150, -420), 1.0, 300, -420)
+    lo = math_('SUBTRACT', sea_l, 1.0, 150, -300)
+    hi = math_('ADD', math_('ADD', math_('MULTIPLY', amp, 1.6, 0, -420), sea_l, 150, -420), 1.0, 300, -420)
     t = map_range(blended, lo, hi, 450, -300)
     ramp = nodes.new("ShaderNodeValToRGB")
     ramp.location = (650, -300)
@@ -11874,14 +11922,31 @@ def _terrain_node_group(name, tp):
         e = els.new(pos_)
         e.color = (*lin(rgb), 1.0)
     links.new(t, ramp.inputs["Fac"])
+    ground = ramp.outputs["Color"]
+    rock, earth = lin(spec["rock"]), lin(spec["earth"])
+    if tp.get("region_biome"):
+        spec_b = PLAN_BIOMES[tp["region_biome"]]
+        ramp_b = nodes.new("ShaderNodeValToRGB")
+        ramp_b.location = (650, -900)
+        els_b = ramp_b.color_ramp.elements
+        stops_b = spec_b["ramp"]
+        els_b[0].position, els_b[0].color = stops_b[0][0], (*lin(stops_b[0][1]), 1.0)
+        els_b[1].position, els_b[1].color = stops_b[-1][0], (*lin(stops_b[-1][1]), 1.0)
+        for pos_, rgb in stops_b[1:-1]:
+            e = els_b.new(pos_)
+            e.color = (*lin(rgb), 1.0)
+        links.new(t, ramp_b.inputs["Fac"])
+        ground = mix(region, ramp.outputs["Color"], ramp_b.outputs["Color"], 900, -300)
+        rock = mix(region, lin(spec["rock"]), lin(spec_b["rock"]), 900, -700)
+        earth = mix(region, lin(spec["earth"]), lin(spec_b["earth"]), 900, -800)
     normal = nodes.new("GeometryNodeInputNormal")
     normal.location = (500, -600)
     sep = nodes.new("ShaderNodeSeparateXYZ")
     sep.location = (650, -600)
     links.new(normal.outputs["Normal"], sep.inputs["Vector"])
     slope = map_range(math_('SUBTRACT', 1.0, sep.outputs["Z"], 800, -600), 0.1, 0.34, 950, -600)
-    col1 = mix(slope, ramp.outputs["Color"], lin(spec["rock"]), 1100, -300)
-    col2 = mix(math_('MULTIPLY', pad_w, 0.85, 1100, -450), col1, lin(spec["earth"]), 1300, -300)
+    col1 = mix(slope, ground, rock, 1100, -300)
+    col2 = mix(math_('MULTIPLY', pad_w, 0.85, 1100, -450), col1, earth, 1300, -300)
     col3 = mix(math_('MINIMUM', math_('MULTIPLY', skirt, 500.0, 1300, -700), 1.0, 1450, -700), col2, lin((0.16, 0.11, 0.07)), 1500, -300)
     store = nodes.new("GeometryNodeStoreNamedAttribute")
     store.data_type = 'FLOAT_COLOR'
@@ -11993,7 +12058,7 @@ def _build_bush_mesh(seed):
     return soup
 
 
-def _terrain_scatter(context, tp, sampler, pads, seed, path, world, sea_level):
+def _terrain_scatter(context, tp, sampler, pads, seed, path, world, sea_level, region_at=None, region_share=0.0):
     """Trees, bushes, rocks and cacti of the biome: one merged mesh per kind, so a forest is a handful of objects."""
     import numpy as np
     spec = PLAN_BIOMES[tp["biome"]]
@@ -12017,9 +12082,15 @@ def _terrain_scatter(context, tp, sampler, pads, seed, path, world, sea_level):
         cactus_mat.diffuse_color = (0.18, 0.34, 0.16, 1.0)
     objects, counts = [], {}
     taken = {}                                                       # spatial hash for minimum spacing
-    for si, rule in enumerate(spec["scatter"]):
+    rules = [(r_, 0) for r_ in spec["scatter"]]
+    if tp.get("region_biome"):
+        rules += [(r_, 1) for r_ in PLAN_BIOMES[tp["region_biome"]]["scatter"]]
+    for si, (rule, side) in enumerate(rules):
         kind = rule["kind"]
-        n_want = int(rule["per_ha"] * area_ha * tp["scatter"])
+        share = (1.0 - region_share) if side == 0 else region_share
+        if not tp.get("region_biome"):
+            share = 1.0
+        n_want = int(rule["per_ha"] * area_ha * tp["scatter"] * share)
         if n_want <= 0:
             continue
         leaves = list(rule.get("leaf", ["GREEN"]))
@@ -12039,10 +12110,15 @@ def _terrain_scatter(context, tp, sampler, pads, seed, path, world, sea_level):
                 cval = plan_fbm2(x / scale, y / scale, seed + 17 * si, 3)
                 if cval < thresh and rng.random() > 0.12:
                     continue
+            r_here = region_at(x, y) if region_at else 0.0
+            if tp.get("region_biome") and rng.random() > (r_here if side else 1.0 - r_here):
+                continue
             z, slope = sampler(x, y)
             if z < sea_level + 0.5 or slope > rule.get("slope", 0.3):
                 continue
-            tz = (z - (sea_level - 1.0)) / (amp * 1.6 + 1.0)
+            amp_l = tp["amplitude"] + (tp["amplitude_b"] - tp["amplitude"]) * r_here
+            sea_l = tp["sea_level"] + (tp["sea_b"] - tp["sea_level"]) * r_here
+            tz = (z - (sea_l - 1.0)) / (amp_l * 1.6 + 1.0)
             lo, hi = rule.get("alt", (0.0, 1.0))
             if tz < lo or tz > hi:
                 continue
@@ -12141,8 +12217,8 @@ def _plan_build_terrain(context, root, resolved, node, path):
         river_stats += 1
     if river_pads:
         tp["river_bank"] = 8.0
-        _n, _m, _X, _Y, pad_w, pad_h, edge = _terrain_arrays(tp, pads, river_pads)
-        _terrain_write_attributes(mesh, nx, ny, pad_w, pad_h, edge)
+        _n, _m, _X, _Y, pad_w, pad_h, edge, region = _terrain_arrays(tp, pads, river_pads)
+        _terrain_write_attributes(mesh, nx, ny, pad_w, pad_h, edge, region)
         mesh.update()
         mesh.update_tag()
         obj.update_tag()
@@ -12165,7 +12241,19 @@ def _plan_build_terrain(context, root, resolved, node, path):
         _plan_adopt_objects(context.scene, path + ("water",), info["world"], [wobj])
         stats["water"] = True
     sampler = _terrain_sampler(heights, nx, ny, tp["width"], tp["depth"])
-    stats["scatter"] = _terrain_scatter(context, tp, sampler, pads + river_pads, info["seed"], path, info["world"], sea) if tp["scatter"] > 0 else {}
+    region_at, region_share = None, 0.0
+    if tp.get("region_biome"):
+        rx, ry = np.meshgrid(np.linspace(-tp["width"] / 2.0, tp["width"] / 2.0, 41), np.linspace(-tp["depth"] / 2.0, tp["depth"] / 2.0, 41))
+        rgrid = _terrain_region(tp, rx.ravel(), ry.ravel()).reshape(41, 41)
+        region_share = float(rgrid.mean())
+
+        def region_at(x, y):
+            i = min(40, max(0, int(round((x / tp["width"] + 0.5) * 40))))
+            j = min(40, max(0, int(round((y / tp["depth"] + 0.5) * 40))))
+            return float(rgrid[j, i])
+        stats["region_share"] = region_share
+    stats["scatter"] = (_terrain_scatter(context, tp, sampler, pads + river_pads, info["seed"], path, info["world"], sea, region_at, region_share)
+                        if tp["scatter"] > 0 else {})
     stats["pads"] = len(pads)
     return stats
 
