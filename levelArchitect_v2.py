@@ -33,7 +33,7 @@ from bpy_extras.io_utils import ExportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 41, 0),
+    "version": (0, 42, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -3764,7 +3764,8 @@ class OBJECT_OT_ExportLevelGLTF(bpy.types.Operator, ExportHelper):
         base_names = (
             BLUEPRINT_OBJECT_NAME, ROUND_FLOOR_OBJECT_NAME, WALLS_OBJECT_NAME, WALLS_ROUND_OBJECT_NAME,
             STAIRS_OBJECT_NAME, DOORS_OBJECT_NAME, DOORS_ROUND_OBJECT_NAME, PROPS_TORCH_OBJECT_NAME,
-            PROPS_DECORATION_OBJECT_NAME, TOWER_OBJECT_NAME, CASTLE_OBJECT_NAME,
+            PROPS_DECORATION_OBJECT_NAME, TOWER_OBJECT_NAME, CASTLE_OBJECT_NAME, INTERIOR_PROPS_OBJECT_NAME,
+            HALL_PROPS_OBJECT_NAME,
         )
         targets = _gltf_export_targets(base_names, scene.wfc_export_include_lights)
 
@@ -4196,6 +4197,7 @@ def _prop_inside_ring(kind, rot, px, py, geo, tile_size, margin=0.97):
 def _build_round_room_masonry_mesh(
     room_meta, room_id_grid, walkable_cells, tile_size, fine_level_height, wall_height,
     wall_thickness, z_offsets, door_style, door_height, cap_top, seed, name, ruin=0.0, room_colors=False,
+    tint_map=None,
 ):
     """Round room walls as brick-textured masonry (the Round Tower's shell
     method, see _TowerBuilder) instead of the n-gon ring of plain boxes: a
@@ -4268,7 +4270,7 @@ def _build_round_room_masonry_mesh(
             continue
         builder.geometry(ground=False)
         z0 = z * fine_level_height + z_offsets.get(nearest, 0.0)
-        mat_map = {0: brick_tint_slot(room_id), 1: len(BRICK_TINTS)} if room_colors else None
+        mat_map = {0: (tint_map or {}).get(room_id, brick_tint_slot(room_id)), 1: len(BRICK_TINTS)} if room_colors else None
         big.append(builder.mb, rot=seam, sx=sx, sy=sy, offset=(cx, cy, z0), mat_map=mat_map)
     return big.to_mesh(name)
 
@@ -4426,7 +4428,7 @@ def _build_round_room_walls_mesh(
 def _build_masonry_wall_mesh(
     walkable_cells, tile_size, level_height, wall_height, wall_thickness, z_offsets=None,
     forced_wall_edges=None, skip_cells=None, window_edges=None, window_width=1.0, window_sill=1.0,
-    window_height=1.0, ruin=0.0, seed=1, name="Walls", room_ids=None, room_colors=False,
+    window_height=1.0, ruin=0.0, seed=1, name="Walls", room_ids=None, room_colors=False, tint_map=None,
 ):
     """Ordinary level walls (the exposed edges of rooms and corridors) as
     brick-textured masonry: every straight run of exposed edges becomes one
@@ -4527,7 +4529,8 @@ def _build_masonry_wall_mesh(
                         accepted.add((cell, d))
             wb.geometry()
             sx, sy = start[0] - ux * ext_s, start[1] - uy * ext_s
-            mat_map = {0: brick_tint_slot(room_ids.get(run[0][2], -1)), 1: n_tints} if room_colors else None
+            rid_run = room_ids.get(run[0][2], -1)
+            mat_map = {0: (tint_map or {}).get(rid_run, brick_tint_slot(rid_run)), 1: n_tints} if room_colors else None
             big.append(wb.mb, rot=theta, offset=(sx, sy, z * level_height + off), mat_map=mat_map)
     return big.to_mesh(name), accepted
 
@@ -6511,6 +6514,7 @@ class OBJECT_OT_GenerateLevelWalls(bpy.types.Operator):
             window_sill=scene.wfc_window_sill, window_height=scene.wfc_window_height,
         )
         masonry_walls = scene.wfc_wall_style == 'MASONRY'
+        tint_map = room_tint_map(room_id_grid)   # neighbouring rooms get different brick tints
         accepted_windows = set()
 
         def _walls_mesh(cells, mesh_name, organic):
@@ -6519,7 +6523,7 @@ class OBJECT_OT_GenerateLevelWalls(bpy.types.Operator):
                     cells, tile_size, level_height, scene.wfc_wall_height, scene.wfc_wall_thickness,
                     z_offsets=z_offsets, forced_wall_edges=forced_wall_edges, skip_cells=skip_cells,
                     ruin=scene.wfc_wall_ruin, seed=scene.wfc_seed, name=mesh_name,
-                    room_ids=room_id_grid, room_colors=scene.wfc_masonry_room_colors, **window_kwargs,
+                    room_ids=room_id_grid, room_colors=scene.wfc_masonry_room_colors, tint_map=tint_map, **window_kwargs,
                 )
                 accepted_windows.update(ok)
                 return mesh
@@ -6566,6 +6570,7 @@ class OBJECT_OT_GenerateLevelWalls(bpy.types.Operator):
                     scene.wfc_wall_height, scene.wfc_wall_thickness, z_offsets,
                     scene.wfc_door_style, scene.wfc_door_height, scene.wfc_wall_cap_top,
                     scene.wfc_seed, name, ruin=scene.wfc_round_wall_ruin, room_colors=scene.wfc_masonry_room_colors,
+                    tint_map=tint_map,
                 )
             else:
                 ring_mesh_data = _build_round_room_walls_mesh(
@@ -7284,6 +7289,8 @@ class OBJECT_OT_GenerateLevelProps(bpy.types.Operator):
 # like every other part of the addon. See DEVELOPMENT.md section 2 (0.27.0).
 TOWER_OBJECT_NAME = "Procedural_Level_Tower"
 TOWER_LIGHT_PREFIX = "Procedural_Level_LanternLight"
+INTERIOR_PROPS_OBJECT_NAME = "Procedural_Level_InteriorProps"   # tower storeys' furniture (not a TOWER_OBJECT_NAME prefix)
+HALL_PROPS_OBJECT_NAME = "Procedural_Level_HallProps"           # the castle keep's furniture
 TOWER_TAU = 2.0 * math.pi
 TOWER_TILE_W = 2.4
 TOWER_ROW_H = 0.26
@@ -7452,6 +7459,34 @@ BRICK_COLOR_ITEMS = [
     ('SAND', "Pale Sand", ""),
 ]
 BRICK_COLOR_INDEX = {key: i for i, (key, _, _) in enumerate(BRICK_COLOR_ITEMS)}
+
+
+def room_tint_map(room_ids, near=2):
+    """{room_id: tint slot} giving rooms that stand within `near` tiles of each other (same level, Chebyshev
+    distance between any two of their cells) different tints whenever the palette allows. Greedy in room order, each
+    room trying slots from its own preferred one (1 + id % (N-1)) so the colours still vary level to level."""
+    n = len(BRICK_TINTS) - 1
+    by_room = {}
+    for cell, rid in room_ids.items():
+        if rid >= 0:
+            by_room.setdefault(rid, []).append(cell)
+    neighbours = {rid: set() for rid in by_room}
+    owner = {c: rid for rid, cells in by_room.items() for c in cells}
+    for cell, rid in owner.items():
+        x, y, z = cell
+        for dx in range(-near, near + 1):
+            for dy in range(-near, near + 1):
+                other = owner.get((x + dx, y + dy, z))
+                if other is not None and other != rid:
+                    neighbours[rid].add(other)
+    chosen = {}
+    for rid in sorted(by_room):
+        used = [chosen[o] for o in neighbours[rid] if o in chosen]
+        pref = rid % n
+        order = [1 + (pref + k) % n for k in range(n)]
+        free = [slot for slot in order if slot not in used]
+        chosen[rid] = free[0] if free else min(order, key=lambda sl: used.count(sl))
+    return chosen
 
 
 def brick_tint_slot(room_id):
@@ -8543,6 +8578,65 @@ class _TowerBuilder:
         return self.mb.to_mesh(name)
 
 
+def _prop_bounds_fit(kind, rot, cx, cy, check):
+    """True when `check(x, y)` holds for the four corners of a prop's rotated footprint (tile size 2 = scale 1)."""
+    xmin, xmax, ymin, ymax = _prop_local_bounds(kind, 2.0)
+    c, s_ = math.cos(rot), math.sin(rot)
+    return all(check(cx + lx * c - ly * s_, cy + lx * s_ + ly * c) for lx in (xmin, xmax) for ly in (ymin, ymax))
+
+
+def _tower_interior_props(builder, seed):
+    """Furniture for a tower's interior, in the tower's own frame: a few pieces on every floor slab (and the roof
+    platform), kept inside the disc the stair lane leaves free. [(x, y, z0, kind, rot), ...]"""
+    if not builder.interior:
+        return []
+    rng = random.Random(seed * 977 + 5)
+    free_r = builder.R - builder.wall - builder.stair_w - 0.25
+    if free_r < 0.7:
+        return []
+    kinds = ('CHEST', 'BARREL', 'CRATE', 'TABLE', 'CHAIR', 'CANDLESTAND')
+    tmin = min((c['top'] for c in builder.columns if c['gap'] is None), default=builder.Hs) if builder.columns else builder.Hs
+    out = []
+    for k in range(builder.n_storeys + 1):
+        z0 = builder.levels[k]
+        if k > 0 and builder.ruin > 0.0 and z0 > tmin + 0.3:
+            break
+        base = rng.uniform(0.0, math.tau)
+        count = 2 if free_r > 1.0 else 1
+        for i in range(count):
+            for _try in range(12):
+                kind = rng.choice(kinds)
+                ang = base + math.pi * i + rng.uniform(-0.5, 0.5)
+                rad = rng.uniform(0.45, max(0.5, free_r - 0.5))
+                px, py = rad * math.cos(ang), rad * math.sin(ang)
+                rot = ang + math.pi   # facing the axis
+                if _prop_bounds_fit(kind, rot, px, py, lambda x, y: math.hypot(x, y) <= free_r):
+                    out.append((px, py, z0, kind, rot))
+                    break
+    return out
+
+
+def _keep_hall_layout(ks, kt, kcx, kcy):
+    """Furniture of the castle keep's hall in castle-local coordinates: a long table with chairs, bookshelves along the
+    north wall, chests along the west wall, a bed against the east wall and candle stands in the corners. The south
+    door lane (|x - kcx| < 0.8) stays clear. [(x, y, z0, kind, rot), ...]"""
+    inner = ks / 2.0 - kt / 2.0
+    tx, ty = kcx, kcy + 0.4
+    out = [
+        (tx - 0.6, ty, 0.0, 'TABLE', 0.0), (tx + 0.6, ty, 0.0, 'TABLE', 0.0),
+        (tx - 1.0, ty + 0.95, 0.0, 'CHAIR', -math.pi / 2), (tx + 1.0, ty + 0.95, 0.0, 'CHAIR', -math.pi / 2),
+        (tx - 1.0, ty - 0.95, 0.0, 'CHAIR', math.pi / 2), (tx + 1.0, ty - 0.95, 0.0, 'CHAIR', math.pi / 2),
+        (tx + 1.75, ty, 0.0, 'CHAIR', math.pi),
+        (kcx - 1.3, kcy + inner - 0.25, 0.0, 'BOOKSHELF', -math.pi / 2), (kcx + 1.3, kcy + inner - 0.25, 0.0, 'BOOKSHELF', -math.pi / 2),
+        (kcx - inner + 0.5, kcy - 1.2, 0.0, 'CHEST', 0.0), (kcx - inner + 0.5, kcy + 0.1, 0.0, 'CHEST', 0.0),
+        (kcx + inner - 0.95, kcy - 1.3, 0.0, 'BED', math.pi),
+    ]
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            out.append((kcx + sx * (inner - 0.4), kcy + sy * (inner - 0.4), 0.0, 'CANDLESTAND', 0.0))
+    return out
+
+
 def _tower_openings_from_settings(builder, scene):
     """Door at wfc_tower_door_angle, then wfc_tower_windows slit windows per
     storey (3 m storeys), staggered per storey."""
@@ -8576,6 +8670,7 @@ class OBJECT_OT_GenerateLevelTower(bpy.types.Operator):
             return {'CANCELLED'}
         _remove_objects_by_prefix(TOWER_OBJECT_NAME)
         _remove_objects_by_prefix(TOWER_LIGHT_PREFIX)
+        _remove_objects_by_prefix(INTERIOR_PROPS_OBJECT_NAME)
         builder = _TowerBuilder(
             radius, height, wall, battlements=scene.wfc_tower_battlements,
             detail=scene.wfc_tower_detail, seed=scene.wfc_seed,
@@ -8596,6 +8691,16 @@ class OBJECT_OT_GenerateLevelTower(bpy.types.Operator):
         obj.location = scene.cursor.location
         for mat_ in masonry_material_list(bool(tint)):
             mesh.materials.append(mat_)
+        if scene.wfc_tower_props:
+            props_list = _tower_interior_props(builder, scene.wfc_seed)
+            if props_list:
+                pm = _build_decoration_mesh(props_list, 2.0, INTERIOR_PROPS_OBJECT_NAME, uv_tile_size=scene.wfc_uv_tile_size)
+                po = bpy.data.objects.new(INTERIOR_PROPS_OBJECT_NAME, pm)
+                context.collection.objects.link(po)
+                po.location = obj.location
+                pm.materials.append(get_or_create_prop_material())
+                _add_viewport_color_attribute(pm)
+                po["gla_props"] = json.dumps([[round(c, 4) for c in d[:3]] + [d[3], round(d[4], 4)] for d in props_list])
         if scene.wfc_tower_lights:
             for li, zl in enumerate(builder.lantern_points):
                 light_data = bpy.data.lights.new(name=f"{TOWER_LIGHT_PREFIX}_Data", type='POINT')
@@ -8756,6 +8861,19 @@ class OBJECT_OT_GenerateLevelCastle(bpy.types.Operator):
         obj.location = scene.cursor.location
         for mat_ in masonry_material_list(scene.wfc_castle_brick_color != 'PLAIN'):
             mesh.materials.append(mat_)
+        _remove_objects_by_prefix(HALL_PROPS_OBJECT_NAME)
+        if scene.wfc_castle_keep and scene.wfc_castle_hall_props:
+            W_, D_ = scene.wfc_castle_width, scene.wfc_castle_depth
+            ks_ = max(6.0, min(W_, D_) * 0.38)
+            kt_ = max(scene.wfc_castle_wall_thickness, 1.0)
+            hall_list = _keep_hall_layout(ks_, kt_, 0.0, D_ * 0.12)
+            hm = _build_decoration_mesh(hall_list, 2.0, HALL_PROPS_OBJECT_NAME, uv_tile_size=scene.wfc_uv_tile_size)
+            ho = bpy.data.objects.new(HALL_PROPS_OBJECT_NAME, hm)
+            context.collection.objects.link(ho)
+            ho.location = obj.location
+            hm.materials.append(get_or_create_prop_material())
+            _add_viewport_color_attribute(hm)
+            ho["gla_props"] = json.dumps([[round(c, 4) for c in d[:3]] + [d[3], round(d[4], 4)] for d in hall_list])
         _add_viewport_color_attribute(mesh)
         for o in context.selected_objects:
             o.select_set(False)
@@ -8973,36 +9091,60 @@ class OBJECT_OT_ExportGamePackage(bpy.types.Operator, ExportHelper):
         description="Write <name>_f0.glb/.json, <name>_f1.glb/.json ... one self-contained package per floor, linked "
                     "by stair records. Needs Wall/Door/Stair grouping = Per Floor and Separate by Floor/Room run on the Blueprint")
 
-    def _floor_targets(self, floor, fine_h):
-        pattern = re.compile(r"_Floor%d(_|$)" % floor)
-        targets = [o for o in bpy.data.objects
-                   if o.type == 'MESH' and o.name.startswith("Procedural_Level_") and pattern.search(o.name)
-                   and not o.name.startswith(PROPS_TORCH_OBJECT_NAME)]
-        # the Round-room floor overlay is one object for all floors: cut out this floor's faces
-        rf = bpy.data.objects.get(ROUND_FLOOR_OBJECT_NAME)
-        temp = None
-        if rf is not None:
-            import bmesh
-            bm = bmesh.new()
-            bm.from_mesh(rf.data)
-            drop = [f for f in bm.faces if abs(f.calc_center_median().z - floor * fine_h) > fine_h * 0.5]
-            bmesh.ops.delete(bm, geom=drop, context='FACES')
-            if bm.faces:
-                mesh = bpy.data.meshes.new(ROUND_FLOOR_OBJECT_NAME + "_Floor%d_Mesh" % floor)
-                bm.to_mesh(mesh)
-                for mat in rf.data.materials:
-                    mesh.materials.append(mat)
-                temp = bpy.data.objects.new(ROUND_FLOOR_OBJECT_NAME + "_Floor%d" % floor, mesh)
-                bpy.context.collection.objects.link(temp)
-                targets.append(temp)
+    @staticmethod
+    def _band_copy(obj, z_lo, z_hi, label):
+        """A temporary copy of obj keeping only the faces whose centre lies in [z_lo, z_hi). None when nothing
+        is left. Used to cut one grid level out of an object that holds several (sub-levels per floor)."""
+        import bmesh
+        bm = bmesh.new()
+        bm.from_mesh(obj.data)
+        drop = [f for f in bm.faces if not (z_lo <= f.calc_center_median().z < z_hi)]
+        bmesh.ops.delete(bm, geom=drop, context='FACES')
+        if not bm.faces:
             bm.free()
-        return targets, temp
+            return None
+        mesh = bpy.data.meshes.new(obj.name + label + "_Mesh")
+        bm.to_mesh(mesh)
+        bm.free()
+        for mat in obj.data.materials:
+            mesh.materials.append(mat)
+        temp = bpy.data.objects.new(obj.name + label, mesh)
+        bpy.context.collection.objects.link(temp)
+        return temp
+
+    def _floor_targets(self, z, fine_h, sub):
+        """Objects of grid level z. With one level per logical floor that is simply the floor's own objects; with
+        several (Sub-Levels per Floor) every floor object is cut down to the faces of this level, door panels are
+        taken whole by their hinge height, and the Round-room floor overlay is cut by height."""
+        floor = z // sub
+        pattern = re.compile(r"_Floor%d(_|$)" % floor)
+        z_lo, z_hi = z * fine_h - 0.15, (z + 1) * fine_h - 0.15
+        targets, temps = [], []
+        candidates = [o for o in bpy.data.objects
+                      if o.type == 'MESH' and o.name.startswith("Procedural_Level_") and pattern.search(o.name)
+                      and not o.name.startswith(PROPS_TORCH_OBJECT_NAME)]
+        for o in candidates:
+            if sub == 1:
+                targets.append(o)
+            elif "_Panel_" in o.name:
+                if z_lo <= o.matrix_world.translation.z < z_hi:
+                    targets.append(o)
+            else:
+                t = self._band_copy(o, z_lo, z_hi, f"_Z{z}")
+                if t is not None:
+                    targets.append(t)
+                    temps.append(t)
+        rf = bpy.data.objects.get(ROUND_FLOOR_OBJECT_NAME)
+        if rf is not None:
+            t = self._band_copy(rf, z_lo, z_hi, f"_Z{z}")
+            if t is not None:
+                targets.append(t)
+                temps.append(t)
+        return targets, temps
 
     def _export_floors(self, context, stem, blueprint_obj):
         scene = context.scene
-        if scene.wfc_sub_levels_per_floor != 1:
-            self.report({'ERROR'}, "Per-floor packages need Sub-Levels per Floor = 1.")
-            return {'CANCELLED'}
+        sub = max(1, scene.wfc_sub_levels_per_floor)
         fine_h = _fine_level_height(scene)
         base = _build_game_package(scene, blueprint_obj, "")
         levels = [f["z"] for f in base["floors"]]
@@ -9011,7 +9153,7 @@ class OBJECT_OT_ExportGamePackage(bpy.types.Operator, ExportHelper):
         scene.wfc_export_binary = True
         try:
             for z in levels:
-                targets, temp = self._floor_targets(z, fine_h)
+                targets, temps = self._floor_targets(z, fine_h, sub)
                 if not any(o.name.startswith(BLUEPRINT_OBJECT_NAME) for o in targets):
                     self.report({'ERROR'}, f"Floor {z}: no per-floor Blueprint object. Set Wall/Door/Stair grouping to Per Floor, "
                                            f"generate them, and run Separate by Floor/Room on the Blueprint first.")
@@ -9020,7 +9162,7 @@ class OBJECT_OT_ExportGamePackage(bpy.types.Operator, ExportHelper):
                 try:
                     _run_gltf_export(context, glb, targets, False)
                 finally:
-                    if temp is not None:
+                    for temp in temps:
                         mesh = temp.data
                         bpy.data.objects.remove(temp, do_unlink=True)
                         bpy.data.meshes.remove(mesh)
@@ -9066,7 +9208,8 @@ class OBJECT_OT_ExportGamePackage(bpy.types.Operator, ExportHelper):
         return {'FINISHED'}
 
 
-def _castle_walk_cells(width, depth, wall_t, tower_r, gate, keep, step=0.5, apron=8.0, tower_wall=0.55):
+def _castle_walk_cells(width, depth, wall_t, tower_r, gate, keep, step=0.5, apron=8.0, tower_wall=0.55,
+                       hall_furniture=True):
     """Walkable ground of a castle (see _build_castle_mesh), in castle-local
     Blender XY, as grid cells of `step` metres centred on multiples of step:
     the courtyard inside the curtain walls minus the corner towers and the
@@ -9079,6 +9222,15 @@ def _castle_walk_cells(width, depth, wall_t, tower_r, gate, keep, step=0.5, apro
     kcx, kcy = 0.0, depth * 0.12
     kb = ks / 2.0 + kt / 2.0 + 0.5
     towers = [(-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)]
+    furniture = []   # (x, y, half-extent x, half-extent y) incl. a 0.35 m walking margin, axis-aligned boxes
+    if keep and hall_furniture:
+        for fx, fy, _z, kind, rot in _keep_hall_layout(ks, kt, kcx, kcy):
+            xmin, xmax, ymin, ymax = _prop_local_bounds(kind, 2.0)
+            c_, s_ = math.cos(rot), math.sin(rot)
+            pts = [(fx + lx * c_ - ly * s_, fy + lx * s_ + ly * c_) for lx in (xmin, xmax) for ly in (ymin, ymax)]
+            cxm, cym = (min(p_[0] for p_ in pts) + max(p_[0] for p_ in pts)) / 2.0, (min(p_[1] for p_ in pts) + max(p_[1] for p_ in pts)) / 2.0
+            furniture.append((cxm, cym, (max(p_[0] for p_ in pts) - min(p_[0] for p_ in pts)) / 2.0 + 0.35,
+                              (max(p_[1] for p_ in pts) - min(p_[1] for p_ in pts)) / 2.0 + 0.35))
     cells = set()
     nx, ny = int(math.ceil((hx + apron) / step)) + 1, int(math.ceil((hy + apron) / step)) + 1
     for i in range(-nx, nx + 1):
@@ -9094,7 +9246,7 @@ def _castle_walk_cells(width, depth, wall_t, tower_r, gate, keep, step=0.5, apro
             if keep:
                 kin = ks / 2.0 - kt / 2.0 - m
                 if abs(x - kcx) <= kin and abs(y - kcy) <= kin:
-                    passage = True   # inside the keep's hall
+                    passage = not any(abs(x - fx) <= fhx and abs(y - fy) <= fhy for fx, fy, fhx, fhy in furniture)   # inside the keep's hall, clear of furniture
                 if abs(x - kcx) <= 0.8 and kcy - ks / 2.0 - kt / 2.0 - m <= y <= kcy - ks / 2.0 + kt / 2.0 + m:
                     passage = True   # through the keep's south door
             outside_apron = gate and abs(x) <= 6.0 and -hy - apron <= y <= -hy - wall_t / 2.0 - m
@@ -9128,6 +9280,16 @@ def _castle_package_rooms(scene, cells, step, ox, oy):
     return rooms
 
 
+def _castle_package_props(scene, loc):
+    if not (scene.wfc_castle_keep and scene.wfc_castle_hall_props):
+        return []
+    W, D = scene.wfc_castle_width, scene.wfc_castle_depth
+    ks = max(6.0, min(W, D) * 0.38)
+    kt = max(scene.wfc_castle_wall_thickness, 1.0)
+    return [{"kind": kind, "pos": _to_engine(loc.x + x, loc.y + y, loc.z + z), "yaw": round(rot, 4)}
+            for x, y, z, kind, rot in _keep_hall_layout(ks, kt, 0.0, D * 0.12)]
+
+
 def _castle_package_lights(scene, loc):
     """Torches beside the gate and in the courtyard corners (the glTF itself carries no lights)."""
     hx, hy = scene.wfc_castle_width / 2.0, scene.wfc_castle_depth / 2.0
@@ -9148,7 +9310,8 @@ def _build_castle_package(scene, castle_obj, glb_name=""):
     loc = castle_obj.location
     cells = _castle_walk_cells(
         scene.wfc_castle_width, scene.wfc_castle_depth, scene.wfc_castle_wall_thickness,
-        scene.wfc_castle_tower_radius, scene.wfc_castle_gate, scene.wfc_castle_keep, step)
+        scene.wfc_castle_tower_radius, scene.wfc_castle_gate, scene.wfc_castle_keep, step,
+        hall_furniture=scene.wfc_castle_hall_props)
     # the exported cell grid is in the glTF's world space: shift by the object's location (a multiple of step)
     ox, oy = round(loc.x / step), round(loc.y / step)
     cells = {(i + ox, j + oy) for i, j in cells}
@@ -9178,6 +9341,7 @@ def _build_castle_package(scene, castle_obj, glb_name=""):
         "entrance": {"floor": 0, "pos": _to_engine(snap(entrance[0]), snap(entrance[1]), loc.z)},
         "exit": {"floor": 0, "pos": _to_engine(snap(exit_pt[0]), snap(exit_pt[1]), loc.z)},
         "stairs": [], "rooms": _castle_package_rooms(scene, cells, step, ox, oy), "lights": _castle_package_lights(scene, loc),
+        "props": _castle_package_props(scene, loc), "wall_height": scene.wfc_castle_wall_height,
         "castle": {"width": scene.wfc_castle_width, "depth": scene.wfc_castle_depth,
                    "ruin": scene.wfc_castle_ruin, "gate": scene.wfc_castle_gate, "keep": scene.wfc_castle_keep},
     }
@@ -9728,6 +9892,9 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
         col.separator()
         col.prop(scene, "wfc_castle_gate", text="Gate")
         col.prop(scene, "wfc_castle_keep", text="Keep")
+        hall_row = col.row(align=True)
+        hall_row.enabled = scene.wfc_castle_keep
+        hall_row.prop(scene, "wfc_castle_hall_props", text="Hall Furniture")
         col.prop(scene, "wfc_castle_ruin", text="Ruin")
         layout.label(text="Built at the 3D cursor.")
         layout.separator()
@@ -9765,6 +9932,9 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
         lamp_row = col.row(align=True)
         lamp_row.enabled = scene.wfc_tower_interior
         lamp_row.prop(scene, "wfc_tower_lights", text="Lanterns")
+        furn_row = col.row(align=True)
+        furn_row.enabled = scene.wfc_tower_interior
+        furn_row.prop(scene, "wfc_tower_props", text="Furniture")
         layout.label(text="Built at the 3D cursor.")
         layout.separator()
         _step_button(
@@ -10415,6 +10585,10 @@ def register():
     bpy.types.Scene.wfc_castle_keep = BoolProperty(
         name="Keep", default=True, description="A square keep in the courtyard with a door facing the gate"
     )
+    bpy.types.Scene.wfc_castle_hall_props = BoolProperty(
+        name="Hall Furniture", default=True,
+        description="Furnish the keep's hall: a long table with chairs, bookshelves, chests, a bed and candle stands"
+    )
     bpy.types.Scene.wfc_castle_ruin = FloatProperty(
         name="Ruin", default=0.0, min=0.0, max=1.0, subtype='FACTOR',
         description="How ruined every part of the castle is (towers, walls, keep). 0 = intact"
@@ -10440,6 +10614,12 @@ def register():
         description="Floor slabs every >= 3 m (the top one is the roof platform behind the "
                     "battlements) joined by one full turn of stone spiral stairs per storey, hugging "
                     "the inner wall. Skipped automatically when the inner radius is under 1.6 m"
+    )
+    bpy.types.Scene.wfc_tower_props = BoolProperty(
+        name="Furniture", default=True,
+        description="A few pieces of furniture (chests, barrels, crates, a table, a chair, candle stands) on every "
+                    "floor of the tower's interior, inside the disc the stair lane leaves free. Needs Floors + "
+                    "Spiral Stairs"
     )
     bpy.types.Scene.wfc_tower_lights = BoolProperty(
         name="Lanterns", default=True,
@@ -10581,11 +10761,13 @@ def unregister():
     del bpy.types.Scene.wfc_castle_tower_height
     del bpy.types.Scene.wfc_castle_gate
     del bpy.types.Scene.wfc_castle_keep
+    del bpy.types.Scene.wfc_castle_hall_props
     del bpy.types.Scene.wfc_castle_ruin
     del bpy.types.Scene.wfc_tower_brick_color
     del bpy.types.Scene.wfc_castle_brick_color
     del bpy.types.Scene.wfc_tower_ruin
     del bpy.types.Scene.wfc_tower_interior
+    del bpy.types.Scene.wfc_tower_props
     del bpy.types.Scene.wfc_tower_lights
     del bpy.types.Scene.wfc_tower_stair_rail
     del bpy.types.Scene.wfc_tower_stair_width

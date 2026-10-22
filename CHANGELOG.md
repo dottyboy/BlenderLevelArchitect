@@ -3,6 +3,24 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.42.0
+
+- **Neighbouring rooms never share a brick tint.** Room Brick Colors now colours rooms like a map: rooms within
+  2 tiles of each other (same level) get different tints whenever the palette allows; each room still starts from its own
+  preferred tint so levels vary. Applies to ordinary masonry walls and Round-room rings alike.
+- **Game packages for levels with Sub-Levels per Floor.** Per-floor packages no longer require one level per floor:
+  with several sub-levels each grid level gets its own `_f<k>` package, every floor object (walls, doors, Blueprint
+  pieces, stairs) cut down to that level's faces, door panels taken by their hinge height, the Round-room floor cut
+  by height. Stair links join the sub-levels like they join floors.
+- **Tower furniture** (Tower tab, "Furniture", on by default): a few chests, barrels, crates, a table, a chair and
+  candle stands on every floor slab and the roof platform, kept inside the disc the stair lane leaves free. A separate
+  `Procedural_Level_InteriorProps` object (with the placements in `gla_props`) so an engine can swap its own models.
+- **Furnished keep hall** (Castle tab, "Hall Furniture", on by default): a long table with chairs, bookshelves along
+  the north wall, chests along the west wall, a bed against the east wall and candle stands in the corners, as
+  `Procedural_Level_HallProps`. The castle package lists the pieces as props, and the furniture's footprints (plus a
+  0.35 m margin) are removed from the hall's walkable ground; the door lane stays clear.
+- Tested on Blender 4.2.21 LTS and 5.2.2 LTS as well as 5.2.1.
+
 ## 0.41.0
 
 - **Tower interiors are finished off.**

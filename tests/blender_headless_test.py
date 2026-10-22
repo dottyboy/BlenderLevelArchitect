@@ -2335,6 +2335,7 @@ scene.wfc_prop_theme = 'GENERIC'
 import tempfile
 scene.cursor.location = (40.0, 0.0, 0.0)
 scene.wfc_tower_lights = False   # the lantern tests further down switch them on; the older checks probe the empty axis
+scene.wfc_tower_props = False    # likewise for the interior furniture (tests below switch it on)
 scene.wfc_tower_radius, scene.wfc_tower_height, scene.wfc_tower_wall = 3.0, 9.0, 0.55
 scene.wfc_tower_battlements, scene.wfc_tower_door, scene.wfc_tower_windows = True, True, 2
 scene.wfc_tower_door_angle = 270.0
@@ -2889,6 +2890,7 @@ ts_c, fh_c = scene.wfc_tile_size, addon._fine_level_height(scene)
 walk_c, ex_c = addon._read_blueprint_points(bp_c, ts_c, fh_c, ("room_id",))
 meta_c = json.loads(bp_c.get("gla_room_meta", "[]"))
 round_c = {i for i, r in enumerate(meta_c) if r['shape'] == 'ROUND'}
+tint_map_c = addon.room_tint_map(ex_c["room_id"])
 tree_c = _BVH.FromObject(wall_c, bpy.context.evaluated_depsgraph_get())
 slots_seen, wrong, tested = set(), 0, 0
 for cell in walk_c:
@@ -2905,8 +2907,29 @@ for cell in walk_c:
         tested += 1
         slot = wall_c.data.polygons[h[2]].material_index
         slots_seen.add(slot)
-        wrong += slot != addon.brick_tint_slot(rid)
+        wrong += slot != (tint_map_c.get(rid, 0) if rid >= 0 else 0)
 check("Room colors: the inner face of every wall carries its room's tint slot (corridors untinted)", tested > 25 and wrong == 0, f"{wrong}/{tested}")
+# neighbouring rooms never share a tint (within 2 tiles), over several seeds
+near_clash = near_pairs = 0
+for seed_n in (3, 5, 7, 9):
+    scene.wfc_seed = seed_n
+    bpy.ops.object.generate_game_blueprint()
+    bp_n = bpy.data.objects[addon.BLUEPRINT_OBJECT_NAME]
+    _w, ex_n = addon._read_blueprint_points(bp_n, scene.wfc_tile_size, addon._fine_level_height(scene), ("room_id",))
+    tm = addon.room_tint_map(ex_n["room_id"])
+    owner_n = {c: r for c, r in ex_n["room_id"].items() if r >= 0}
+    seen_pairs = set()
+    for (x, y, z), r in owner_n.items():
+        for dx in range(-2, 3):
+            for dy in range(-2, 3):
+                o = owner_n.get((x + dx, y + dy, z))
+                if o is not None and o != r and (min(r, o), max(r, o)) not in seen_pairs:
+                    seen_pairs.add((min(r, o), max(r, o)))
+                    near_pairs += 1
+                    near_clash += tm[r] == tm[o]
+check("Room colors: rooms within 2 tiles of each other never share a tint (4 seeds)", near_pairs > 3 and near_clash == 0, f"{near_clash}/{near_pairs}")
+scene.wfc_seed = 3
+bpy.ops.object.generate_game_blueprint()
 check("Room colors: more than one tint is actually used in a level", len(slots_seen) >= 3, str(sorted(slots_seen)))
 scene.wfc_masonry_room_colors = False
 bpy.ops.object.generate_level_walls()
@@ -2940,6 +2963,63 @@ roof = kc.ray_cast(Vector((0.0, 20.0 * 0.12, 30.0)), Vector((0, 0, -1)), distanc
 check("Keep hall: the roof walkway on top of it faces up", roof[0] and abs(roof[1].z - roof_z) < 0.01 and roof[2].z > 0.9, str(roof[:3]))
 door_ray = kc.ray_cast(Vector((0.0, -10.0 + 1.0, 1.2)), Vector((0, 1, 0)), distance=20.0)
 check("Keep hall: a person can walk in through the keep door (ray along the door axis meets only the far wall)", door_ray[0] and door_ray[1].y > 5.0, str(door_ray[:2]))
+
+# Tower interior furniture and the keep hall's furniture.
+scene.cursor.location = (0.0, 160.0, 0.0)
+scene.wfc_tower_radius, scene.wfc_tower_wall, scene.wfc_tower_height = 3.0, 0.55, 9.0
+scene.wfc_tower_interior, scene.wfc_tower_ruin, scene.wfc_tower_windows = True, 0.0, 2
+scene.wfc_tower_lights = False
+scene.wfc_tower_props = True
+bpy.ops.object.generate_level_tower()
+ip = bpy.data.objects.get(addon.INTERIOR_PROPS_OBJECT_NAME)
+check("Tower furniture: an interior props object exists and the tower object is still unique",
+      ip is not None and len([o for o in bpy.data.objects if o.name.startswith(addon.TOWER_OBJECT_NAME)]) == 1)
+placed = json.loads(ip["gla_props"]) if ip is not None else []
+free_r_t = 3.0 - 0.55 - 1.0 - 0.25
+check("Tower furniture: pieces on every floor slab (ground, 4 m, roof platform at 8 m)",
+      {round(q[2], 2) for q in placed} == {0.0, 4.0, 8.0}, str(sorted({round(q[2], 2) for q in placed})))
+bad_t = 0
+for x_, y_, z_, kind_, rot_ in placed:
+    if not addon._prop_bounds_fit(kind_, rot_, x_, y_, lambda xx, yy: math.hypot(xx, yy) <= free_r_t + 1e-6):
+        bad_t += 1
+check("Tower furniture: every piece stays inside the disc the stair lane leaves free", len(placed) >= 4 and bad_t == 0, f"{bad_t}/{len(placed)}")
+bpy.ops.object.generate_level_tower()
+check("Tower furniture: regenerating replaces, not piles up",
+      len([o for o in bpy.data.objects if o.name.startswith(addon.INTERIOR_PROPS_OBJECT_NAME)]) == 1)
+scene.wfc_tower_props = False
+bpy.ops.object.generate_level_tower()
+check("Tower furniture: switched off, no props object", bpy.data.objects.get(addon.INTERIOR_PROPS_OBJECT_NAME) is None)
+scene.wfc_tower_props = True
+scene.wfc_tower_ruin = 0.0
+
+scene.cursor.location = (0.0, 80.0, 0.0)
+scene.wfc_castle_width, scene.wfc_castle_depth, scene.wfc_castle_wall_thickness = 26.0, 20.0, 1.5
+scene.wfc_castle_keep, scene.wfc_castle_gate, scene.wfc_castle_ruin = True, True, 0.0
+scene.wfc_castle_hall_props = True
+scene.wfc_castle_brick_color = 'PLAIN'
+bpy.ops.object.generate_level_castle()
+hp = bpy.data.objects.get(addon.HALL_PROPS_OBJECT_NAME)
+check("Hall furniture: a props object with the layout's pieces", hp is not None and len(json.loads(hp["gla_props"])) == len(addon._keep_hall_layout(7.6, 1.5, 0.0, 2.4)))
+ks_h, kt_h = 7.6, 1.5
+inner_h = ks_h / 2 - kt_h / 2
+bad_h = 0
+for x_, y_, z_, kind_, rot_ in json.loads(hp["gla_props"]):
+    if not addon._prop_bounds_fit(kind_, rot_, x_, y_, lambda xx, yy: abs(xx) <= inner_h + 1e-6 and abs(yy - 2.4) <= inner_h + 1e-6):
+        bad_h += 1
+check("Hall furniture: every piece lies inside the hall", bad_h == 0, str(bad_h))
+pk_h = addon._build_castle_package(scene, bpy.data.objects[addon.CASTLE_OBJECT_NAME], "c.glb")
+check("Castle package: the hall's props are listed (kind, position, yaw)", len(pk_h["props"]) == len(json.loads(hp["gla_props"])) and all(set(q) == {"kind", "pos", "yaw"} for q in pk_h["props"]))
+scene.wfc_castle_hall_props = False
+pk_n = addon._build_castle_package(scene, bpy.data.objects[addon.CASTLE_OBJECT_NAME], "c.glb")
+check("Hall furniture: furnished hall has fewer walkable cells than the empty one, and the door lane stays open",
+      pk_h["floors"][0]["cells"] < pk_n["floors"][0]["cells"], f"{pk_h['floors'][0]['cells']} vs {pk_n['floors'][0]['cells']}")
+check("Hall furniture: no props when switched off", pk_n["props"] == [])
+bpy.ops.object.generate_level_castle()
+check("Hall furniture: switched off removes the props object", bpy.data.objects.get(addon.HALL_PROPS_OBJECT_NAME) is None)
+scene.wfc_castle_hall_props = True
+bpy.ops.object.generate_level_tower()
+tower = bpy.data.objects[addon.TOWER_OBJECT_NAME]
+scene.wfc_tower_props = False
 
 # Brick colours for the tower and the castle.
 scene.cursor.location = (0.0, 120.0, 0.0)
@@ -3038,6 +3118,64 @@ scene.wfc_tower_windows = 2
 scene.wfc_tower_height = 9.0
 bpy.ops.object.generate_level_tower()
 tower = bpy.data.objects[addon.TOWER_OBJECT_NAME]
+
+# Per-floor packages with Sub-Levels per Floor = 2: one package per grid level, geometry cut to its level.
+scene.wfc_width, scene.wfc_length, scene.wfc_height = 12, 12, 1
+scene.wfc_sub_levels_per_floor = 2
+scene.wfc_level_height = 4.5
+scene.wfc_tile_size = 3.0
+scene.wfc_stairs_per_level = 2
+scene.wfc_wall_height = 2.0
+scene.wfc_wall_grouping = 'PER_FLOOR'
+scene.wfc_door_grouping = 'PER_FLOOR'
+scene.wfc_room_shape = 'MIXED'
+scene.wfc_random_seed = False
+sub_ok = None
+for sub_seed in (8, 12, 14, 21, 33):
+    scene.wfc_seed = sub_seed
+    bpy.ops.object.generate_game_blueprint()
+    bpy.ops.object.generate_level_walls()
+    bpy.ops.object.generate_level_stairs()
+    bpy.ops.object.generate_level_doors()
+    bpy.ops.object.generate_level_props()
+    pk_try = addon._build_game_package(scene, bpy.data.objects[addon.BLUEPRINT_OBJECT_NAME], "t.glb", floor=0)
+    if len(addon._build_game_package(scene, bpy.data.objects[addon.BLUEPRINT_OBJECT_NAME], "t.glb")["floors"]) == 2 and pk_try["stair_links"]:
+        sub_ok = sub_seed
+        break
+check("Sub-level packages: found a seed whose two grid levels are joined by stairs", sub_ok is not None)
+if sub_ok is not None:
+    bp_sub = bpy.data.objects[addon.BLUEPRINT_OBJECT_NAME]
+    bpy.ops.object.select_all(action='DESELECT')
+    bpy.context.view_layer.objects.active = bp_sub
+    bp_sub.select_set(True)
+    bpy.ops.object.separate_level_by_floor()
+    with tempfile.TemporaryDirectory() as tmp_s:
+        out_s = os.path.join(tmp_s, "sub.glb")
+        result = bpy.ops.object.export_game_package(filepath=out_s, per_floor=True)
+        check("Sub-level packages: export FINISHED", result == {'FINISHED'}, str(result))
+        files_s = sorted(os.listdir(tmp_s))
+        check("Sub-level packages: one glb + json per grid level", files_s == ["sub_f0.glb", "sub_f0.json", "sub_f1.glb", "sub_f1.json"], str(files_s))
+        fh_s = addon._fine_level_height(scene)
+        ranges = []
+        for k in (0, 1):
+            before = set(bpy.data.objects)
+            bpy.ops.import_scene.gltf(filepath=os.path.join(tmp_s, f"sub_f{k}.glb"))
+            new_objs = [o for o in bpy.data.objects if o not in before and o.type == 'MESH']
+            ys = [(o.matrix_world @ v.co).z for o in new_objs for v in o.data.vertices]   # Blender is z-up after import
+            ranges.append((min(ys), max(ys)) if ys else (None, None))
+            for o in list(bpy.data.objects):
+                if o not in before:
+                    bpy.data.objects.remove(o, do_unlink=True)
+        check("Sub-level packages: level 0's geometry stays at or below the next level's floor, level 1's starts there",
+              ranges[0][1] is not None and ranges[1][0] is not None
+              and ranges[0][1] <= fh_s + 2.2 and ranges[1][0] >= fh_s - 0.45, str(ranges) + f" fh={fh_s}")
+        pk_s = [json.load(open(os.path.join(tmp_s, f"sub_f{k}.json"))) for k in (0, 1)]
+        check("Sub-level packages: stair links join the two levels both ways",
+              any(l["direction"] == "up" for l in pk_s[0]["stair_links"]) and any(l["direction"] == "down" for l in pk_s[1]["stair_links"]))
+        check("Sub-level packages: floor_y is the level's own height", abs(pk_s[1]["floor_y"] - fh_s) < 1e-6, str(pk_s[1]["floor_y"]))
+scene.wfc_sub_levels_per_floor = 1
+scene.wfc_wall_height = 3.0
+scene.wfc_stairs_per_level = 1
 
 # glTF round trip embeds the packed textures.
 with tempfile.TemporaryDirectory() as tmp:

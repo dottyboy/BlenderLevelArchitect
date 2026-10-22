@@ -4,7 +4,7 @@ Internal dev-facing doc: what's built, what's known-broken, what's next. Not for
 (see `dist/README.md` for that). Source of truth for the addon's actual behavior is always
 `levelArchitect_v2.py` — this file can drift out of date; the code can't.
 
-Current version: **0.41.0** (see `bl_info` in the source file).
+Current version: **0.42.0** (see `bl_info` in the source file).
 
 §2 (Development tree) was condensed 2026-08-21 — dropped the blow-by-blow investigation
 narrative and per-run stress-test numbers from older, fully-resolved entries, kept every
@@ -753,6 +753,14 @@ GN complexity there specifically.
       too zoomed-out to show doorway-level detail) confirmed the frame visibly follows the wall's
       curve right at the opening, not standing at a mismatched straight angle against it.
 
+- [x] **Furniture, tints, sub-levels (0.42.0).** `room_tint_map`: greedy colouring of rooms by adjacency (any two cells of
+      different rooms within 2 tiles, same level), each room trying tints from its own preferred slot. Sub-level packages:
+      `_band_copy` keeps the faces whose CENTRE lies in [z*fh-0.15, (z+1)*fh-0.15) -- a stair run straddling the boundary
+      goes to the lower level, so the upper level's geometry can start up to ~0.4 m below its floor (the test allows
+      0.45). Furniture layouts are pure functions (`_tower_interior_props`, `_keep_hall_layout`) reused by the mesh
+      operator, the package and the walk-cell exclusion; names avoid the `Procedural_Level_Tower`/`_Castle` prefixes that
+      `_remove_objects_by_prefix` and the tests' prefix counts match on. Chest bounds (lid 0.37) are wider than the body:
+      the first layout poked 7 cm through the hall wall. Not done: tower furniture for castle towers, prop-aware stairs.
 - [x] **Interior finishing (0.41.0).** `step_blocks_at(deg, width)` mirrors `_stairs` (same step count/rise/start) and
       returns the (bottom, top) of every step in front of a wall point; `add_window` searches sill shifts of +-0.1 m
       steps inside the storey with a 0.12 m margin each side. Railing: a 0.12 m wide wedge at the lane's inner radius per
