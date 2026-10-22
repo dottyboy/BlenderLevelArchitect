@@ -33,7 +33,7 @@ from bpy_extras.io_utils import ExportHelper, ImportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 46, 0),
+    "version": (0, 47, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -7445,14 +7445,14 @@ _STYLE_TEXTURES = {
     'FITTED_DARK': (4, 0.52, [0.6, 0.9, 1.3, 1.1], (0.38, 0.38, 0.37), 0.05, 0.008, 0.03, 0.08, 0.9),
     'PANEL': (4, 0.52, [1.2, 2.4], (0.80, 0.82, 0.85), 0.02, 0.022, 0.008, 0.015, 0.35),
     'PANEL_DARK': (4, 0.52, [1.2, 2.4], (0.22, 0.25, 0.30), 0.02, 0.022, 0.008, 0.015, 0.4),
-    'ALPINE_LOG': (8, 0.26, [2.4], (0.37, 0.24, 0.14), 0.02, 0.014, 0.035, 0.04, 0.8),
+    'ALPINE_LOG': (8, 0.26, [2.4], (0.56, 0.38, 0.22), 0.02, 0.014, 0.035, 0.04, 0.8),
     'STRAW': (16, 0.13, [0.3, 0.5, 0.7], (0.74, 0.62, 0.32), 0.05, 0.004, 0.01, 0.08, 1.0),
     'BRANCH': (16, 0.13, [0.4, 0.7, 1.0], (0.36, 0.26, 0.15), 0.05, 0.01, 0.015, 0.08, 1.0),
     'EARTH': (4, 0.52, [1.6, 2.4], (0.55, 0.40, 0.28), 0.03, 0.003, 0.08, 0.04, 1.0),
     'EARTHBAG': (8, 0.26, [0.6, 0.7, 0.8], (0.62, 0.50, 0.36), 0.04, 0.014, 0.05, 0.04, 1.0),
     'AIRCRETE': (2, 1.04, [2.4], (0.86, 0.85, 0.82), 0.01, 0.002, 0.004, 0.03, 0.7),
     # roofs
-    'SHINGLE': (12, 0.1733, [0.2, 0.25, 0.3], (0.40, 0.28, 0.17), 0.04, 0.006, 0.02, 0.07, 0.9),
+    'SHINGLE': (12, 0.1733, [0.2, 0.25, 0.3], (0.52, 0.37, 0.23), 0.04, 0.006, 0.02, 0.07, 0.9),
     'SOD': (2, 1.04, [2.4], (0.30, 0.40, 0.16), 0.05, 0.002, 0.004, 0.1, 1.0),
     'THATCH': (20, 0.104, [0.12, 0.16, 0.2], (0.70, 0.58, 0.30), 0.06, 0.004, 0.012, 0.08, 1.0),
     'SANDROOF': (2, 1.04, [1.2, 2.4], (0.74, 0.62, 0.42), 0.03, 0.01, 0.02, 0.05, 0.95),
@@ -9191,7 +9191,14 @@ def plan_footprint(node):
     if isinstance(shape, dict) and shape.get("kind", "rect") in PLAN_SHAPE_KINDS:
         return plan_shape_polygon(shape)
     maker = PLAN_DEFAULT_FOOTPRINTS.get(node.get("kind"))
-    return maker(node.get("params", {})) if maker else None
+    if not maker:
+        return None
+    params = node.get("params", {})
+    pack = PLAN_PACKS.get(node.get("style") or "")
+    if pack is not None:                                  # a style pack may change a kind's default size
+        defaults = pack["kinds"].get(node.get("kind"), {})
+        params = {**{k: v for k, v in defaults.items() if k in ("width", "depth")}, **params}
+    return maker(params)
 
 
 def plan_validate(root):
@@ -9355,6 +9362,14 @@ def _layout_corridors(node, target_xy, width):
         px, py = -uy * hw, ux * hw
         out.append([(gx + px, gy + py), (gx - px, gy - py), (target_xy[0] - px, target_xy[1] - py), (target_xy[0] + px, target_xy[1] + py)])
     return out
+
+
+def _concrete_style(rng, style):
+    """The style of one generated child: a `mixed` parent gives each child a random concrete pack (so its footprint
+    is known while the layout is computed); otherwise None = inherit."""
+    if style == 'mixed':
+        return list(PLAN_STYLES)[rng.randrange(len(PLAN_STYLES))]
+    return None
 
 
 def _apply_vary(rng, params, rule, style=None):
@@ -9581,7 +9596,7 @@ def _expand_compound(node, seed, style=None):
         count = rule.get("count", 1)
         n = rng.randint(count[0], count[1]) if isinstance(count, (list, tuple)) else count
         gap = float(rule.get("min_gap", 2.0))
-        proto = plan_node("proto", "building", rule["kind"], params=dict(rule.get("params") or {}))
+        proto = plan_node("proto", "building", rule["kind"], params=dict(rule.get("params") or {}), style=style if style != 'mixed' else None)
         base = plan_footprint(proto)
         if not base:
             warnings.append("layout: kind %r has no footprint, skipped" % rule["kind"])
@@ -9610,6 +9625,9 @@ def _expand_compound(node, seed, style=None):
             continue
         not_placed = 0
         for _ in range(n):
+            cstyle = _concrete_style(rng, style)
+            if cstyle:
+                base = plan_footprint(plan_node("proto", "building", rule["kind"], params=dict(rule.get("params") or {}), style=cstyle))
             for attempt in range(250):
                 if rule.get("near") == "attach":
                     cparams = _apply_vary(rng, dict(rule.get("params") or {}), rule, style)
@@ -9693,6 +9711,8 @@ def _expand_compound(node, seed, style=None):
                 used_ids.add(cid)
                 child = plan_node(cid, "building", rule["kind"], params=_apply_vary(rng, dict(rule.get("params") or {}), rule, style),
                                   transform={"x": round(cx, 3), "y": round(cy, 3), "z": 0.0, "rot": rot})
+                if cstyle:
+                    child["style"] = cstyle
                 child["generated"] = True
                 out.append(child)
                 break
@@ -9838,7 +9858,8 @@ def _expand_block(node, seed, style=None):
                 for key, (lo, hi) in (rule.get("size") or {}).items():
                     bparams[key] = rng.randint(int(lo), int(hi)) if key == "floors" else round(rng.uniform(lo, hi), 2)
                 _apply_vary(rng, bparams, rule, style)
-                proto = plan_node("proto", "building", rule["kind"], params=bparams)
+                cstyle = _concrete_style(rng, style)
+                proto = plan_node("proto", "building", rule["kind"], params=bparams, style=cstyle or (style if style != 'mixed' else None))
                 base = plan_footprint(proto)
                 if not base:
                     u += step
@@ -9861,6 +9882,8 @@ def _expand_block(node, seed, style=None):
                     used_ids.add(cid)
                     child = plan_node(cid, "building", rule["kind"], params=bparams,
                                       transform={"x": round(cx, 3), "y": round(cy, 3), "z": 0.0, "rot": round(rot, 3)})
+                    if cstyle:
+                        child["style"] = cstyle
                     child["generated"] = True
                     out.append(child)
                 u += step

@@ -3,7 +3,8 @@
     blender --background --factory-startup --python tools/render_media.py -- <job> <out_dir> [quality]
 
 Jobs: castle_still, castle_turntable, ruin_slider, tint_cycle, tower_trio, tower_cutaway, hall_cutaway,
-      level_still, round_rooms_still, seeds_gallery, houses_still, grounds_still, fortress_still, fortress_turntable, block_still, farm_still
+      level_still, round_rooms_still, seeds_gallery, houses_still, grounds_still, fortress_still, fortress_turntable, block_still, farm_still,
+      styles_still, hutforms_still, organic_still, roundtown_still, mixed_still, hutcluster_still
 quality: draft (default, 16 samples) or final (64 samples).
 The frames land as PNGs; tools/make_gif.sh turns a frame folder into a GIF with ffmpeg.
 """
@@ -265,5 +266,63 @@ elif JOB in ("houses_still", "grounds_still", "fortress_still", "fortress_turnta
                 cam.location = orbit((0, 0), 62, 38, math.radians(-90 + 360 * i / n))
                 cam.rotation_euler = (Vector((0, 0, 3)) - cam.location).to_track_quat('-Z', 'Y').to_euler()
                 render("f%03d" % i)
+elif JOB in ("styles_still", "hutforms_still", "organic_still", "roundtown_still", "mixed_still", "hutcluster_still"):
+    clear_scene()
+    sc.cursor.location = (0, 0, 0)
+    if JOB == "styles_still":
+        setup_render(960, 540)
+        for style in ([os.environ["STYLE_ONLY"]] if os.environ.get("STYLE_ONLY") else la.PLAN_STYLES):
+            clear_scene()
+            world_and_sun()
+            row = la.plan_node("row", "compound", "yard", style=style, footprint=[[-34, -16], [34, -16], [34, 16], [-34, 16]],
+                               params={"fence": "auto", "fence_height": 1.6},
+                               anchors=[{"id": "gate", "kind": "gate", "pos": [0, -16, 0], "dir": 270, "width": 4}], children=[
+                la.plan_node("house", "building", "house", transform={"x": -24, "y": 0, "z": 0, "rot": 0}),
+                la.plan_node("house2", "building", "house", transform={"x": -12, "y": 0, "z": 0, "rot": 0}, params={"floors": 2}),
+                la.plan_node("chapel", "building", "chapel", transform={"x": 2, "y": 0, "z": 0, "rot": 0}),
+                la.plan_node("stable", "building", "stable", transform={"x": 18, "y": 0, "z": 0, "rot": 0}),
+                la.plan_node("well", "building", "well", transform={"x": 28, "y": -6, "z": 0, "rot": 0}),
+                la.plan_node("tree", "building", "tree", transform={"x": 30, "y": 8, "z": 0, "rot": 0}),
+                la.plan_node("tower", "building", "tower", transform={"x": -30, "y": 10, "z": 0, "rot": 0},
+                             params={"props": False, "lights": False, "interior": False, "height": 8.0})])
+            la.plan_write_to_blend(sc, row)
+            la.plan_build(bpy.context, row)
+            camera((4, -52, 20), (4, 0, 2.5), lens=34)
+            render(style)
+    elif JOB == "hutforms_still":
+        setup_render(1280, 640)
+        world_and_sun()
+        specs = [("earth", "DOME", {}), ("aircrete", "DOME", {"stilts": 1.0}), ("earthbag", "TUNNEL", {}), ("straw", "AFRAME", {}),
+                 ("timber", "SILO", {"levels": 3, "width": 5.0, "depth": 5.0}), ("branch", "BOX", {"levels": 2}),
+                 ("timber", "BOX", {"stilts": 1.4}), ("earth", "BOX", {"levels": 3, "basement": 1})]
+        kids = [la.plan_node("h%d" % i, "building", "hut", transform={"x": -42 + i * 12, "y": 0, "z": 0, "rot": 0},
+                             params={"construction": c, "form": f, **extra}) for i, (c, f, extra) in enumerate(specs)]
+        row = la.plan_node("row", "compound", "yard", footprint=[[-50, -10], [50, -10], [50, 10], [-50, 10]], children=kids)
+        la.plan_write_to_blend(sc, row)
+        la.plan_build(bpy.context, row)
+        camera((0, -88, 24), (0, 0, 3.0), lens=34)
+        render("hutforms")
+    elif JOB == "hutcluster_still":
+        setup_render(1280, 720)
+        world_and_sun()
+        plan = la.plan_new_example(sc, 'HUTS', set())
+        la.plan_write_to_blend(sc, plan)
+        la.plan_build(bpy.context, plan)
+        camera((0, -34, 22), (0, 2, 2.0), lens=34)
+        render("hutcluster")
+    else:
+        setup_render(1280, 720)
+        world_and_sun()
+        kind, shape, style, cam = {"organic_still": ('BLOCK', 'ORGANIC', None, ((0, -90, 80), (0, 0, 0))),
+                                   "roundtown_still": ('STREET', 'ROUND', 'chinese', ((0, -85, 75), (0, 0, 0))),
+                                   "mixed_still": ('STREET', 'REGULAR', 'mixed', ((0, -60, 36), (0, 0, 0)))}[JOB]
+        plan = la.plan_new_example(sc, kind, set())
+        la.plan_apply_shape(plan, shape)
+        if style:
+            plan["style"] = style
+        la.plan_write_to_blend(sc, plan)
+        la.plan_build(bpy.context, plan)
+        camera(cam[0], cam[1], lens=32)
+        render(JOB.replace("_still", ""))
 else:
     raise SystemExit("unknown job " + JOB)

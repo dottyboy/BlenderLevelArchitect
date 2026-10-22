@@ -146,3 +146,25 @@ Nothing syncs silently.
    for queries such as "any `gate` anchor of this compound"; wildcard references; nested paths across more than one level
    (`site/castle/gate`); anchors that carry a capacity (how many roads may join); and anchors on terrain (water, ford, pass).
    The reference syntax is parsed in one function so these can be added without changing stored data.
+
+## 11. Reference added after M2-M4
+
+**Styles.** `style` on any node: `medieval`, `egyptian`, `mexican`, `chinese`, `inca`, `futuristic`, `alpine`, or `mixed` (every building,
+fence and road picks a pack from its own seed). A pack is data (`PLAN_STYLES`): wall, trim, wood and roof materials plus per-kind
+parameter defaults; explicit `params` win. Huts use *construction* packs (`PLAN_CONSTRUCTIONS`: straw, branch, timber, earth, earthbag,
+aircrete) selected by `params.construction`.
+
+**Shapes.** `params.shape` = `{"kind": "rect" | "circle" | "ellipse" | "blob" | "lshape", "width", "depth", "irregularity", "seed"}` gives a
+compound or block its footprint when it has none. Gates snap to the nearest edge.
+
+**Road generators.** `params.road_generator` = `{"kind": "grid" | "organic" | "ring", ...}` fills `road_graph` at expansion time
+(grid: `cols`, `rows`, `cell`, `jitter`; organic: adds `amplitude`, `segment`; ring: `radius`, `rings`, `spokes`, `segments`, `wobble`).
+
+**Building kinds.** `tower`, `castle`, `keep`, `house`, `chapel`, `stable`, `barn`, `well`, `hut`, `tree`, `barrel`, `crate`, `haystack`.
+House-like parameters: `width`, `depth`, `wall_height`, `floors`, `basement`, `stilts`, `wall_thickness`, `roof` (`GABLE`, `HIP`, `CURVED`, `FLAT`,
+`NONE`), `roof_pitch`, `roof_overhang`, `roof_lift`, `parapet`, `roof_color`, `door`, `doors` (extra sides), `door_style`, `door_width`,
+`door_height`, `door_leaf`, `windows`, `window_*`, `chimney`, `stairs`, `use`, `brick_color`, `ruin`, `detail`.
+Hut parameters: `construction`, `form` (`BOX`, `DOME`, `TUNNEL`, `SILO`, `AFRAME`), `levels`, `level_height` plus the house-like ones.
+
+**Layout rules** (`params.layout`): `kind`, `count`, `near` (`free`, `wall`, `ring`, `attach`), `ring`, `at: "corners"`, `every`, `min_gap`,
+`params`, `vary` (parameter -> list of choices; brick and roof colours are ignored under a non-medieval style).

@@ -14,7 +14,7 @@
 [![License: GPL v3](https://img.shields.io/github/license/dottyboy/BlenderLevelArchitect)](../LICENSE)
 [![Blender 4.2+](https://img.shields.io/badge/blender-4.2%20LTS%20%E2%86%92%205.2-orange)](https://www.blender.org/)
 [![Latest release](https://img.shields.io/github/v/release/dottyboy/BlenderLevelArchitect)](https://github.com/dottyboy/BlenderLevelArchitect/releases/latest)
-[![Automated checks](https://img.shields.io/badge/automated%20checks-500%2B-brightgreen)](tests/blender_headless_test.py)
+[![Automated checks](https://img.shields.io/badge/automated%20checks-1000%2B-brightgreen)](tests/blender_headless_test.py)
 
 **Procedural dungeons, towers and castles for Blender** — a Wave-Function-Collapse-style room/corridor/stair solver with
 brick-textured masonry, real doors and windows, spiral-stair towers, ruins, and engine-ready glTF packages.
@@ -30,9 +30,9 @@ brick-textured masonry, real doors and windows, spiral-stair towers, ruins, and 
 | **Structures** | A round **Tower** (spiral stairs, railing, lanterns, furniture) and a walled **Castle** (four towers, wall walk, gate, furnished keep). |
 | **Ruins** | One slider breaks towers, castles and walls down: stepped jagged tops, breaches, collapsed arches, rubble. Doorways stay passable. |
 | **Doors, windows, props** | Arched / pointed / flat doors with swinging panels, windows with glass, torches with real lights, themed furniture. |
-| **Plans** *(experimental)* | Describe a site as a nested plan (castle grounds with a castle and a watchtower), store it in the .blend and as JSON, rebuild it any time. First step towards farms, villages and towns — see [the roadmap](../docs/WORLD_GENERATOR_PLAN.md). |
+| **Plans** *(experimental)* | Describe a site as a nested plan — fortress, farm, hamlet, street, district, hut cluster — in one of **seven style packs** (or a mix), with regular, round or organic shapes; stored in the .blend and as JSON. See [Plans](#plans-from-one-building-to-a-site-experimental) and [the roadmap](../docs/WORLD_GENERATOR_PLAN.md). |
 | **Engine export** | glTF/GLB, collision mesh, and **game packages**: glb + JSON of walkable areas, rooms, stairs, lights and props — per floor if you like. |
-| **Tested** | 500+ automated checks (ray-cast passability, normals, vertex budgets, round-trips) on Blender 4.2 LTS, 5.2.1 and 5.2.2. |
+| **Tested** | 1000+ automated checks (ray-cast passability, normals, vertex budgets, round-trips) on Blender 4.2 LTS and 5.2. |
 
 ## Gallery
 
@@ -73,30 +73,48 @@ locations — walkable by rectangles, torches as real lights, doors that swing o
 
 ## Plans: from one building to a site (experimental)
 
-A **plan** describes a site as nested data — a fortress, a farmyard, later a village — and the generator builds it. Plans live
-in the .blend and as `.plan.json`, are fully seeded, and can place buildings for you.
+A **plan** describes a whole site as nested data — a fortress, a farm, a hamlet, a street, a district, a cluster of huts — and the
+generator builds it. Plans live in the .blend and as `.plan.json`, are fully seeded, and can place buildings for you.
 
 <table>
 <tr>
-<td width="50%"><img src="../docs/img/plans_fortress.gif" alt="A fortress turning: outer ward with corner towers and a gate, the castle as its keep"><br><sub><b>Fortress</b> — outer ward with corner towers and a gate, the castle as its keep</sub></td>
-<td width="50%"><img src="../docs/img/plans_grounds.png" alt="Castle grounds with a chapel, stables, houses, a well and a watchtower inside a stone enclosure"><br><sub><b>Castle grounds</b> — chapel, stable, houses, well and watchtower laid out automatically</sub></td>
+<td width="50%"><img src="../docs/img/plans_fortress.gif" alt="A fortress turning: outer ward with corner towers and a gate, the keep inside"><br><sub><b>Fortress</b> — outer ward, corner towers, gate, keep</sub></td>
+<td width="50%"><img src="../docs/img/plans_block.png" alt="A district: a grid of streets with varied houses facing the road"><br><sub><b>Block</b> — streets with kerbs, houses facing the road in varied colours</sub></td>
 </tr>
 <tr>
-<td><img src="../docs/img/plans_block.png" alt="A district: a grid of streets with varied houses facing the road"><br><sub><b>Block</b> — a grid of streets, houses facing the road in varied colours and roofs</sub></td>
-<td><img src="../docs/img/plans_farm.png" alt="A farm with a wooden fence, a barn, a house and a well"><br><sub><b>Farm</b> — wooden fence with a gate, barn, house and well</sub></td>
-</tr>
-<tr>
-<td colspan="2"><img src="../docs/img/plans_houses.png" alt="A house, a two-storey house, a chapel, a stable and a ruin"><br><sub>Building plans: house, two-storey house, chapel (slate roof), stable, ruin</sub></td>
+<td><img src="../docs/img/plans_organic.png" alt="An organic district with winding streets and a free-form outline"><br><sub><b>Organic</b> — winding, noise-based streets inside a free-form outline</sub></td>
+<td><img src="../docs/img/plans_roundtown.png" alt="A round town in Chinese style: ring road, spokes, curved roofs"><br><sub><b>Round</b> — ring-and-spoke streets (here in the Chinese style)</sub></td>
 </tr>
 </table>
 
-* **Building plans**: tower, castle, keep, house (with chimney), chapel, stable, barn, well — masonry walls, doors, windows, terracotta or slate roofs, ruin.
-* **Block plans**: a road graph with kerbed stone roads, lots along both sides (weighted building rules, random sizes, colours and roofs, doors toward the road); a block can also be just a road between two anchors, e.g. farm gate to castle gate.
-* **Compound plans**: a footprint with a stone enclosure and gate, and `layout` rules ("1 chapel on the wall, 1-2 stables, 3 houses")
-  that place buildings without overlap, keep the way from the gate to the castle free and turn doors toward it.
-* In Blender: sidebar **Level Architect > Plans (experimental)** — pick Tower, Castle, Grounds, Fortress, Farm, Hamlet, House, Chapel or
-  Stable, Street or Block at the 3D cursor, then **Build**. Format: [docs/PLAN_FORMAT.md](../docs/PLAN_FORMAT.md); roadmap towards farms, villages,
-  towns, culture styles and biomes: [docs/WORLD_GENERATOR_PLAN.md](../docs/WORLD_GENERATOR_PLAN.md).
+### Seven style packs and a mix
+
+<p align="center"><img src="../docs/img/styles_sheet.png" alt="The same village in Medieval, Egyptian, Mexican, Chinese, Inca, Futuristic and Alpine styles, and a mixed street" width="900"></p>
+
+Medieval, Egyptian, Mexican adobe, Chinese (curved roofs), Inca, Futuristic and Alpine chalet — each is data (materials plus building
+proportions), so the same plan can be built in any of them, or in **Mixed**, where every building picks its own pack.
+
+### Huts: straw, branches, timber, cob, earthbag, aircrete
+
+<p align="center"><img src="../docs/img/plans_hutforms.png" alt="Huts in several forms: dome, dome on stilts, tunnel, A-frame, silo, two-storey box, box on stilts, three levels over a basement" width="900"></p>
+
+Small modular buildings (3-5 × 4-8 m) in six construction methods and five forms (box, dome, tunnel, silo, A-frame), up to three
+levels above a basement, on stilts, as dwelling or storage — and they can be **attached wall to wall** with passages, so they grow into bigger structures:
+
+<p align="center"><img src="../docs/img/plans_hutcluster.png" alt="A cluster of attached huts with passages between them" width="640"></p>
+
+### What a plan can contain
+
+* **Buildings**: tower, castle, keep, house (stairs, basement, stilts, chimney, open door leaf), chapel, stable, barn, well, hut, trees,
+  barrels, crates, haystacks — gable, hip, curved or flat roofs, ruin.
+* **Compounds**: any footprint — rectangle, circle or free-form blob — with a stone or wooden enclosure and gates, and `layout` rules
+  ("1 chapel on the wall, 1-2 stables, 3 houses, trees on a ring, huts attached to each other") that place buildings without overlap,
+  keep the way from the gate to the castle free and turn doors toward it.
+* **Blocks**: a road graph (hand-made or generated: grid, organic, ring) with kerbed stone roads and buildings along both sides; a block can
+  also be a road between two anchors, e.g. farm gate to castle gate.
+* In Blender: sidebar **Level Architect > Plans (experimental)** — choose **Style** and **Shape**, pick a button, press **Build**.
+  Full guide: [docs/USER_GUIDE.md](../docs/USER_GUIDE.md#plans-sites-villages-towns); format: [docs/PLAN_FORMAT.md](../docs/PLAN_FORMAT.md);
+  roadmap towards towns, terrain and biomes: [docs/WORLD_GENERATOR_PLAN.md](../docs/WORLD_GENERATOR_PLAN.md).
 
 ## Install
 

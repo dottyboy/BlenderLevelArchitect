@@ -4680,6 +4680,36 @@ exp, w = addon.plan_expand_layout(mixed_cluster)
 check("Form: domes are not attached as modules (the first is placed, the rest reported)", len([c for c in exp["children"] if c.get("generated")]) >= 1)
 
 # ==============================================================================
+print("\n--- Plans: layouts under styles and mixed ---")
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+fut = addon.plan_node("fu", "building", "house", style="futuristic")
+check("Layout style: a futuristic house footprint uses its pack's size (8 x 7)",
+      addon.plan_footprint(fut) == addon._footprint_rect({"width": 8.0, "depth": 7.0}))
+check("Layout style: a medieval house keeps 7 x 5", addon.plan_footprint(addon.plan_node("m", "building", "house")) == addon._footprint_rect({"width": 7.0, "depth": 5.0}))
+check("Layout style: explicit width wins over the pack", addon.plan_footprint(addon.plan_node("w", "building", "house", style="futuristic", params={"width": 5.0}))[1][0] == 2.5)
+mixed = addon.plan_node("mx3", "block", "street", style="mixed", params={
+    "road_graph": {"nodes": {"a": [-40, 0], "b": [40, 0]}, "edges": [["a", "b"]]}, "skip_chance": 0.0,
+    "fill": [{"kind": "house", "weight": 3}, {"kind": "chapel", "weight": 1}, {"kind": "stable", "weight": 1}]})
+exp, _ = addon.plan_expand_layout(mixed)
+gen = [c for c in exp["children"] if c.get("generated")]
+check("Layout style: every child of a mixed block carries a concrete style", all(c.get("style") in addon.PLAN_STYLES for c in gen), str([c.get("style") for c in gen][:4]))
+check("Layout style: a mixed street uses several packs", len({c["style"] for c in gen}) >= 3)
+polys = [addon._convex_hull(_world_poly(c)) for c in gen]
+check("Layout style: mixed buildings of different sizes still do not overlap",
+      min(addon._convex_gap(a, b) for i, a in enumerate(polys) for b in polys[i + 1:]) >= 1.0 - 1e-6)
+check("Layout style: the expanded mixed street builds", len(addon.plan_build(bpy.context, mixed)["built"]) == 1 + len(gen))
+mixed_c = addon.plan_node("mc2", "compound", "yard", style="mixed", footprint=[[-30, -20], [30, -20], [30, 20], [-30, 20]],
+                          params={"layout": [{"kind": "house", "count": 5}, {"kind": "chapel", "count": 1}]})
+exp, _ = addon.plan_expand_layout(mixed_c)
+gen = [c for c in exp["children"] if c.get("generated")]
+polys = [addon._convex_hull(_world_poly(c)) for c in gen]
+check("Layout style: a mixed compound lays out without overlaps", gen and min(addon._convex_gap(a, b) for i, a in enumerate(polys) for b in polys[i + 1:]) >= 2.0 - 1e-6)
+check("Layout style: the alpine pack is a style", "alpine" in addon.PLAN_STYLES)
+
+# ==============================================================================
 print()
 if failures:
     print(f"{len(failures)} CHECK(S) FAILED:")

@@ -3,6 +3,21 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.47.0 — plans: styles, shapes, huts
+
+- **Seven style packs** — Medieval, Egyptian, Mexican adobe, Chinese, Inca, Futuristic, Alpine chalet — plus **Mixed** (every building,
+  fence and road picks its own pack). Packs are data: wall, trim, roof and wood materials (procedural, packed textures) and per-kind
+  building proportions; explicit parameters always win. A *Style* dropdown in the Plans panel; layouts account for each style's sizes.
+- **New roofs**: hipped, **curved** (concave sweep with upturned eaves, used by the Chinese pack) and flat with a parapet; `roof_overhang`.
+- **Shapes**: a *Shape* dropdown (Regular / Round / Organic). Compounds can take a circle, ellipse, blob or L-shaped footprint
+  (`params.shape`); stone and wooden fences follow it and gates snap to the outline; blocks can generate their roads
+  (`params.road_generator`: `grid`, `organic` with Perlin-like noise, `ring` with spokes). Round fortresses get about six towers.
+- **Huts**: construction methods straw, branches, timber, cob, earthbag, aircrete; forms box, dome, tunnel, silo, A-frame; up to three levels
+  and a basement (box), stilts with steps, dwelling or storage; `near: "attach"` joins huts wall to wall with passages.
+- **More buildings and polish**: stairs between storeys, open door leaves, basements, `doors` on several sides, trees, barrels, crates, haystacks,
+  straight kerbs across road joins, no z-fighting where roads overlap, calmer terracotta.
+- Fixed: brick tints / roof-colour `vary` entries no longer fight the chosen style.
+
 ## 0.46.0 — plans (M3, M4 and a first polish round)
 
 Polish round 1 (on top of the M3/M4 entries below):

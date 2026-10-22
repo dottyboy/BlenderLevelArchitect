@@ -12,7 +12,8 @@ current settings. If any step's output already exists it asks first, since regen
 button means its output is already in the file.
 
 Contents: [Building a level](#building-a-level) · [Walls and materials](#walls-and-materials) ·
-[Towers and castles](#towers-and-castles) · [Ruins](#ruins) · [Exporting](#exporting) · [Tips](#tips)
+[Towers and castles](#towers-and-castles) · [Ruins](#ruins) · [Plans: sites, villages, towns](#plans-sites-villages-towns) ·
+[Exporting](#exporting) · [Tips](#tips)
 
 ---
 
@@ -95,6 +96,96 @@ becomes a plain gap, battlements disappear, rubble lies around the base, and upp
 gone. Doorways stay passable. The result is seeded, so a ruin is reproducible.
 
 ---
+
+## Plans: sites, villages, towns
+
+*Experimental.* A **plan** describes a whole site as nested data — a fortress with a keep and corner towers, a farm, a hamlet,
+a street, a district, a cluster of huts — and builds it for you. Open **Level Architect > Plans (experimental)** in the sidebar.
+
+1. Pick a **Style** (the look of the buildings) and a **Shape** (regular, round or organic outlines and streets).
+2. Press one of the buttons — **Tower, Castle, Grounds, Fortress, Farm, Hamlet, Street, Block, House, Chapel, Stable, Hut, Hut cluster**.
+   A plan is created at the 3D cursor and listed below the buttons with a one-line summary.
+3. Press **Build** on the plan. Everything the plan describes appears in a `Built_<name>` collection; **Build** again after any
+   change replaces it. **Freeze** writes the automatically laid-out buildings into the plan as ordinary entries (so you can
+   move them); **Save** writes the plan to a `.plan.json` file, **Load Plan...** reads one back, the bin removes the plan and
+   what it built.
+
+The plan itself is plain data — see [PLAN_FORMAT.md](PLAN_FORMAT.md) for every field. In the .blend it lives in `Plan_<name>`
+collections (one Empty per node, with the node's JSON as a custom property), so it survives saving and can be inspected or edited
+by script.
+
+### Styles
+
+| Style | Look |
+|---|---|
+| **Medieval** | Brick and dressed stone (tintable per building), terracotta or slate tiles, chimneys |
+| **Egyptian** | Sandstone blocks, flat roofs with parapets, narrow openings, a broad temple in place of the chapel |
+| **Mexican adobe** | Plastered adobe, arched doors and windows, low hipped terracotta roofs |
+| **Chinese** | Red timber walls, sweeping curved roofs with upturned eaves in grey tile, wooden fences |
+| **Inca** | Fitted grey stone, steep thatched gables, small rectangular openings |
+| **Futuristic** | White panel walls with dark seams, flat metal roofs, big windows, two-storey houses |
+| **Alpine chalet** | Log walls, low shingled roofs with wide overhangs, two storeys, chimneys, wooden fences |
+| **Mixed** | Every building, fence and road picks its own pack (deterministic from its seed) |
+
+A child plan can override its parent's style (`"style": "chinese"` on one house in a medieval village). Parameters you set explicitly
+always win over what the style would choose.
+
+### Shapes
+
+* **Regular** — rectangular enclosures, straight street grids.
+* **Round** — circular enclosures (the gate snaps to the outline), ring-and-spoke streets; a round Fortress gets about six towers.
+* **Organic** — free-form (noise-based) outlines for fences and districts, and winding streets whose segments bend with Perlin-like noise.
+  Everything is seeded, so the same plan always gives the same shape.
+
+### Buildings
+
+House, chapel, stable, barn: masonry walls on a rectangular footprint with doors (arched, pointed, rectangular; an open leaf stands
+beside the doorway), windows, floors with a straight stair, a stone floor, and a roof — gable, hip, curved, flat (with a parapet) or none;
+overhang, pitch, chimney, ruin and brick colour are parameters. A house can have **floors + basement up to five levels** and stand on **stilts**.
+Also available: **well**, **keep** (a free-standing keep), **tower** and **castle** (the existing builders), **trees** (cone or round
+crown, several leaf colours) and small props (**barrel, crate, haystack**).
+
+### Huts
+
+A **hut** is a small modular building, 3-5 × 4-8 m by default, in a *construction method*:
+
+| `construction` | Walls | Roof |
+|---|---|---|
+| `straw` | straw bales | thatch |
+| `branch` | woven branches | thatch |
+| `timber` | logs | shingles |
+| `earth` | cob / rammed earth | sod, flat |
+| `earthbag` | earthbag courses | sod, flat |
+| `aircrete` | smooth aircrete | aircrete, flat |
+
+and a `form`: **BOX** (gable or flat), **DOME**, **TUNNEL** (barrel vault), **SILO** (round, up to three levels with a spiral stair)
+or **AFRAME**. BOX huts can have `levels` (1-3) and a `basement` (0-2); every form can stand on `stilts` (up to 2.5 m, with steps up to
+the door); `use` is `dwelling` or `storage` (storage has no windows). Use a layout rule with `"near": "attach"` to join huts wall to wall:
+each new module touches one already placed and the shared wall gets a passage (`doors`), so huts grow into larger buildings.
+
+### Automatic layout
+
+A compound (a farm, a hamlet, castle grounds...) can place buildings for you with `layout` rules, for example *one chapel on the wall,
+one or two stables on the wall, three houses anywhere*. Rule fields: `kind`, `count` (a number or `[min, max]`), `near` (`free`, `wall`,
+`ring` with `ring: [inner, outer]`, or `attach`), `at: "corners"` (one on every vertex, e.g. corner towers; `every: N` for every Nth),
+`min_gap`, `params`, and `vary` (a list of choices per parameter — brick colour, roof colour, width, construction...). Buildings keep a
+margin from the fence, never overlap, leave a corridor from each gate to the castle or keep free, and turn their doors toward it (or toward
+the middle of the compound). What does not fit is skipped with a warning in the report.
+
+### Streets and blocks
+
+A **block** has a road graph (nodes and straight edges, or a generator: `grid`, `organic`, `ring`) and builds the stone roads with kerbs.
+Buildings are generated along both sides of every road — `fill` rules choose the kind with a weight, with random size ranges, colours
+and roofs — with their doors toward the road; lots that would touch a road, another building or the block's outline are skipped.
+A block with only `from` and `to` anchor references (for example `"farm/gate"` to `"castle/gate"`) becomes a straight road between those
+two anchors, wherever the plans are placed or turned.
+
+### Tips for plans
+
+* Change a parameter in the saved JSON (or in the plan's custom property), then press **Build** — rebuilds are cheap and exact.
+* Press **Freeze** once a layout is right; from then on the buildings are fixed and can be moved by hand in the plan.
+* Seeds are derived per node from the parent's seed and the node's id, so adding a building never reshuffles the others.
+* Large plans: heavy parts (towers with interiors, many windows) cost vertices; set `detail` to `LOW` and drop interiors for big sites.
 
 ## Exporting
 
