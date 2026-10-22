@@ -9637,11 +9637,10 @@ def _expand_compound(node, seed, style=None):
                     poly = _convex_hull(_poly_transform(base, cx, cy, rot))
                     if not _inside_with_margin(poly, container, margin):
                         continue
-                    if any(_convex_gap(poly, q) < -1e-6 for q in placed) or any(_convex_gap(poly, q) <= 0.0 for q in corridors):
+                    if any(_convex_gap(poly, q) < -2e-3 for q in placed) or any(_convex_gap(poly, q) <= 0.0 for q in corridors):
                         continue
                     # only the module it is joined to may touch: everything else keeps the minimum gap
-                    near_touch = [q for q in placed if -1e-6 <= _convex_gap(poly, q) < gap]
-                    if len(near_touch) > (1 if anchor_c is not None else 0):
+                    if any(2e-3 < _convex_gap(poly, q) < gap for q in placed):
                         continue
                     placed.append(poly)
                     k = 1
@@ -11186,13 +11185,198 @@ def plan_hut_params(params, style=None):
     house_in = {k: v for k, v in params.items() if k not in PLAN_HUT_ONLY}
     house_in.update(width=hut["width"], depth=hut["depth"], floors=int(hut["levels"]), wall_height=hut["level_height"])
     house = plan_house_params('house', house_in, construction)
-    if hut["form"] != 'BOX' and house["basement"] > 0 and hut["form"] not in ('SILO',):
-        raise PlanError("a basement is only available for the BOX and SILO forms")
+    if hut["form"] != 'BOX' and house["basement"] > 0:
+        raise PlanError("a basement is only available for the BOX form")
+    if hut["form"] in ('DOME', 'TUNNEL', 'AFRAME') and hut["levels"] > 1:
+        raise PlanError("the %s form has a single level (use BOX or SILO for several)" % hut["form"])
     return hut, house
 
 
+def _grid_shell(mesh, O, I, wrap, inside_fn, skip, slot, jamb_slot, cap_slot=None):
+    """A thick shell from an outer and an inner point grid (O[i][j], I[i][j]); faces for which skip(i, j, centroid)
+    is true are left open (a doorway) and get jamb faces joining the two skins. Returns the set of skipped faces."""
+    nu = len(O) if wrap else len(O) - 1
+    nv = len(O[0]) - 1
+    tile, th = TOWER_TILE_W, TOWER_ROWS * TOWER_ROW_H
+
+    def ix(i):
+        return i % len(O) if wrap else i
+
+    def uv(pts):
+        return [(q[0] / tile + q[1] / tile, q[2] / th) for q in pts]
+    skipped = set()
+    for i in range(nu):
+        for j in range(nv):
+            o = [O[i][j], O[ix(i + 1)][j], O[ix(i + 1)][j + 1], O[i][j + 1]]
+            c = tuple(sum(q[k] for q in o) / 4.0 for k in range(3))
+            if skip(i, j, c):
+                skipped.add((i, j))
+                continue
+            ins = inside_fn(c)
+            n_out = (c[0] - ins[0], c[1] - ins[1], c[2] - ins[2])
+            mesh.poly('shell', o, uv(o), n_out, slot)
+            inn = [I[i][j], I[ix(i + 1)][j], I[ix(i + 1)][j + 1], I[i][j + 1]]
+            mesh.poly('shellin', inn, uv(inn), (-n_out[0], -n_out[1], -n_out[2]), slot)
+    for (i, j) in skipped:
+        o = [O[i][j], O[ix(i + 1)][j], O[ix(i + 1)][j + 1], O[i][j + 1]]
+        c = tuple(sum(q[k] for q in o) / 4.0 for k in range(3))
+        for (di, dj), (a, b) in (((-1, 0), ((i, j), (i, j + 1))), ((1, 0), ((i + 1, j), (i + 1, j + 1))),
+                                 ((0, 1), ((i, j + 1), (i + 1, j + 1))), ((0, -1), ((i, j), (i + 1, j)))):
+            ni, nj = i + di, j + dj
+            if nj < 0 or nj >= nv or (not wrap and (ni < 0 or ni >= nu)):
+                continue
+            if (ix(ni), nj) in skipped:
+                continue
+            pa, pb = (ix(a[0]), a[1]), (ix(b[0]), b[1])
+            quad = [O[pa[0]][pa[1]], O[pb[0]][pb[1]], I[pb[0]][pb[1]], I[pa[0]][pa[1]]]
+            mid = tuple((quad[0][k] + quad[1][k]) / 2.0 for k in range(3))
+            mesh.poly('jamb', quad, [(0.0, 0.0), (0.5, 0.0), (0.5, 0.2), (0.0, 0.2)], (c[0] - mid[0], c[1] - mid[1], c[2] - mid[2]), jamb_slot)
+    return skipped
+
+
+def _fan(mesh, pts, z, up, slot):
+    """A flat polygon (list of (x, y)) at height z facing up or down."""
+    poly = [(q[0], q[1], z) for q in pts]
+    mesh.poly('fan', poly, [(q[0] / TOWER_TILE_W, q[1] / TOWER_TILE_W) for q in poly], (0.0, 0.0, 1.0 if up else -1.0), slot)
+
+
 def _build_hut_round(hut, house, seed):
-    raise PlanError("the %s form is not available yet" % hut["form"])
+    """DOME, TUNNEL, SILO and AFRAME huts. Slots: 0 wall, 1 trim (jambs), 2 roof, 3 wood."""
+    form, W, D = hut["form"], float(hut["width"]), float(hut["depth"])
+    t = house["wall_thickness"]
+    st = float(house.get("stilts", 0.0))
+    if int(house.get("basement", 0)) > 0:
+        raise PlanError("a basement is only available for the BOX form")
+    dw, dh_req = house["door_width"], house["door_height"]
+    mesh = _TowerMesh()
+    door_az = -math.pi / 2.0                            # the door faces south, like the box huts
+    if form == 'AFRAME':
+        Hh = max(2.4, W * 1.0)
+        hw = W / 2.0
+        dh = min(dh_req, Hh * 0.6)
+        for sgn in (-1.0, 1.0):
+            ln = math.hypot(hw, Hh)
+            nrm = (sgn * Hh / ln, 0.0, hw / ln)
+            top = [(sgn * hw, -D / 2, 0.0), (sgn * hw, D / 2, 0.0), (0.0, D / 2, Hh), (0.0, -D / 2, Hh)]
+            uvs = [(q[1] / TOWER_TILE_W, math.hypot(q[0], q[2]) / (TOWER_ROWS * TOWER_ROW_H)) for q in top]
+            mesh.poly('slope', top, uvs, nrm, ROOF_SOURCE_SLOT)
+            inn = [(q[0] - nrm[0] * t, q[1], q[2] - nrm[2] * t) for q in top]
+            mesh.poly('slopein', inn, uvs, (-nrm[0], 0.0, -nrm[2]), ROOF_SOURCE_SLOT)
+        tile = TOWER_TILE_W
+        # gables: the back one closed, the front one with a doorway
+        for y, face in ((D / 2, 1.0), (-D / 2, -1.0)):
+            xh = hw * (1.0 - dh / Hh)
+            if face > 0:
+                pieces = [[(-hw, 0.0), (hw, 0.0), (0.0, Hh)]]
+            else:
+                pieces = [[(-hw, 0.0), (-dw / 2, 0.0), (-dw / 2, dh), (-xh, dh)], [(dw / 2, 0.0), (hw, 0.0), (xh, dh), (dw / 2, dh)],
+                          [(-xh, dh), (xh, dh), (0.0, Hh)]]
+            for pc in pieces:
+                pts = [(q[0], y, q[1]) for q in pc]
+                mesh.poly('gable', pts, [(q[0] / tile, q[2] / tile) for q in pts], (0.0, face, 0.0), 0)
+                pin = [(q[0] * (1 - t / hw), y - face * t, q[2]) for q in pts]
+                mesh.poly('gablein', pin, [(q[0] / tile, q[2] / tile) for q in pin], (0.0, -face, 0.0), 0)
+        for sx in (-1.0, 1.0):                           # door reveal
+            quad = [(sx * dw / 2, -D / 2, 0.0), (sx * dw / 2, -D / 2 + t, 0.0), (sx * dw / 2, -D / 2 + t, dh), (sx * dw / 2, -D / 2, dh)]
+            mesh.poly('reveal', quad, [(0.0, 0.0), (0.2, 0.0), (0.2, 0.5), (0.0, 0.5)], (-sx, 0.0, 0.0), 1)
+        lintel = [(-dw / 2, -D / 2, dh), (dw / 2, -D / 2, dh), (dw / 2, -D / 2 + t, dh), (-dw / 2, -D / 2 + t, dh)]
+        mesh.poly('lintel', lintel, [(0.0, 0.0), (1.0, 0.0), (1.0, 0.2), (0.0, 0.2)], (0.0, 0.0, -1.0), 1)
+        _fan(mesh, [(-hw + t, -D / 2 + t), (hw - t, -D / 2 + t), (hw - t, D / 2 - t), (-hw + t, D / 2 - t)], 0.0, True, 1)
+        footprint = (hw, D / 2)
+    elif form == 'TUNNEL':
+        Lx = max(W, D)
+        b = min(W, D) / 2.0
+        c = b * 1.05
+        nu, nv = 10, 12
+        angs = [math.pi * j / nv for j in range(nv + 1)]
+        O = [[(-Lx / 2 + Lx * i / nu, -b * math.cos(v), c * math.sin(v)) for v in angs] for i in range(nu + 1)]
+        fl = 1.0 - t / (Lx / 2)
+        I = [[(-(Lx / 2 - t) + (Lx - 2 * t) * i / nu, -(b - t) * math.cos(v), (c - t) * math.sin(v)) for v in angs] for i in range(nu + 1)]
+
+        def skip(i, j, ctr):
+            return abs(ctr[0]) < dw / 2 + 0.2 and ctr[1] < 0.0 and ctr[2] < dh_req
+        _grid_shell(mesh, O, I, False, lambda ctr: (ctr[0], 0.0, ctr[2] * 0.2), skip, 0, 1)
+        for sx in (-1.0, 1.0):                           # closed ends
+            rim_o = [O[0 if sx < 0 else nu][j] for j in range(nv + 1)]
+            rim_i = [I[0 if sx < 0 else nu][j] for j in range(nv + 1)]
+            mesh.poly('cap', [(sx * Lx / 2, q[1], q[2]) for q in rim_o], [(q[1] / TOWER_TILE_W, q[2] / TOWER_TILE_W) for q in rim_o], (sx, 0.0, 0.0), 0)
+            mesh.poly('capin', [(sx * (Lx / 2 - t), q[1], q[2]) for q in rim_i], [(q[1] / TOWER_TILE_W, q[2] / TOWER_TILE_W) for q in rim_i], (-sx, 0.0, 0.0), 0)
+        _fan(mesh, [(-Lx / 2 + t, -(b - t)), (Lx / 2 - t, -(b - t)), (Lx / 2 - t, b - t), (-Lx / 2 + t, b - t)], 0.0, True, 1)
+        footprint = (Lx / 2, b)
+    else:                                               # DOME and SILO: surfaces of revolution
+        nu = 24
+        a, b = W / 2.0, D / 2.0
+        if form == 'SILO':
+            a = b = min(W, D) / 2.0
+            hlev = float(hut["level_height"])
+            levels = int(hut["levels"])
+            Hc = hlev * levels
+            prof = [(1.0, 0.5 * k) for k in range(int(Hc / 0.5))] + [(1.0, Hc)]
+            cap_h = a * 0.75
+            prof += [(math.cos(math.pi / 2 * k / 5), Hc + cap_h * math.sin(math.pi / 2 * k / 5)) for k in range(1, 6)]
+            ztop = Hc + cap_h
+        else:
+            ch = max(2.4, min(W, D) * 0.7)
+            prof = [(math.cos(math.pi / 2 * k / 8), ch * math.sin(math.pi / 2 * k / 8)) for k in range(9)]
+            ztop = ch
+        ths = [2 * math.pi * i / nu for i in range(nu)]
+        fxy_a, fxy_b = 1.0 - t / a, 1.0 - t / b
+        fz = 1.0 - t / ztop
+        O = [[(a * r * math.cos(th), b * r * math.sin(th), z) for (r, z) in prof] for th in ths]
+        I = [[(a * r * fxy_a * math.cos(th), b * r * fxy_b * math.sin(th), z * fz) for (r, z) in prof] for th in ths]
+        half = max(dw / (2.0 * max(a, b)), 0.55 * 2 * math.pi / nu)
+
+        def skip(i, j, ctr):
+            az = math.atan2(ctr[1] / b, ctr[0] / a)
+            diff = abs((az - door_az + math.pi) % (2 * math.pi) - math.pi)
+            return diff < half and ctr[2] < dh_req
+        _grid_shell(mesh, O, I, True, lambda ctr: (0.0, 0.0, ctr[2] * 0.3), skip, 0, 1)
+        if form == 'SILO':
+            inner = [(a * fxy_a * math.cos(th), b * fxy_b * math.sin(th)) for th in ths]
+            _fan(mesh, inner, 0.0, True, 1)
+            n_steps = int(math.ceil(hlev / 0.2))
+            rho = a * fxy_a - 0.5
+            theta0 = door_az + math.pi / 2.0
+            sweep = math.radians(270.0)
+            for k in range(levels - 1):
+                for i in range(n_steps):
+                    th = theta0 + sweep * i / n_steps
+                    stp = _TowerMesh()
+                    _soup_box(stp, 0.0, 0.0, k * hlev, 0.9, 0.5, (i + 1) * hlev / n_steps, 1)
+                    mesh.append(stp, rot=th, offset=(rho * math.cos(th), rho * math.sin(th), 0.0))
+            for k in range(1, levels):
+                z = k * hlev
+                r_c = max(0.3, a * fxy_a - 1.0)
+                disc = [(r_c * math.cos(th), r_c * math.sin(th)) for th in ths]
+                _fan(mesh, disc, z, True, 1)
+                _fan(mesh, disc, z - 0.2, False, 1)
+                open0, open1 = theta0 + math.radians(72.0), theta0 + math.radians(300.0)
+                for i2 in range(nu):
+                    ang = (ths[i2] + math.pi / nu - open0) % (2 * math.pi)
+                    if ang < (open1 - open0):
+                        continue
+                    t0, t1 = ths[i2], ths[(i2 + 1) % nu] if i2 + 1 < nu else ths[0] + 2 * math.pi
+                    ring = [(a * fxy_a * math.cos(t0), b * fxy_b * math.sin(t0)), (a * fxy_a * math.cos(t1), b * fxy_b * math.sin(t1)),
+                            (r_c * math.cos(t1), r_c * math.sin(t1)), (r_c * math.cos(t0), r_c * math.sin(t0))]
+                    _fan(mesh, ring, z, True, 1)
+                    _fan(mesh, ring, z - 0.2, False, 1)
+        else:
+            _fan(mesh, [(a * fxy_a * math.cos(th), b * fxy_b * math.sin(th)) for th in ths], 0.0, True, 1)
+        footprint = (a, b)
+    if st > 0.0:
+        hx, hy = footprint
+        res = _TowerMesh()
+        res.append(mesh, offset=(0.0, 0.0, st))
+        for k in range(8):
+            ang = 2 * math.pi * k / 8
+            _soup_box(res, 0.8 * hx * math.cos(ang), 0.8 * hy * math.sin(ang), 0.0, 0.26, 0.26, st, WOOD_SOURCE_SLOT)
+        under = [(hx * math.cos(2 * math.pi * k / 16), hy * math.sin(2 * math.pi * k / 16)) for k in range(16)]
+        _fan(res, under, st, False, WOOD_SOURCE_SLOT)
+        n = int(math.ceil(st / 0.2))
+        for i in range(n):
+            _soup_box(res, 0.0, -hy - (i + 0.5) * 0.3, 0.0, dw + 0.5, 0.3, max(0.1, st - i * (st / n) - 0.05), WOOD_SOURCE_SLOT)
+        return res
+    return mesh
 
 
 def _plan_build_hut(context, node, world, seed, path):

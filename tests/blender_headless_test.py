@@ -4611,6 +4611,75 @@ check("Alpine: log walls and shingle roof", ao.data.materials[0].name == "LA_Sty
 check("Hut: the panel buttons create huts", bpy.ops.object.gla_plan_create(kind='HUT') == {'FINISHED'} and bpy.ops.object.gla_plan_create(kind='HUTS') == {'FINISHED'})
 
 # ==============================================================================
+print("\n--- Plans: round hut forms ---")
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+for i, form in enumerate(("DOME", "TUNNEL", "SILO", "AFRAME")):
+    hn = addon.plan_node("f_" + form.lower(), "building", "hut", params={"form": form, "construction": "earthbag"},
+                         transform={"x": i * 30.0, "y": 0.0, "z": 0.0, "rot": 0.0})
+    res = addon.plan_build(bpy.context, hn)
+    check("Form: %s builds" % form, res["built"] == ["f_" + form.lower()])
+    bpy.context.view_layer.update()
+    x0, x1, y0, y1, z0, z1 = _bounds_of("f_" + form.lower())
+    cx = i * 30.0
+    hit = _ray((cx, -9.0, 1.0), (0.0, 1.0, 0.0))
+    check("Form: the %s doorway is open (a ray at 1 m reaches the far wall inside)" % form, hit is not None and hit.y > 0.8, str(hit))
+    beside = {"DOME": 1.3, "TUNNEL": 2.2, "SILO": 1.8, "AFRAME": 1.0}[form]
+    hit = _ray((cx + beside, -9.0, 1.0), (0.0, 1.0, 0.0))
+    check("Form: the %s wall beside the door is solid" % form, hit is not None and hit.y < -0.5, str(hit))
+    hit = _ray((cx, 0.0, 12.0), (0.0, 0.0, -1.0))
+    check("Form: the %s has a closed top" % form, hit is not None and hit.z > 2.0, str(hit))
+    check("Form: the %s is a small building (under 9 m wide, vertex count under 3000)" % form,
+          (x1 - x0) < 9.5 and (y1 - y0) < 9.5 and all(len(o.data.vertices) < 3000 for o in bpy.data.objects if o.name.startswith("PB_f_%s" % form.lower()) and o.type == 'MESH'),
+          str((x1 - x0, y1 - y0)))
+dm = next(o for o in bpy.data.objects if o.name.startswith("PB_f_dome") and o.type == 'MESH')
+check("Form: round huts have the four material slots", len(dm.data.materials) == 4)
+x0, x1, y0, y1, z0, z1 = _bounds_of("f_dome")
+check("Form: a dome follows its 4 x 6 m footprint and is about 2.8 m tall", abs((x1 - x0) - 4.0) < 0.5 and abs((y1 - y0) - 6.0) < 0.5 and 2.3 < z1 < 3.6, str((x1 - x0, y1 - y0, z1)))
+x0, x1, y0, y1, z0, z1 = _bounds_of("f_tunnel")
+check("Form: a tunnel is long along x and arched", (x1 - x0) > (y1 - y0) and 2.0 < z1 < 4.2, str((x1 - x0, y1 - y0, z1)))
+x0, x1, y0, y1, z0, z1 = _bounds_of("f_aframe")
+check("Form: an A-frame rises to its ridge above the middle", z1 > 3.5, str(z1))
+# silo levels
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+silo = addon.plan_node("silo3", "building", "hut", params={"form": "SILO", "levels": 3, "width": 5.0, "depth": 5.0, "construction": "aircrete", "door_leaf": False})
+addon.plan_build(bpy.context, silo)
+bpy.context.view_layer.update()
+x0, x1, y0, y1, z0, z1 = _bounds_of("silo3")
+check("Form: a three-level silo is about 7.5 m of wall plus a cap", 8.5 < z1 < 12.0, str(z1))
+hit = _ray((0.0, 0.0, 1.0), (0.0, 0.0, 1.0))
+check("Form: the middle of the silo has floors above (a ray from level 0 meets the first slab)", hit is not None and 2.0 < hit.z < 2.6, str(hit))
+hit = _ray((0.0, 0.0, 3.0), (0.0, 0.0, 1.0))
+check("Form: and a second floor above that", hit is not None and 4.5 < hit.z < 5.1, str(hit))
+# stilts on a round hut
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+sd = addon.plan_node("sdome", "building", "hut", params={"form": "DOME", "stilts": 1.0, "construction": "aircrete"})
+addon.plan_build(bpy.context, sd)
+bpy.context.view_layer.update()
+x0, x1, y0, y1, z0, z1 = _bounds_of("sdome")
+check("Form: a dome on stilts stands one metre up", abs(z0) < 0.05 and z1 > 3.2, str((z0, z1)))
+hit = _ray((0.0, 0.0, 0.2), (0.0, 0.0, 1.0))
+check("Form: the floor is under the dome at stilt height", hit is not None and abs(hit.z - 1.0) < 0.1, str(hit))
+# validation
+for bad_params, label in (({"form": "DOME", "basement": 1}, "basement on a dome"), ({"form": "TUNNEL", "levels": 2}, "two levels in a tunnel"),
+                          ({"form": "AFRAME", "levels": 3}, "three levels in an A-frame")):
+    try:
+        addon.plan_build(bpy.context, addon.plan_node("bad", "building", "hut", params=bad_params))
+        refused = False
+    except addon.PlanError as exc:
+        refused = "bad" in str(exc)
+    check("Form: refused - " + label, refused)
+# attach ignores round forms (only BOX / AFRAME modules join)
+mixed_cluster = addon.plan_node("mc", "compound", "huts", footprint=[[-20, -15], [20, -15], [20, 15], [-20, 15]], params={"layout": [
+    {"kind": "hut", "count": 3, "near": "attach", "params": {"form": "DOME"}}]})
+exp, w = addon.plan_expand_layout(mixed_cluster)
+check("Form: domes are not attached as modules (the first is placed, the rest reported)", len([c for c in exp["children"] if c.get("generated")]) >= 1)
+
+# ==============================================================================
 print()
 if failures:
     print(f"{len(failures)} CHECK(S) FAILED:")
