@@ -210,6 +210,12 @@ and the vegetation are placed at build time, so press **Build** again after big 
 `depth`, `resolution` (grid cell, smaller = finer and slower), `scatter` (vegetation density, 0 = none), and override the biome's numbers
 (`amplitude`, `feature_size`, `sea_level`, `island`, ...) — see [PLAN_FORMAT.md](PLAN_FORMAT.md).
 
+### Cities and districts
+
+The **City** button makes a walled city: a ring-and-spoke market centre, a grid craft quarter, an organic old town, gardens and a harbour road, joined by two
+avenues, inside a 250 m wall with four gates. Every district is a block of its own — give it another `road_generator`, `fill` rules, `style` or `infill` —
+and blocks keep their houses clear of each other's streets and houses, so you can add a district anywhere in the plan.
+
 ### Walled towns
 
 The **Town** button makes a round town: a stone wall with towers (none in the gateway) and a gate with an approach road, and inside

@@ -65,7 +65,7 @@ one (e.g. Egyptian) to learn how general the building plan must be (roof forms, 
 
 **M6 — Terrain.** *Done in 0.48.0:* Geometry Nodes heightfield around plans, flattening pads, sloped paths between plans, lakes/sea, six biomes with vegetation. Rivers done in 0.49.0, noise-based biome regions in 0.50.0. Later: polygon regions on one terrain, heightmap import, curved roads.
 
-**M7+ — Rungs 5-8.** Districts, settlements, town walls, instancing and per-district budgets, biomes.
+**M7+ — Rungs 5-8.** *Districts and a city example done in 0.53.0 (blocks avoid each other); still to do: per-district budgets and instancing for very large cities.* Districts, settlements, town walls, instancing and per-district budgets, biomes.
 
 ## Rules for the work
 * Existing output must not change until a plan type replaces it and passes the same tests.

@@ -33,7 +33,7 @@ from bpy_extras.io_utils import ExportHelper, ImportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 52, 0),
+    "version": (0, 53, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -9832,7 +9832,7 @@ def _anchor_world(root, resolved, ref):
     return None
 
 
-def _expand_block(node, seed, style=None):
+def _expand_block(node, seed, style=None, obstacles=()):
     """(generated buildings, road-end anchors, warnings) for one block."""
     params = node.get("params") or {}
     nodes, edges = plan_block_graph(node)
@@ -9846,7 +9846,7 @@ def _expand_block(node, seed, style=None):
     footprint = plan_footprint(node)
     container = [tuple(q) for q in footprint] if footprint and not plan_polygon_problem(footprint) else None
     roads = [_convex_hull(_edge_rect(nodes[a], nodes[b], w / 2.0)) for a, b, w in edges]
-    placed, out, warnings = [], [], []
+    placed, out, warnings = [list(o) for o in obstacles], [], []         # obstacles: what other plans already occupy (block coordinates)
     used_ids = {c.get("id") for c in node.get("children", [])}
     for child in node.get("children", []):
         cfp = plan_footprint(child)
@@ -9989,6 +9989,31 @@ def _plan_connect_roads(root):
             node["params"]["road_graph"]["z"] = {"from": round(a[2] - wz, 4), "to": round(b[2] - wz, 4)}
 
 
+def _block_obstacles(root, bpath):
+    """Convex outlines (in the block's own coordinates) of every building and road of the rest of the tree, so blocks
+    side by side -- the districts of a city -- never put a house on another district's street or house."""
+    resolved = plan_resolve(root)
+    bx, by, _bz, brot = resolved[bpath]["world"]
+    c, s_ = math.cos(math.radians(-brot)), math.sin(math.radians(-brot))
+    out = []
+
+    def to_local(poly):
+        return [((x - bx) * c - (y - by) * s_, (x - bx) * s_ + (y - by) * c) for x, y in poly]
+    for node, path in plan_iter(root):
+        if path[:len(bpath)] == bpath:
+            continue
+        wx, wy, _wz, wrot = resolved[path]["world"]
+        if node.get("type") == "building":
+            fp = plan_footprint({**node, "style": plan_pick_style(resolved[path]["style"], resolved[path]["seed"])})
+            if fp and not plan_polygon_problem(fp):
+                out.append(_convex_hull(to_local(_poly_transform(fp, wx, wy, wrot))))
+        elif node.get("type") == "block" and (node.get("params") or {}).get("road_graph"):
+            nodes, edges = plan_block_graph(node)
+            for a, b, w in edges:
+                out.append(_convex_hull(to_local(_poly_transform(_edge_rect(nodes[a], nodes[b], w / 2.0), wx, wy, wrot))))
+    return out
+
+
 def plan_expand_layout(root):
     """A copy of the tree in which every compound's layout rules are replaced by the child plans they produce.
     Returns (expanded_root, warnings). Generated children carry "generated": true; the input is not modified."""
@@ -10004,7 +10029,7 @@ def plan_expand_layout(root):
         _plan_materialise_shapes_and_roads(node, seed)
         generated, warn = _expand_compound(node, seed, style) if node.get("type") == "compound" else ([], [])
         if node.get("type") == "block":
-            generated, road_anchors, warn = _expand_block(node, seed, style)
+            generated, road_anchors, warn = _expand_block(node, seed, style, _block_obstacles(root, path))
             node["anchors"] = list(node.get("anchors", [])) + road_anchors
         warnings.extend("%s: %s" % ("/".join(path), w) for w in warn)
         node["children"] = node.get("children", []) + generated
@@ -12546,6 +12571,46 @@ def plan_new_example(scene, kind, existing_ids):
         return plan_node(unique("land"), "terrain", "terrain", transform=transform,
                          params={"biome": scene.wfc_plan_biome, "width": 240.0, "depth": 240.0},
                          children=[hamlet, farm, watch, path_])
+    if kind == 'CITY':
+        shape = {"kind": "circle", "width": 250.0, "depth": 250.0, "seed": 5}
+        n = len(plan_shape_polygon(shape))
+        houses = lambda w_, extra=None: {"kind": "house", "weight": w_, "size": {"width": [6.0, 9.0], "depth": [5.0, 7.0], "floors": [1, 3]},
+                                         "vary": {"brick_color": ["PLAIN", "OCHRE", "SLATE", "SAND", "ROSE"], "roof_color": ["TERRACOTTA", "SLATE"]}}
+        centre = plan_node(
+            "centre", "block", "market",
+            params={"road_generator": {"kind": "ring", "radius": 34.0, "rings": 1, "spokes": 8, "segments": 24},
+                    "shape": {"kind": "circle", "width": 84.0, "depth": 84.0, "seed": 5}, "road_width": 6.0, "lot_width": 9.0, "lot_depth": 12.0,
+                    "infill": 1.0, "fill": [{"kind": "chapel", "weight": 2}, houses(5), {"kind": "stable", "weight": 1}]})
+        east = plan_node(
+            "east", "block", "craft_quarter", transform={"x": 76.0, "y": 0.0, "z": 0.0, "rot": 0.0},
+            params={"road_generator": {"kind": "grid", "cols": 2, "rows": 3, "cell": 26.0}, "road_width": 5.0, "lot_width": 8.0, "lot_depth": 10.0,
+                    "infill": 1.5, "fill": [houses(6), {"kind": "stable", "weight": 2}, {"kind": "barn", "weight": 1}]})
+        west = plan_node(
+            "west", "block", "old_town", transform={"x": -76.0, "y": 0.0, "z": 0.0, "rot": 0.0},
+            params={"road_generator": {"kind": "organic", "cols": 2, "rows": 3, "cell": 26.0, "jitter": 0.2, "amplitude": 0.22},
+                    "road_width": 4.0, "lot_width": 7.0, "lot_depth": 9.0, "infill": 1.5, "fill": [houses(8), {"kind": "chapel", "weight": 0.3}]})
+        north = plan_node(
+            "north", "block", "gardens", transform={"x": 0.0, "y": 84.0, "z": 0.0, "rot": 0.0},
+            params={"road_generator": {"kind": "grid", "cols": 3, "rows": 1, "cell": 28.0}, "road_width": 4.0, "lot_width": 8.0, "lot_depth": 10.0,
+                    "infill": 1.0, "fill": [houses(3), {"kind": "tree", "weight": 3, "params": {"height": 6.0}}]})
+        south = plan_node(
+            "south", "block", "harbour_road", transform={"x": 0.0, "y": -84.0, "z": 0.0, "rot": 0.0},
+            params={"road_generator": {"kind": "grid", "cols": 3, "rows": 1, "cell": 28.0}, "road_width": 5.0, "lot_width": 9.0, "lot_depth": 10.0,
+                    "infill": 1.0, "fill": [houses(5), {"kind": "barn", "weight": 2}, {"kind": "stable", "weight": 1}]})
+        gate_roads = [plan_node("avenue_ns", "block", "road", params={
+            "road_graph": {"nodes": {"a": [0.0, -132.0], "b": [0.0, 125.0]}, "edges": [["a", "b"]]}, "road_width": 7.0, "fill": []}),
+            plan_node("avenue_ew", "block", "road", params={
+                "road_graph": {"nodes": {"a": [-125.0, 0.0], "b": [138.0, 0.0]}, "edges": [["a", "b"]]}, "road_width": 7.0, "fill": []})]
+        return plan_node(
+            unique("city"), "compound", "city", transform=transform, params={
+                "shape": shape, "fence": "stone", "fence_height": 6.0, "fence_thickness": 1.2, "gate_height": 4.6,
+                "layout": [{"kind": "tower", "at": "corners", "every": max(1, n // 12),
+                            "params": {"radius": 3.6, "height": 11.0, "interior": False, "props": False, "lights": False, "windows": 1}}]},
+            anchors=[{"id": "gate", "kind": "gate", "pos": [0.0, -125.0, 0.0], "dir": 270.0, "width": 7.0, "level": 0},
+                     {"id": "gate_east", "kind": "gate", "pos": [125.0, 0.0, 0.0], "dir": 0.0, "width": 7.0, "level": 0},
+                     {"id": "gate_west", "kind": "gate", "pos": [-125.0, 0.0, 0.0], "dir": 180.0, "width": 7.0, "level": 0},
+                     {"id": "gate_north", "kind": "gate", "pos": [0.0, 125.0, 0.0], "dir": 90.0, "width": 7.0, "level": 0}],
+            children=[centre, east, west, north, south] + gate_roads)
     if kind == 'TOWN':
         shape = {"kind": "circle", "width": 136.0, "depth": 136.0, "seed": 11}
         n = len(plan_shape_polygon(shape))
@@ -12660,7 +12725,7 @@ class OBJECT_OT_PlanCreate(bpy.types.Operator):
                               ('HOUSE', "House", ""), ('CHAPEL', "Chapel", ""), ('STABLE', "Stable", ""),
                               ('FORTRESS', "Fortress", ""), ('FARM', "Farm", ""), ('HAMLET', "Hamlet", ""),
                               ('STREET', "Street", ""), ('BLOCK', "Block", ""),
-                              ('HUT', "Hut", ""), ('HUTS', "Hut cluster", ""), ('TERRAIN', "Terrain", ""), ('TOWN', "Walled town", "")])
+                              ('HUT', "Hut", ""), ('HUTS', "Hut cluster", ""), ('TERRAIN', "Terrain", ""), ('TOWN', "Walled town", ""), ('CITY', "City", "")])
 
     def execute(self, context):
         plan = plan_new_example(context.scene, self.kind, set(plan_list_ids()))
@@ -14038,7 +14103,7 @@ class VIEW3D_PT_GLAPlans(bpy.types.Panel):
         for kind, label in (('FARM', "Farm"), ('HAMLET', "Hamlet"), ('STREET', "Street"), ('BLOCK', "Block")):
             row.operator("object.gla_plan_create", text=label).kind = kind
         row = layout.row(align=True)
-        for kind, label in (('HUT', "Hut"), ('HUTS', "Huts"), ('TOWN', "Town"), ('TERRAIN', "Terrain")):
+        for kind, label in (('HUT', "Hut"), ('HUTS', "Huts"), ('TOWN', "Town"), ('CITY', "City"), ('TERRAIN', "Terrain")):
             row.operator("object.gla_plan_create", text=label).kind = kind
         for plan_id in plan_list_ids():
             box = layout.box()

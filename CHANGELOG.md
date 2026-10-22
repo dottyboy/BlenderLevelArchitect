@@ -3,6 +3,13 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.53.0 — plans: districts and a city
+
+- **Blocks see each other**: a block now keeps its lots clear of every building and road of the rest of the plan (earlier districts, explicit buildings,
+  other roads), so districts side by side never overlap.
+- **City example** (**City** button): a round wall (250 m) with towers and four gates, two avenues, and five districts — a ring-and-spoke market centre,
+  a grid craft quarter, an organic old town, gardens with trees and a harbour road — each its own block with its own road generator, `fill` rules and `infill`.
+
 ## 0.52.0 — plans: bridges, ridged biomes
 
 - **Bridges**: where a block's road crosses a river the road no longer dams it; the river wins under the road and a stone bridge (deck, parapets, end posts)

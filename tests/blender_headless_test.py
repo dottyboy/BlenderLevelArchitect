@@ -4989,6 +4989,36 @@ addon.plan_build(bpy.context, {**bridge_plan, "params": {**bridge_plan["params"]
 check("Ridged: the tree exposes a Ridged input", "Ridged" in {i.name for i in bpy.data.objects["PB_land_Terrain_land"].modifiers[0].node_group.interface.items_tree})
 
 # ==============================================================================
+print("\n--- Plans: districts (a city of blocks) ---")
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+city = addon.plan_new_example(bpy.context.scene, 'CITY', set())
+exp, cw = addon.plan_expand_layout(city)
+blocks = [c for c in exp["children"] if c["type"] == "block" and c["kind"] != "road"]
+check("City: five districts", len(blocks) == 5, str([b["id"] for b in blocks]))
+allp = []
+for b in blocks:
+    for c in b["children"]:
+        if c.get("generated"):
+            t_ = c["transform"]
+            allp.append((b["id"], addon._convex_hull(addon._poly_transform(addon.plan_footprint(c), b["transform"]["x"] + t_["x"], b["transform"]["y"] + t_["y"], t_["rot"]))))
+check("City: districts hold many buildings (90+)", len(allp) >= 90, str(len(allp)))
+gap = min(addon._convex_gap(a[1], b[1]) for i, a in enumerate(allp) for b in allp[i + 1:])
+check("City: no two buildings of any districts overlap", gap > 0.0, "%.2f" % gap)
+avenues = [c for c in exp["children"] if c["id"].startswith("avenue")]
+rects = []
+for av in avenues:
+    nodes, edges = addon.plan_block_graph(av)
+    for a_, b_, w_ in edges:
+        rects.append(addon._convex_hull(addon._edge_rect(nodes[a_], nodes[b_], w_ / 2.0)))
+check("City: no house stands on a main avenue", min(addon._convex_gap(p[1], r) for p in allp for r in rects) > 0.0)
+check("City: four gates and wall towers", len([a for a in exp["anchors"] if a["kind"] == "gate"]) == 4 and len([c for c in exp["children"] if c.get("generated") and c["kind"] == "tower"]) >= 6)
+res = addon.plan_build(bpy.context, city)
+check("City: it builds (110+ parts)", len(res["built"]) >= 110, str(len(res["built"])))
+
+# ==============================================================================
 print("\n--- Plans: walled town ---")
 for o in list(bpy.data.objects):
     bpy.data.objects.remove(o, do_unlink=True)
