@@ -3,6 +3,12 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.49.0 — plans: rivers
+
+- **Rivers** on terrain plans: `params.rivers` is `"auto"` (default: one meandering river in meadow, forest and mountains, routed to keep
+  clear of your plans), `"none"`, or a list of `{"path": [[x, y], ...], "width": 2..40}`. The channel is carved by the same Geometry Nodes
+  tree, the bed never rises downstream, a water ribbon follows it, and vegetation keeps off the banks.
+
 ## 0.48.0 — plans: terrain, biomes, towns
 
 - **Terrain plans** (`type: "terrain"`): a gridded ground sheet whose relief and colours come from a **Geometry Nodes** modifier

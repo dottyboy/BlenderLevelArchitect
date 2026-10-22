@@ -33,7 +33,7 @@ from bpy_extras.io_utils import ExportHelper, ImportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 48, 0),
+    "version": (0, 49, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -11520,6 +11520,7 @@ PLAN_TERRAIN_RANGES = {"width": (40.0, 1000.0), "depth": (40.0, 1000.0), "resolu
                        "scatter": (0.0, 4.0)}
 PLAN_TERRAIN_OPTIONAL = {"amplitude": (0.0, 120.0), "feature_size": (10.0, 400.0), "detail": (0.0, 8.0),
                          "roughness": (0.0, 1.0), "base": (-50.0, 50.0), "sea_level": (-150.0, 150.0), "island": (0.0, 1.0)}
+PLAN_BIOME_RIVERS = {"meadow": 1, "forest": 1, "mountain": 1}          # rivers made when params.rivers is "auto" (the default)
 PLAN_TERRAIN_SKIP_KINDS = ("tree", "barrel", "crate", "haystack", "bush", "rock", "cactus")
 
 
@@ -11527,7 +11528,7 @@ def plan_terrain_params(params):
     """Terrain defaults + the biome's numbers + the node's own params, validated. Raises PlanError."""
     params = dict(params or {})
     merged = {**PLAN_TERRAIN_DEFAULTS, **{k: v for k, v in params.items() if k in PLAN_TERRAIN_DEFAULTS or k in PLAN_TERRAIN_OPTIONAL
-                                          or k == "water"}}
+                                          or k in ("water", "rivers")}}
     if merged["biome"] not in PLAN_BIOMES:
         raise PlanError("params.biome = %r is not one of %s" % (merged["biome"], ", ".join(PLAN_BIOMES)))
     for key, (lo, hi) in {**PLAN_TERRAIN_RANGES, **{k: v for k, v in PLAN_TERRAIN_OPTIONAL.items() if k in params}}.items():
@@ -11546,6 +11547,17 @@ def plan_terrain_params(params):
     merged["sea_level"] = float(params.get("sea_level", spec["sea"]))
     merged["island"] = float(params.get("island", spec["island"]))
     merged["water"] = bool(params.get("water", spec["water"]))
+    rivers = params.get("rivers", "auto")
+    if rivers not in ("auto", "none"):
+        if not isinstance(rivers, list):
+            raise PlanError("params.rivers must be 'auto', 'none' or a list of {path, width}")
+        for r in rivers:
+            pts = r.get("path") if isinstance(r, dict) else None
+            if not (isinstance(pts, list) and len(pts) >= 2 and all(isinstance(q, (list, tuple)) and len(q) == 2 for q in pts)):
+                raise PlanError("params.rivers: each river needs a 'path' of at least two [x, y] points")
+            if not isinstance(r.get("width", 6.0), (int, float)) or not 2.0 <= r.get("width", 6.0) <= 40.0:
+                raise PlanError("params.rivers: width must be 2..40")
+    merged["rivers"] = rivers
     return merged
 
 
@@ -11638,8 +11650,14 @@ def _terrain_pad_weights(X, Y, pads, margin, inner=1.2):
     return wmax, np.where(wsum > 1e-9, hsum / np.maximum(wsum, 1e-9), 0.0)
 
 
-def _terrain_grid_mesh(tp, pads, name):
-    """The ground sheet: (nx+1)*(ny+1) vertices at z = 0 plus a skirt ring, with the four attributes."""
+def _terrain_ring(nx, ny):
+    """Vertex ids around the edge of the grid, counter-clockwise (the skirt hangs from them)."""
+    return (list(range(nx + 1)) + [j * (nx + 1) + nx for j in range(1, ny + 1)] +
+            [ny * (nx + 1) + i for i in range(nx - 1, -1, -1)] + [j * (nx + 1) for j in range(ny - 1, 0, -1)])
+
+
+def _terrain_arrays(tp, pads, river_pads=()):
+    """Grid coordinates and the pad weight / height / edge arrays (rivers sit under plan pads in priority)."""
     import numpy as np
     w, d, res = tp["width"], tp["depth"], tp["resolution"]
     nx, ny = max(2, int(round(w / res))), max(2, int(round(d / res)))
@@ -11647,11 +11665,33 @@ def _terrain_grid_mesh(tp, pads, name):
     X, Y = np.meshgrid(xs, ys)
     X, Y = X.ravel(), Y.ravel()
     pad_w, pad_h = _terrain_pad_weights(X, Y, pads, max(tp["pad_margin"], tp["amplitude"] * 0.9), inner=1.2 + 0.75 * res)
+    if river_pads:
+        rw, rh = _terrain_pad_weights(X, Y, river_pads, max(4.0, tp["river_bank"]), inner=0.0)
+        total = pad_w + (1.0 - pad_w) * rw
+        pad_h = np.where(total > 1e-9, (pad_w * pad_h + (1.0 - pad_w) * rw * rh) / np.maximum(total, 1e-9), pad_h)
+        pad_w = 1.0 - (1.0 - pad_w) * (1.0 - rw)
     edge = np.clip(np.sqrt((X / (w / 2.0)) ** 2 + (Y / (d / 2.0)) ** 2), 0.0, 1.5)
-    ring = (list(range(nx + 1)) +
-            [j * (nx + 1) + nx for j in range(1, ny + 1)] +
-            [ny * (nx + 1) + i for i in range(nx - 1, -1, -1)] +
-            [j * (nx + 1) for j in range(ny - 1, 0, -1)])
+    return nx, ny, X, Y, pad_w, pad_h, edge
+
+
+def _terrain_write_attributes(mesh, nx, ny, pad_w, pad_h, edge):
+    import numpy as np
+    ring_idx = np.array(_terrain_ring(nx, ny))
+    k, n_top = len(ring_idx), (nx + 1) * (ny + 1)
+    # skirt: 0 on the sheet, a hair above 0 on the ring that carries the skirt colour, 1 on the ring that drops away
+    for attr, top in (("pad_h", pad_h), ("pad_w", pad_w), ("edge", edge), ("skirt", None)):
+        a = mesh.attributes.get(attr) or mesh.attributes.new(attr, 'FLOAT', 'POINT')
+        if top is None:
+            vals = np.concatenate([np.zeros(n_top), np.full(k, 0.002), np.ones(k)])
+        else:
+            vals = np.concatenate([top, top[ring_idx], top[ring_idx]])
+        a.data.foreach_set("value", vals.astype(np.float32))
+
+
+def _terrain_grid_mesh(tp, pads, name):
+    """The ground sheet: (nx+1)*(ny+1) vertices at z = 0 plus two skirt rings, with the four attributes."""
+    nx, ny, X, Y, pad_w, pad_h, edge = _terrain_arrays(tp, pads)
+    ring = _terrain_ring(nx, ny)
     n_top = (nx + 1) * (ny + 1)
     verts = ([(float(x), float(y), 0.0) for x, y in zip(X, Y)] + [(float(X[v]), float(Y[v]), 0.0) for v in ring]
              + [(float(X[v]), float(Y[v]), 0.0) for v in ring])
@@ -11664,13 +11704,52 @@ def _terrain_grid_mesh(tp, pads, name):
     mesh.update()
     for poly in mesh.polygons:
         poly.use_smooth = True
-    ring_idx = np.array(ring)
-    # skirt: 0 on the sheet, a hair above 0 on the ring that carries the skirt colour, 1 on the ring that drops away
-    for attr, top, extra in (("pad_h", pad_h, pad_h[ring_idx]), ("pad_w", pad_w, pad_w[ring_idx]),
-                             ("edge", edge, edge[ring_idx]), ("skirt", np.zeros(n_top), np.full(k, 0.002))):
-        a = mesh.attributes.new(attr, 'FLOAT', 'POINT')
-        a.data.foreach_set("value", np.concatenate([top, extra, extra if attr != "skirt" else np.ones(k)]).astype(np.float32))
+    _terrain_write_attributes(mesh, nx, ny, pad_w, pad_h, edge)
     return mesh, (nx, ny)
+
+
+def _terrain_river_paths(tp, pads, seed):
+    """The rivers to cut: explicit paths, or (auto) meandering ones from one side to the other that keep clear of the pads."""
+    import numpy as np
+    spec_n = PLAN_BIOME_RIVERS.get(tp["biome"], 0)
+    if isinstance(tp["rivers"], list):
+        return [{"path": [tuple(map(float, q)) for q in r["path"]], "width": float(r.get("width", 6.0))} for r in tp["rivers"]]
+    if tp["rivers"] == "none" or not spec_n:
+        return []
+    rng = random.Random(seed + 4242)
+    w, d = tp["width"], tp["depth"]
+    best, best_clear = None, -1.0
+    for attempt in range(8):
+        x0 = rng.uniform(-w * 0.38, w * 0.38)
+        wob = rng.uniform(18.0, 40.0)
+        phase = rng.uniform(0, 100)
+        pts = [(max(-w / 2 + 3, min(w / 2 - 3, x0 + (plan_fbm2(y / 70.0 + phase, 0.5, seed, 3) - 0.5) * 2 * wob * 2.0 + math.sin(y / 38.0 + phase) * wob * 0.6)), y)
+               for y in np.arange(-d / 2.0, d / 2.0 + 0.1, 10.0)]
+        px, py = np.array([q[0] for q in pts]), np.array([q[1] for q in pts])
+        clear = 1e9
+        for k, g, _h in pads:
+            dist = _np_poly_dist(px, py, g) if k == "poly" else _np_capsule_dist(px, py, g[0], g[1], g[2])
+            clear = min(clear, float(dist.min()))
+        if clear > best_clear:
+            best, best_clear = pts, clear
+    return [{"path": best, "width": 7.0}]
+
+
+def _terrain_river_profile(path, sampler, sea):
+    """Bed heights along the path: the terrain's own height, forced never to rise downstream (the water must run downhill),
+    then eased and lowered a little so the bed sits in a channel."""
+    pts = [(float(x), float(y)) for x, y in path]
+    if pts[0][1] > pts[-1][1]:
+        pts.reverse()
+    hs = [sampler(x, y)[0] for x, y in pts]
+    low = []
+    for h in hs:
+        low.append(min(h, low[-1]) if low else h)
+    for _ in range(3):
+        low = [low[0]] + [(low[i - 1] + 2 * low[i] + low[i + 1]) / 4.0 for i in range(1, len(low) - 1)] + [low[-1]]
+        for i in range(1, len(low)):
+            low[i] = min(low[i], low[i - 1])
+    return pts, [h - 0.9 for h in low]
 
 
 def _gn_in(node, name, kind=None):
@@ -12034,15 +12113,46 @@ def _plan_build_terrain(context, root, resolved, node, path):
     mod.node_group = group
     objects = [obj]
     _plan_adopt_objects(context.scene, path, info["world"], objects)
-    context.view_layer.update()
-    ev = obj.evaluated_get(context.evaluated_depsgraph_get())
-    ev_mesh = ev.to_mesh()
-    co = np.empty(len(ev_mesh.vertices) * 3, dtype=np.float32)
-    ev_mesh.vertices.foreach_get("co", co)
-    ev.to_mesh_clear()
-    heights = co.reshape(-1, 3)[:(nx + 1) * (ny + 1), 2].reshape(ny + 1, nx + 1).astype(float)
+
+    def read_heights():
+        context.view_layer.update()
+        ev = obj.evaluated_get(context.evaluated_depsgraph_get())
+        ev_mesh = ev.to_mesh()
+        co = np.empty(len(ev_mesh.vertices) * 3, dtype=np.float32)
+        ev_mesh.vertices.foreach_get("co", co)
+        ev.to_mesh_clear()
+        return co.reshape(-1, 3)[:(nx + 1) * (ny + 1), 2].reshape(ny + 1, nx + 1).astype(float)
+    heights = read_heights()
     sea = tp["sea_level"]
-    stats = {"min": float(heights.min()), "max": float(heights.max())}
+    river_pads, river_soup, river_stats = [], _TowerMesh(), 0
+    first = _terrain_sampler(heights, nx, ny, tp["width"], tp["depth"])
+    for river in _terrain_river_paths(tp, pads, info["seed"]):
+        pts, bed = _terrain_river_profile(river["path"], first, sea)
+        half = river["width"] / 2.0
+        for i in range(len(pts) - 1):
+            river_pads.append(("capsule", (pts[i], pts[i + 1], half, bed[i], bed[i + 1]), 0.0))
+            ax, ay = pts[i]
+            bx, by = pts[i + 1]
+            ln = math.hypot(bx - ax, by - ay) or 1.0
+            nxn, nyn = -(by - ay) / ln * half * 1.25, (bx - ax) / ln * half * 1.25
+            za, zb = bed[i] + 0.75, bed[i + 1] + 0.75
+            river_soup.poly('river', [(ax + nxn, ay + nyn, za), (bx + nxn, by + nyn, zb), (bx - nxn, by - nyn, zb), (ax - nxn, ay - nyn, za)],
+                            [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)], (0.0, 0.0, 1.0), 0)
+        river_stats += 1
+    if river_pads:
+        tp["river_bank"] = 8.0
+        _n, _m, _X, _Y, pad_w, pad_h, edge = _terrain_arrays(tp, pads, river_pads)
+        _terrain_write_attributes(mesh, nx, ny, pad_w, pad_h, edge)
+        mesh.update()
+        mesh.update_tag()
+        obj.update_tag()
+        heights = read_heights()
+        rmesh = river_soup.to_mesh("River_" + node["id"])
+        rmesh.materials.append(_water_material())
+        robj = bpy.data.objects.new(rmesh.name, rmesh)
+        context.scene.collection.objects.link(robj)
+        _plan_adopt_objects(context.scene, path + ("river",), info["world"], [robj])
+    stats = {"min": float(heights.min()), "max": float(heights.max()), "rivers": river_stats}
     if tp["water"] and heights.min() < sea - 0.2:
         w, d = tp["width"], tp["depth"]
         soup = _TowerMesh()
@@ -12055,7 +12165,7 @@ def _plan_build_terrain(context, root, resolved, node, path):
         _plan_adopt_objects(context.scene, path + ("water",), info["world"], [wobj])
         stats["water"] = True
     sampler = _terrain_sampler(heights, nx, ny, tp["width"], tp["depth"])
-    stats["scatter"] = _terrain_scatter(context, tp, sampler, pads, info["seed"], path, info["world"], sea) if tp["scatter"] > 0 else {}
+    stats["scatter"] = _terrain_scatter(context, tp, sampler, pads + river_pads, info["seed"], path, info["world"], sea) if tp["scatter"] > 0 else {}
     stats["pads"] = len(pads)
     return stats
 

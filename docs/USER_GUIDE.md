@@ -196,6 +196,9 @@ A path between two plans on different heights slopes from one to the other.
 | Mountains | tall relief, forest in the valleys, rock and snow above |
 | Island | land in the middle, sea all around, beach, trees and bushes |
 
+Meadow, forest and mountain terrains get a **river** by default (`rivers`: `"auto"`, `"none"`, or your own paths with a width); it meanders
+around your plans, always runs downhill and keeps trees off its banks.
+
 The relief is made by a **Geometry Nodes** modifier on the terrain object (`GLA Terrain`): change *Amplitude, Feature Size, Detail,
 Roughness, Seed, Base, Sea Level* or *Island* in the modifier panel and the ground, colours and water-line react at once (the water plane
 and the vegetation are placed at build time, so press **Build** again after big changes). In the plan itself you can set `biome`, `width`,

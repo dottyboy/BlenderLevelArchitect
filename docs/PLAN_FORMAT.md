@@ -100,7 +100,10 @@ placed on it and the ground is flattened under them.
   limits, a noise-based cluster mask). Points are tested against the evaluated terrain, kept away from pads and each other, and merged
   into one mesh per rule (`PB_<id>.scatter`).
 * `"fill": []` on a block means "a bare road, no lots" (the default fill still makes houses when the key is absent).
-* Not yet: rivers, biome regions blended across one terrain, terrain from a heightmap image, roads that curve with the ground.
+* **Rivers.** `"rivers": "auto" | "none" | [{"path": [[x, y], ...], "width": 6.0}]` (terrain coordinates; auto = one river in meadow, forest and
+  mountains, the best of several meanders by distance from the plans). The bed follows the terrain but never rises downstream (it runs from the
+  low-y end to the high-y end), is cut as a flat channel with banks easing over 8 m, and gets a water ribbon 0.75 m above the bed. Plan pads win over rivers.
+* Not yet: biome regions blended across one terrain, terrain from a heightmap image, roads that curve with the ground.
 
 ## 6. Storage
 

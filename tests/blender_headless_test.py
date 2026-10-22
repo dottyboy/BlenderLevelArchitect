@@ -4851,6 +4851,40 @@ check("Terrain: the example builds buildings, a path and a forest",
 
 
 # ==============================================================================
+print("\n--- Plans: rivers ---")
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+river_path = [[50.0, -80.0], [55.0, -40.0], [48.0, 0.0], [54.0, 40.0], [50.0, 80.0]]
+addon.plan_build(bpy.context, _terrain_plan(rivers=[{"path": river_path, "width": 8.0}], scatter=0.0))
+bpy.context.view_layer.update()
+check("Rivers: a river object is built", any(o.name.startswith("PB_land.river") for o in bpy.data.objects))
+beds = [(_terrain_z(x, y), _terrain_z(x - 22.0, y)) for x, y in ((50.0, -80.0 + 1), (55.0, -40.0), (48.0, 0.0), (54.0, 40.0))]
+check("Rivers: the channel lies below the ground 22 m beside it", all(a < b + 0.05 for a, b in beds), str(beds))
+bed_z = [_terrain_z(x, y) for x, y in ((55.0, -40.0), (48.0, 0.0), (54.0, 40.0))]
+check("Rivers: the bed never rises downstream (the water runs south to north, so it falls)", bed_z[0] >= bed_z[1] - 0.3 and bed_z[1] >= bed_z[2] - 0.3, str(bed_z))
+rv = [o for o in bpy.data.objects if o.name.startswith("PB_land.river")][0]
+check("Rivers: the water ribbon floats above the bed", all(v.co.z > _terrain_z(v.co.x, v.co.y) - 0.3 for v in rv.data.vertices if abs(v.co.y) < 70 and abs(v.co.y - 0) < 70))
+addon.plan_build(bpy.context, _terrain_plan(rivers="none"))
+check("Rivers: 'none' builds no river", not any(o.name.startswith("PB_land.river") for o in bpy.data.objects))
+addon.plan_build(bpy.context, _terrain_plan(biome="forest"))
+check("Rivers: forests get an automatic river", any(o.name.startswith("PB_land.river") for o in bpy.data.objects))
+sig = sorted(tuple(round(c, 2) for c in v.co) for o in bpy.data.objects if o.name.startswith("PB_land.river") for v in o.data.vertices)
+addon.plan_build(bpy.context, _terrain_plan(biome="forest"))
+sig2 = sorted(tuple(round(c, 2) for c in v.co) for o in bpy.data.objects if o.name.startswith("PB_land.river") for v in o.data.vertices)
+check("Rivers: the automatic river is deterministic", sig == sig2 and len(sig) > 8)
+check("Rivers: the house on its pad is still flat (2.0)", abs(_terrain_z(20.0, 10.0) - 2.0) < 0.05)
+addon.plan_build(bpy.context, _terrain_plan(biome="desert"))
+check("Rivers: deserts have none", not any(o.name.startswith("PB_land.river") for o in bpy.data.objects))
+for bad in ({"rivers": "lots"}, {"rivers": [{"path": [[0, 0]]}]}, {"rivers": [{"path": [[0, 0], [1, 1]], "width": 1.0}]}):
+    try:
+        addon.plan_terrain_params(bad)
+        check("Rivers: rejects %s" % str(bad)[:40], False)
+    except addon.PlanError:
+        check("Rivers: rejects %s" % str(bad)[:40], True)
+
+# ==============================================================================
 print("\n--- Plans: walled town ---")
 for o in list(bpy.data.objects):
     bpy.data.objects.remove(o, do_unlink=True)
