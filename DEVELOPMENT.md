@@ -4,7 +4,7 @@ Internal dev-facing doc: what's built, what's known-broken, what's next. Not for
 (see `dist/README.md` for that). Source of truth for the addon's actual behavior is always
 `levelArchitect_v2.py` — this file can drift out of date; the code can't.
 
-Current version: **0.43.0** (see `bl_info` in the source file).
+Current version: **0.44.0** (see `bl_info` in the source file).
 
 §2 (Development tree) was condensed 2026-08-21 — dropped the blow-by-blow investigation
 narrative and per-run stress-test numbers from older, fully-resolved entries, kept every
@@ -753,6 +753,7 @@ GN complexity there specifically.
       too zoomed-out to show doorway-level detail) confirmed the frame visibly follows the wall's
       curve right at the opening, not standing at a mismatched straight angle against it.
 
+- [x] **Plans, M1 (0.44.0).** `gla-plan/1` core (`plan_*` functions, plain dicts), storage as `Plan_<path>` collections + `.plan.json`, `PLAN_BUILDERS` wrapping the Tower/Castle operators via scene settings (output identical to the panel; tests compare), Plans sub-panel. Roadmap: docs/WORLD_GENERATOR_PLAN.md, format: docs/PLAN_FORMAT.md.
 - [x] **Panel reorganisation (0.43.0).** Setup/Walls split into sections (Floors & Elevation, Advanced, Tools, Shape/Masonry/Windows); tab enum is now SETUP/WALLS/CONNECTIONS/PROPS/EXPORT/STRUCTURES plus `wfc_structure_kind` (Tower/Castle); `OBJECT_OT_GenerateAllSteps` runs Steps 1-5 (confirm via `invoke_confirm` when `_level_step_done` finds output, Step 3 skipped when a level has no stairs); Step buttons show a check mark. `tests/blender_headless_test.py` draws every tab on a stub layout.
 - [x] **Furniture, tints, sub-levels (0.42.0).** `room_tint_map`: greedy colouring of rooms by adjacency (any two cells of
       different rooms within 2 tiles, same level), each room trying tints from its own preferred slot. Sub-level packages:

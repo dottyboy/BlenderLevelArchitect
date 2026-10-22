@@ -3,7 +3,7 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
-## Unreleased — plans (M1)
+## 0.44.0 — plans (M1)
 
 - **Plans, experimental.** A new collapsed *Plans (experimental)* sub-panel: create a starter plan at the 3D cursor
   (Tower, Castle, or Castle Grounds = a compound holding a castle and a watchtower), Build, Save to `.plan.json`, Load,

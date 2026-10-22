@@ -30,6 +30,7 @@ brick-textured masonry, real doors and windows, spiral-stair towers, ruins, and 
 | **Structures** | A round **Tower** (spiral stairs, railing, lanterns, furniture) and a walled **Castle** (four towers, wall walk, gate, furnished keep). |
 | **Ruins** | One slider breaks towers, castles and walls down: stepped jagged tops, breaches, collapsed arches, rubble. Doorways stay passable. |
 | **Doors, windows, props** | Arched / pointed / flat doors with swinging panels, windows with glass, torches with real lights, themed furniture. |
+| **Plans** *(experimental)* | Describe a site as a nested plan (castle grounds with a castle and a watchtower), store it in the .blend and as JSON, rebuild it any time. First step towards farms, villages and towns — see [the roadmap](docs/WORLD_GENERATOR_PLAN.md). |
 | **Engine export** | glTF/GLB, collision mesh, and **game packages**: glb + JSON of walkable areas, rooms, stairs, lights and props — per floor if you like. |
 | **Tested** | 500+ automated checks (ray-cast passability, normals, vertex budgets, round-trips) on Blender 4.2 LTS, 5.2.1 and 5.2.2. |
 
