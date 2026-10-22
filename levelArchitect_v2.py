@@ -33,7 +33,7 @@ from bpy_extras.io_utils import ExportHelper, ImportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 47, 0),
+    "version": (0, 48, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -9232,6 +9232,11 @@ def plan_validate(root):
         gen_ = (node.get("params") or {}).get("road_generator")
         if gen_ is not None and (not isinstance(gen_, dict) or gen_.get("kind", "grid") not in ("grid", "organic", "ring")):
             errors.append("%s: road_generator.kind must be grid, organic or ring" % where)
+        if node.get("type") == "terrain":
+            try:
+                plan_terrain_params(node.get("params"))
+            except PlanError as exc:
+                errors.append("%s: %s" % (where, exc))
         if node.get("type") == "block":
             problem = _block_graph_problem(node.get("params") or {})
             if problem:
@@ -9608,6 +9613,9 @@ def _expand_compound(node, seed, style=None):
             for vi, (vx, vy) in enumerate(container):
                 if vi % every:
                     continue
+                if any(a_.get("kind") == "gate" and math.hypot(vx - a_["pos"][0], vy - a_["pos"][1]) < float(a_.get("width", 4.0)) / 2.0 + 4.0
+                       for a_ in node.get("anchors", [])):
+                    continue                                              # never a tower in the gateway
                 poly = _convex_hull(_poly_transform(base, vx, vy, 0.0))
                 if any(_convex_gap(poly, q) <= 0.0 for q in placed):
                     warnings.append("layout: a corner %s overlaps another building and was skipped" % rule["kind"])
@@ -9825,7 +9833,9 @@ def _expand_block(node, seed, style=None):
     if not edges:
         return [], [], []
     p = {**PLAN_BLOCK_DEFAULTS, **params}
-    fills = params.get("fill") or PLAN_BLOCK_DEFAULT_FILL
+    fills = params["fill"] if "fill" in params else PLAN_BLOCK_DEFAULT_FILL        # "fill": [] = a bare road, no lots
+    if not fills:
+        return [], [], []
     rng = random.Random(plan_child_seed(seed, "block"))
     footprint = plan_footprint(node)
     container = [tuple(q) for q in footprint] if footprint and not plan_polygon_problem(footprint) else None
@@ -9924,6 +9934,8 @@ def _plan_connect_roads(root):
             return [round(dx * c - dy * s, 4), round(dx * s + dy * c, 4)]
         node["params"] = dict(params)
         node["params"]["road_graph"] = {"nodes": {"from": local(a), "to": local(b)}, "edges": [["from", "to"]]}
+        if abs(a[2] - wz) > 1e-6 or abs(b[2] - wz) > 1e-6:           # a path between plans on different heights slopes
+            node["params"]["road_graph"]["z"] = {"from": round(a[2] - wz, 4), "to": round(b[2] - wz, 4)}
 
 
 def plan_expand_layout(root):
@@ -10975,18 +10987,29 @@ def _clip_segment_to_convex(p, q, poly):
     return (t0, t1)
 
 
-def _build_road_mesh(nodes, edges):
+def _build_road_mesh(nodes, edges, zs=None):
     """Flat stone ribbons, one per edge, a hair above the ground (each edge a touch higher so overlaps at
     junctions do not fight; ends are extended by half a width so junctions and dead ends are covered),
     plus a raised kerb along both sides of every edge, cut away wherever another road crosses."""
     soup = _TowerMesh()
     tile = TOWER_TILE_W
     rects = [_edge_rect(nodes[a], nodes[b], w / 2.0) for a, b, w in edges]
+    zs = zs or {}
+
+    def ground(i, a, b, x, y):                                          # height of edge i at (x, y): linear between its nodes
+        za, zb = zs.get(a, 0.0), zs.get(b, 0.0)
+        if za == zb:
+            return za
+        (ax_, ay_), (bx_, by_) = nodes[a], nodes[b]
+        t = ((x - ax_) * (bx_ - ax_) + (y - ay_) * (by_ - ay_)) / max((bx_ - ax_) ** 2 + (by_ - ay_) ** 2, 1e-12)
+        return za + (zb - za) * min(max(t, 0.0), 1.0)
     for i, (a, b, w) in enumerate(edges):
         z = 0.03 + 0.0006 * (i % 40)
-        quad = [(x, y, z) for x, y in rects[i]]
+        quad = [(x, y, z + ground(i, a, b, x, y)) for x, y in rects[i]]
         soup.poly('road', quad, [(q[0] / tile, q[1] / tile) for q in quad], (0.0, 0.0, 1.0), 1)
     for i, (a, b, w) in enumerate(edges):
+        if abs(zs.get(a, 0.0) - zs.get(b, 0.0)) > 0.05:                 # no kerbs on a sloping path
+            continue
         ax, ay = nodes[a]
         bx, by = nodes[b]
         L = math.hypot(bx - ax, by - ay)
@@ -11024,7 +11047,7 @@ def _build_road_mesh(nodes, edges):
                 local = _TowerMesh()
                 _soup_box(local, seg / 2.0, 0.0, 0.03, seg, 0.24, 0.13, 1)
                 start = (p0[0] + (q0[0] - p0[0]) * t0, p0[1] + (q0[1] - p0[1]) * t0)
-                soup.append(local, rot=math.atan2(uy, ux), offset=(start[0], start[1], 0.0))
+                soup.append(local, rot=math.atan2(uy, ux), offset=(start[0], start[1], zs.get(a, 0.0)))
     return soup
 
 
@@ -11033,7 +11056,8 @@ def _plan_build_block(context, node, world, seed, path):
     nodes, edges = plan_block_graph(node)
     if not edges:
         return []
-    return [_plan_add_mesh_object(context, _build_road_mesh(nodes, edges), "Road_" + node["id"], 'PLAIN', path, world,
+    zs = ((node.get("params") or {}).get("road_graph") or {}).get("z")
+    return [_plan_add_mesh_object(context, _build_road_mesh(nodes, edges, zs), "Road_" + node["id"], 'PLAIN', path, world,
                                   style=node.get("style"))]
 
 
@@ -11442,6 +11466,600 @@ PLAN_BUILDERS = {"tower": _plan_build_tower, "castle": _plan_build_castle,
                  "hut": _plan_build_hut}
 
 
+# ------------------------------------------------------------------------------
+# Terrain. A terrain plan is a gridded ground sheet. Python lays the grid and writes four per-vertex attributes
+# (pad_h / pad_w = flatten target and weight under the child plans, skirt, edge); a Geometry Nodes modifier then
+# makes the heights (4D noise, island fall-off, pad blend, skirt) and the biome colours (altitude ramp, rock on steep
+# slopes, trodden earth under plans). Water, trees, bushes, rocks and cacti are placed from the evaluated heights.
+# Everything below the sheet's parameters stays editable in the modifier panel.
+# ------------------------------------------------------------------------------
+PLAN_BIOMES = {
+    "meadow": dict(label="Meadow", amplitude=4.0, feature=60.0, detail=3.0, rough=0.45, base=0.0, sea=-2.4, island=0.0,
+                   water=True, rock=(0.40, 0.38, 0.34), earth=(0.30, 0.23, 0.15),
+                   ramp=[(0.0, (0.20, 0.16, 0.10)), (0.07, (0.55, 0.50, 0.32)), (0.13, (0.20, 0.34, 0.10)),
+                         (0.5, (0.27, 0.42, 0.12)), (0.8, (0.36, 0.33, 0.25)), (1.0, (0.5, 0.48, 0.44))],
+                   scatter=[dict(kind="tree", per_ha=7, crown="ROUND", leaf=["GREEN", "GREEN", "AUTUMN"], height=(5.0, 8.0), slope=0.2, cluster=(45.0, 0.45)),
+                            dict(kind="bush", per_ha=16, leaf=["GREEN", "DARK"], slope=0.25, cluster=(30.0, 0.4)),
+                            dict(kind="rock", per_ha=3, slope=0.6)]),
+    "forest": dict(label="Forest", amplitude=6.0, feature=55.0, detail=4.0, rough=0.5, base=0.0, sea=-4.5, island=0.0,
+                   water=True, rock=(0.33, 0.32, 0.29), earth=(0.26, 0.2, 0.12),
+                   ramp=[(0.0, (0.15, 0.12, 0.08)), (0.07, (0.30, 0.27, 0.17)), (0.13, (0.10, 0.22, 0.07)),
+                         (0.55, (0.12, 0.26, 0.08)), (0.82, (0.30, 0.28, 0.22)), (1.0, (0.45, 0.44, 0.4))],
+                   scatter=[dict(kind="tree", per_ha=70, crown="CONE", leaf=["DARK", "DARK", "GREEN"], height=(6.0, 11.0), slope=0.25, cluster=(40.0, 0.35)),
+                            dict(kind="tree", per_ha=30, crown="ROUND", leaf=["GREEN", "DARK", "AUTUMN"], height=(5.0, 9.0), slope=0.25, cluster=(55.0, 0.4)),
+                            dict(kind="bush", per_ha=30, leaf=["DARK", "GREEN"], slope=0.3),
+                            dict(kind="rock", per_ha=4, slope=0.6)]),
+    "desert": dict(label="Desert", amplitude=5.0, feature=90.0, detail=2.0, rough=0.35, base=0.0, sea=-6.0, island=0.0,
+                   water=False, rock=(0.52, 0.40, 0.30), earth=(0.55, 0.44, 0.28),
+                   ramp=[(0.0, (0.45, 0.36, 0.22)), (0.07, (0.78, 0.64, 0.40)), (0.5, (0.84, 0.68, 0.40)),
+                         (0.8, (0.72, 0.50, 0.30)), (1.0, (0.60, 0.42, 0.28))],
+                   scatter=[dict(kind="cactus", per_ha=5, slope=0.2, cluster=(60.0, 0.4)),
+                            dict(kind="rock", per_ha=6, slope=0.7)]),
+    "tundra": dict(label="Tundra", amplitude=4.0, feature=70.0, detail=3.0, rough=0.5, base=0.0, sea=-2.2, island=0.0,
+                   water=True, rock=(0.42, 0.42, 0.42), earth=(0.28, 0.25, 0.2),
+                   ramp=[(0.0, (0.18, 0.20, 0.20)), (0.07, (0.45, 0.45, 0.40)), (0.15, (0.50, 0.52, 0.45)),
+                         (0.5, (0.72, 0.74, 0.76)), (0.8, (0.9, 0.92, 0.95)), (1.0, (0.95, 0.96, 1.0))],
+                   scatter=[dict(kind="tree", per_ha=6, crown="CONE", leaf=["DARK"], height=(3.0, 5.0), slope=0.2, cluster=(50.0, 0.5)),
+                            dict(kind="rock", per_ha=10, slope=0.7)]),
+    "mountain": dict(label="Mountains", amplitude=18.0, feature=110.0, detail=5.0, rough=0.5, base=0.0, sea=-14.0, island=0.0,
+                     water=True, rock=(0.40, 0.38, 0.36), earth=(0.30, 0.26, 0.2),
+                     ramp=[(0.0, (0.20, 0.16, 0.10)), (0.06, (0.28, 0.30, 0.15)), (0.22, (0.20, 0.30, 0.12)),
+                           (0.45, (0.35, 0.32, 0.28)), (0.7, (0.5, 0.48, 0.46)), (0.88, (0.92, 0.93, 0.97)), (1.0, (1.0, 1.0, 1.0))],
+                     scatter=[dict(kind="tree", per_ha=22, crown="CONE", leaf=["DARK", "DARK", "GREEN"], height=(6.0, 10.0), slope=0.3, alt=(0.0, 0.42), cluster=(60.0, 0.4)),
+                              dict(kind="rock", per_ha=14, slope=1.0, alt=(0.0, 0.85))]),
+    "island": dict(label="Island", amplitude=4.0, feature=50.0, detail=3.0, rough=0.45, base=1.0, sea=-2.2, island=1.0,
+                   water=True, rock=(0.40, 0.38, 0.34), earth=(0.45, 0.38, 0.24),
+                   ramp=[(0.0, (0.25, 0.20, 0.12)), (0.06, (0.85, 0.78, 0.55)), (0.11, (0.22, 0.40, 0.12)),
+                         (0.6, (0.15, 0.30, 0.10)), (1.0, (0.4, 0.38, 0.3))],
+                   scatter=[dict(kind="tree", per_ha=35, crown="ROUND", leaf=["GREEN", "GREEN", "DARK"], height=(5.0, 8.0), slope=0.25, alt=(0.04, 0.6), cluster=(40.0, 0.35)),
+                            dict(kind="bush", per_ha=20, leaf=["GREEN"], slope=0.3, alt=(0.03, 0.6)),
+                            dict(kind="rock", per_ha=5, slope=0.7)]),
+}
+PLAN_TERRAIN_DEFAULTS = dict(biome="meadow", width=240.0, depth=240.0, resolution=2.0, pad_margin=10.0, scatter=1.0)
+PLAN_TERRAIN_RANGES = {"width": (40.0, 1000.0), "depth": (40.0, 1000.0), "resolution": (0.5, 10.0), "pad_margin": (2.0, 40.0),
+                       "scatter": (0.0, 4.0)}
+PLAN_TERRAIN_OPTIONAL = {"amplitude": (0.0, 120.0), "feature_size": (10.0, 400.0), "detail": (0.0, 8.0),
+                         "roughness": (0.0, 1.0), "base": (-50.0, 50.0), "sea_level": (-150.0, 150.0), "island": (0.0, 1.0)}
+PLAN_TERRAIN_SKIP_KINDS = ("tree", "barrel", "crate", "haystack", "bush", "rock", "cactus")
+
+
+def plan_terrain_params(params):
+    """Terrain defaults + the biome's numbers + the node's own params, validated. Raises PlanError."""
+    params = dict(params or {})
+    merged = {**PLAN_TERRAIN_DEFAULTS, **{k: v for k, v in params.items() if k in PLAN_TERRAIN_DEFAULTS or k in PLAN_TERRAIN_OPTIONAL
+                                          or k == "water"}}
+    if merged["biome"] not in PLAN_BIOMES:
+        raise PlanError("params.biome = %r is not one of %s" % (merged["biome"], ", ".join(PLAN_BIOMES)))
+    for key, (lo, hi) in {**PLAN_TERRAIN_RANGES, **{k: v for k, v in PLAN_TERRAIN_OPTIONAL.items() if k in params}}.items():
+        v = merged[key]
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v < lo or v > hi:
+            raise PlanError("params.%s = %r is outside %s..%s" % (key, v, lo, hi))
+    if (merged["width"] / merged["resolution"]) * (merged["depth"] / merged["resolution"]) > 250000:
+        raise PlanError("terrain grid is too fine: %d cells (coarsen params.resolution)"
+                        % ((merged["width"] / merged["resolution"]) * (merged["depth"] / merged["resolution"])))
+    spec = PLAN_BIOMES[merged["biome"]]
+    merged["amplitude"] = float(params.get("amplitude", spec["amplitude"]))
+    merged["feature_size"] = float(params.get("feature_size", spec["feature"]))
+    merged["detail"] = float(params.get("detail", spec["detail"]))
+    merged["roughness"] = float(params.get("roughness", spec["rough"]))
+    merged["base"] = float(params.get("base", spec["base"]))
+    merged["sea_level"] = float(params.get("sea_level", spec["sea"]))
+    merged["island"] = float(params.get("island", spec["island"]))
+    merged["water"] = bool(params.get("water", spec["water"]))
+    return merged
+
+
+def _np_poly_dist(X, Y, poly):
+    """Signed distance from points to a polygon (negative inside), numpy arrays in, array out."""
+    import numpy as np
+    n = len(poly)
+    d2 = np.full(X.shape, 1e18)
+    inside = np.zeros(X.shape, dtype=bool)
+    for i in range(n):
+        ax, ay = poly[i]
+        bx, by = poly[(i + 1) % n]
+        ex, ey = bx - ax, by - ay
+        L2 = ex * ex + ey * ey
+        if L2 > 1e-12:
+            t = np.clip(((X - ax) * ex + (Y - ay) * ey) / L2, 0.0, 1.0)
+            dx, dy = X - (ax + t * ex), Y - (ay + t * ey)
+            d2 = np.minimum(d2, dx * dx + dy * dy)
+        if ay != by:
+            inside ^= ((ay > Y) != (by > Y)) & (X < ex * (Y - ay) / (by - ay) + ax)
+    d = np.sqrt(d2)
+    return np.where(inside, -d, d)
+
+
+def _np_capsule_dist(X, Y, a, b, half, with_t=False):
+    """Distance to a road segment's capsule (negative inside); with_t also returns the position along the segment."""
+    import numpy as np
+    ex, ey = b[0] - a[0], b[1] - a[1]
+    L2 = max(ex * ex + ey * ey, 1e-12)
+    t = np.clip(((X - a[0]) * ex + (Y - a[1]) * ey) / L2, 0.0, 1.0)
+    d = np.sqrt((X - a[0] - t * ex) ** 2 + (Y - a[1] - t * ey) ** 2) - half
+    return (d, t) if with_t else d
+
+
+def _terrain_pads(root, resolved, tpath):
+    """What the terrain flattens under: [(kind, geometry, height)] in the terrain's own coordinates -- polygons for
+    buildings and compounds, capsules along the roads of blocks. Nothing below a padded node is padded again."""
+    tx, ty, tz, trot = resolved[tpath]["world"]
+    c, s = math.cos(math.radians(-trot)), math.sin(math.radians(-trot))
+
+    def to_local(x, y):
+        dx, dy = x - tx, y - ty
+        return (dx * c - dy * s, dx * s + dy * c)
+    pads, done = [], []
+    for node, path in plan_iter(root):
+        if path[:len(tpath)] != tpath or path == tpath or any(path[:len(d)] == d for d in done):
+            continue
+        if node.get("kind") in PLAN_TERRAIN_SKIP_KINDS or node.get("type") not in ("building", "compound", "block"):
+            continue
+        info = resolved[path]
+        wx, wy, wz, wrot = info["world"]
+        cr, sr = math.cos(math.radians(wrot)), math.sin(math.radians(wrot))
+        height = wz - tz
+        params = node.get("params") or {}
+        graph = params.get("road_graph") if node["type"] == "block" else None
+        if graph and graph.get("edges"):
+            half = float(params.get("road_width", 5.0)) / 2.0 + (float(params.get("lot_depth", 10.0)) if params.get("fill") else 0.8)
+            zs = graph.get("z") or {}
+            for e in graph["edges"]:
+                a_id, b_id = e[0], e[1]
+                a, b = graph["nodes"][a_id], graph["nodes"][b_id]
+                pa = to_local(wx + a[0] * cr - a[1] * sr, wy + a[0] * sr + a[1] * cr)
+                pb = to_local(wx + b[0] * cr - b[1] * sr, wy + b[0] * sr + b[1] * cr)
+                pads.append(("capsule", (pa, pb, half, height + zs.get(a_id, 0.0), height + zs.get(b_id, 0.0)), 0.0))
+            done.append(path)
+            continue
+        fp = plan_footprint({**node, "style": plan_pick_style(info["style"], info["seed"])})
+        if fp:
+            pads.append(("poly", [to_local(wx + p[0] * cr - p[1] * sr, wy + p[0] * sr + p[1] * cr) for p in fp], height))
+            done.append(path)
+    return pads
+
+
+def _terrain_pad_weights(X, Y, pads, margin, inner=1.2):
+    """(pad_w, pad_h) arrays: 1 inside a pad (and `inner` metres beyond), easing to 0 over `margin` metres; heights of
+    overlapping pads are blended by weight."""
+    import numpy as np
+    wsum, hsum, wmax = np.zeros(X.shape), np.zeros(X.shape), np.zeros(X.shape)
+    for kind, geom, height in pads:
+        if kind == "poly":
+            d = _np_poly_dist(X, Y, geom)
+        else:
+            d, along = _np_capsule_dist(X, Y, geom[0], geom[1], geom[2], with_t=True)
+            height = geom[3] + (geom[4] - geom[3]) * along                 # a sloping path: linear between its ends
+        t = np.clip((d - inner) / margin, 0.0, 1.0)
+        w = 1.0 - t * t * (3.0 - 2.0 * t)
+        wsum += w
+        hsum += w * height
+        wmax = np.maximum(wmax, w)
+    return wmax, np.where(wsum > 1e-9, hsum / np.maximum(wsum, 1e-9), 0.0)
+
+
+def _terrain_grid_mesh(tp, pads, name):
+    """The ground sheet: (nx+1)*(ny+1) vertices at z = 0 plus a skirt ring, with the four attributes."""
+    import numpy as np
+    w, d, res = tp["width"], tp["depth"], tp["resolution"]
+    nx, ny = max(2, int(round(w / res))), max(2, int(round(d / res)))
+    xs, ys = np.linspace(-w / 2.0, w / 2.0, nx + 1), np.linspace(-d / 2.0, d / 2.0, ny + 1)
+    X, Y = np.meshgrid(xs, ys)
+    X, Y = X.ravel(), Y.ravel()
+    pad_w, pad_h = _terrain_pad_weights(X, Y, pads, max(tp["pad_margin"], tp["amplitude"] * 0.9), inner=1.2 + 0.75 * res)
+    edge = np.clip(np.sqrt((X / (w / 2.0)) ** 2 + (Y / (d / 2.0)) ** 2), 0.0, 1.5)
+    ring = (list(range(nx + 1)) +
+            [j * (nx + 1) + nx for j in range(1, ny + 1)] +
+            [ny * (nx + 1) + i for i in range(nx - 1, -1, -1)] +
+            [j * (nx + 1) for j in range(ny - 1, 0, -1)])
+    n_top = (nx + 1) * (ny + 1)
+    verts = ([(float(x), float(y), 0.0) for x, y in zip(X, Y)] + [(float(X[v]), float(Y[v]), 0.0) for v in ring]
+             + [(float(X[v]), float(Y[v]), 0.0) for v in ring])
+    faces = [(j * (nx + 1) + i, j * (nx + 1) + i + 1, (j + 1) * (nx + 1) + i + 1, (j + 1) * (nx + 1) + i)
+             for j in range(ny) for i in range(nx)]
+    k = len(ring)
+    faces += [(n_top + q, n_top + k + q, n_top + k + (q + 1) % k, n_top + (q + 1) % k) for q in range(k)]
+    mesh = bpy.data.meshes.new(name + "_Mesh")
+    mesh.from_pydata(verts, [], faces)
+    mesh.update()
+    for poly in mesh.polygons:
+        poly.use_smooth = True
+    ring_idx = np.array(ring)
+    # skirt: 0 on the sheet, a hair above 0 on the ring that carries the skirt colour, 1 on the ring that drops away
+    for attr, top, extra in (("pad_h", pad_h, pad_h[ring_idx]), ("pad_w", pad_w, pad_w[ring_idx]),
+                             ("edge", edge, edge[ring_idx]), ("skirt", np.zeros(n_top), np.full(k, 0.002))):
+        a = mesh.attributes.new(attr, 'FLOAT', 'POINT')
+        a.data.foreach_set("value", np.concatenate([top, extra, extra if attr != "skirt" else np.ones(k)]).astype(np.float32))
+    return mesh, (nx, ny)
+
+
+def _gn_in(node, name, kind=None):
+    for s in node.inputs:
+        if s.name == name and s.enabled and (kind is None or s.type == kind):
+            return s
+    raise KeyError("%s has no enabled input %r" % (node.bl_idname, name))
+
+
+def _terrain_node_group(name, tp):
+    """The Geometry Nodes tree of one terrain (biome colours baked in, shape numbers exposed as inputs)."""
+    spec = PLAN_BIOMES[tp["biome"]]
+    lin = lambda rgb: tuple(c ** 2.2 for c in rgb)                  # the palettes below are written as sRGB-ish values
+    g = bpy.data.node_groups.new(name, 'GeometryNodeTree')
+    iface = g.interface
+    iface.new_socket(name="Geometry", in_out='INPUT', socket_type='NodeSocketGeometry')
+    iface.new_socket(name="Geometry", in_out='OUTPUT', socket_type='NodeSocketGeometry')
+    for label, default, lo, hi in (("Amplitude", tp["amplitude"], 0.0, 200.0), ("Feature Size", tp["feature_size"], 5.0, 600.0),
+                                   ("Detail", tp["detail"], 0.0, 12.0), ("Roughness", tp["roughness"], 0.0, 1.0),
+                                   ("Seed", float(tp["noise_seed"]), 0.0, 10000.0), ("Base", tp["base"], -100.0, 100.0),
+                                   ("Sea Level", tp["sea_level"], -200.0, 200.0), ("Island", tp["island"], 0.0, 1.0),
+                                   ("Skirt Depth", tp["amplitude"] * 1.5 + 8.0, 0.0, 400.0)):
+        sock = iface.new_socket(name=label, in_out='INPUT', socket_type='NodeSocketFloat')
+        sock.default_value = default
+        _set_prop(sock, 'min_value', lo)
+        _set_prop(sock, 'max_value', hi)
+    nodes, links = g.nodes, g.links
+    gin = nodes.new("NodeGroupInput")
+    gout = nodes.new("NodeGroupOutput")
+    gin.location, gout.location = (-1500, 0), (1900, 0)
+
+    def math_(op, a=None, b=None, x=0, y=0):
+        n = nodes.new("ShaderNodeMath")
+        n.operation = op
+        n.location = (x, y)
+        for idx, v in ((0, a), (1, b)):
+            if v is None:
+                continue
+            if isinstance(v, (int, float)):
+                n.inputs[idx].default_value = float(v)
+            else:
+                links.new(v, n.inputs[idx])
+        return n.outputs[0]
+
+    def named(attr, x, y):
+        n = nodes.new("GeometryNodeInputNamedAttribute")
+        n.data_type = 'FLOAT'
+        n.location = (x, y)
+        _set_input(n, "Name", attr)
+        return n.outputs["Attribute"]
+
+    def map_range(value, lo, hi, x, y, smooth=False, clamp=True):
+        n = nodes.new("ShaderNodeMapRange")
+        n.location = (x, y)
+        n.clamp = clamp
+        if smooth:
+            _set_prop(n, 'interpolation_type', 'SMOOTHSTEP')
+        for key, v in (("Value", value), ("From Min", lo), ("From Max", hi)):
+            sock = _gn_in(n, key, 'VALUE')
+            if isinstance(v, (int, float)):
+                sock.default_value = float(v)
+            else:
+                links.new(v, sock)
+        _gn_in(n, "To Min", 'VALUE').default_value = 0.0
+        _gn_in(n, "To Max", 'VALUE').default_value = 1.0
+        return n.outputs["Result"]
+
+    def mix(factor, a, b, x, y):
+        n = nodes.new("ShaderNodeMix")
+        n.data_type = 'RGBA'
+        n.location = (x, y)
+        links.new(factor, _gn_in(n, "Factor", 'VALUE'))
+        for key, v in (("A", a), ("B", b)):
+            sock = _gn_in(n, key, 'RGBA')
+            if isinstance(v, tuple):
+                sock.default_value = (*v, 1.0)
+            else:
+                links.new(v, sock)
+        return n.outputs["Result"]
+
+    pos = nodes.new("GeometryNodeInputPosition")
+    pos.location = (-1300, 300)
+    inv = math_('DIVIDE', 1.0, gin.outputs["Feature Size"], -1300, 150)
+    noise = nodes.new("ShaderNodeTexNoise")
+    noise.noise_dimensions = '4D'
+    noise.location = (-1100, 250)
+    _set_prop(noise, 'normalize', True)
+    links.new(pos.outputs["Position"], noise.inputs["Vector"])
+    links.new(gin.outputs["Seed"], noise.inputs["W"])
+    links.new(inv, noise.inputs["Scale"])
+    links.new(gin.outputs["Detail"], noise.inputs["Detail"])
+    links.new(gin.outputs["Roughness"], noise.inputs["Roughness"])
+    centred = math_('SUBTRACT', noise.outputs["Fac"], 0.5, -900, 250)
+    doubled = math_('MULTIPLY', centred, 6.0, -750, 250)
+    scaled = math_('MULTIPLY', doubled, gin.outputs["Amplitude"], -600, 250)
+    based = math_('ADD', scaled, gin.outputs["Base"], -450, 250)
+    edge_t = map_range(named("edge", -900, -50), 0.45, 1.0, -750, -50, smooth=True)
+    drop = math_('MULTIPLY', math_('MULTIPLY', edge_t, gin.outputs["Island"], -600, -50), gin.outputs["Skirt Depth"], -450, -50)
+    rolling = math_('SUBTRACT', based, drop, -300, 200)
+    pad_h, pad_w = named("pad_h", -450, -250), named("pad_w", -450, -400)
+    blended = math_('ADD', rolling, math_('MULTIPLY', math_('SUBTRACT', pad_h, rolling, -300, -250), pad_w, -150, -250), -0, 100)
+    skirt = named("skirt", -300, -550)
+    final = math_('SUBTRACT', blended, math_('MULTIPLY', skirt, gin.outputs["Skirt Depth"], -150, -550), 150, 0)
+    offset = nodes.new("ShaderNodeCombineXYZ")
+    offset.location = (300, 0)
+    links.new(final, offset.inputs["Z"])
+    setpos = nodes.new("GeometryNodeSetPosition")
+    setpos.location = (500, 100)
+    links.new(gin.outputs["Geometry"], setpos.inputs["Geometry"])
+    links.new(offset.outputs["Vector"], setpos.inputs["Offset"])
+    # Colours: altitude ramp -> rock on steep faces -> trodden earth under plans -> dark skirt.
+    lo = math_('SUBTRACT', gin.outputs["Sea Level"], 1.0, 150, -300)
+    hi = math_('ADD', math_('ADD', math_('MULTIPLY', gin.outputs["Amplitude"], 1.6, 0, -420), gin.outputs["Sea Level"], 150, -420), 1.0, 300, -420)
+    t = map_range(blended, lo, hi, 450, -300)
+    ramp = nodes.new("ShaderNodeValToRGB")
+    ramp.location = (650, -300)
+    els = ramp.color_ramp.elements
+    stops = spec["ramp"]
+    els[0].position, els[0].color = stops[0][0], (*lin(stops[0][1]), 1.0)
+    els[1].position, els[1].color = stops[-1][0], (*lin(stops[-1][1]), 1.0)
+    for pos_, rgb in stops[1:-1]:
+        e = els.new(pos_)
+        e.color = (*lin(rgb), 1.0)
+    links.new(t, ramp.inputs["Fac"])
+    normal = nodes.new("GeometryNodeInputNormal")
+    normal.location = (500, -600)
+    sep = nodes.new("ShaderNodeSeparateXYZ")
+    sep.location = (650, -600)
+    links.new(normal.outputs["Normal"], sep.inputs["Vector"])
+    slope = map_range(math_('SUBTRACT', 1.0, sep.outputs["Z"], 800, -600), 0.1, 0.34, 950, -600)
+    col1 = mix(slope, ramp.outputs["Color"], lin(spec["rock"]), 1100, -300)
+    col2 = mix(math_('MULTIPLY', pad_w, 0.85, 1100, -450), col1, lin(spec["earth"]), 1300, -300)
+    col3 = mix(math_('MINIMUM', math_('MULTIPLY', skirt, 500.0, 1300, -700), 1.0, 1450, -700), col2, lin((0.16, 0.11, 0.07)), 1500, -300)
+    store = nodes.new("GeometryNodeStoreNamedAttribute")
+    store.data_type = 'FLOAT_COLOR'
+    store.domain = 'POINT'
+    store.location = (1700, 0)
+    _set_input(store, "Name", "Col")
+    links.new(setpos.outputs["Geometry"], store.inputs["Geometry"])
+    links.new(col3, _gn_in(store, "Value", 'RGBA'))
+    links.new(store.outputs["Geometry"], gout.inputs["Geometry"])
+    return g
+
+
+def _terrain_material(name):
+    mat = bpy.data.materials.get(name)
+    if mat is not None:
+        return mat
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    nt = mat.node_tree
+    bsdf = next(n for n in nt.nodes if n.type == 'BSDF_PRINCIPLED')
+    attr = nt.nodes.new("ShaderNodeAttribute")
+    attr.attribute_name = "Col"
+    _set_prop(attr, 'attribute_type', 'GEOMETRY')
+    attr.location = (-300, 200)
+    nt.links.new(attr.outputs["Color"], bsdf.inputs["Base Color"])
+    _set_input(bsdf, "Roughness", 1.0)
+    _set_input(bsdf, "Specular IOR Level", 0.05)
+    mat.diffuse_color = (0.3, 0.38, 0.2, 1.0)
+    return mat
+
+
+def _water_material():
+    mat = bpy.data.materials.get("LA_Water")
+    if mat is None:
+        mat = bpy.data.materials.new("LA_Water")
+        mat.use_nodes = True
+        bsdf = next(n for n in mat.node_tree.nodes if n.type == 'BSDF_PRINCIPLED')
+        _set_input(bsdf, "Base Color", (0.04, 0.18, 0.26, 1.0))
+        _set_input(bsdf, "Roughness", 0.06)
+        _set_input(bsdf, "Alpha", 0.85)
+        mat.diffuse_color = (0.04, 0.18, 0.26, 0.72)
+    return mat
+
+
+def _terrain_sampler(heights, nx, ny, w, d):
+    """Bilinear height and slope (1 - normal.z) lookup on the evaluated grid, in terrain coordinates."""
+    import numpy as np
+    sx, sy = w / nx, d / ny
+
+    def at(x, y):
+        fx = min(max((x + w / 2.0) / sx, 0.0), nx - 1e-6)
+        fy = min(max((y + d / 2.0) / sy, 0.0), ny - 1e-6)
+        i, j = int(fx), int(fy)
+        u, v = fx - i, fy - j
+        h00, h10, h01, h11 = heights[j, i], heights[j, i + 1], heights[j + 1, i], heights[j + 1, i + 1]
+        z = (h00 * (1 - u) + h10 * u) * (1 - v) + (h01 * (1 - u) + h11 * u) * v
+        gx = ((h10 - h00) * (1 - v) + (h11 - h01) * v) / sx
+        gy = ((h01 - h00) * (1 - u) + (h11 - h10) * u) / sy
+        return float(z), 1.0 - 1.0 / math.sqrt(1.0 + gx * gx + gy * gy)
+    return at
+
+
+def _build_rock_mesh(seed):
+    rng = random.Random(seed)
+    soup = _TowerMesh()
+    r = rng.uniform(0.5, 1.3)
+    h = r * rng.uniform(0.5, 0.9)
+    sides = 7
+    rings = [(0.0, 1.0), (h * 0.55, 0.92), (h, 0.5)]
+    pts = []
+    for z, f in rings:
+        pts.append([((r * f * rng.uniform(0.8, 1.15)) * math.cos(2 * math.pi * i / sides),
+                     (r * f * rng.uniform(0.8, 1.15)) * math.sin(2 * math.pi * i / sides), z) for i in range(sides)])
+    for lv in range(2):
+        for i in range(sides):
+            a, b = pts[lv][i], pts[lv][(i + 1) % sides]
+            c, d = pts[lv + 1][(i + 1) % sides], pts[lv + 1][i]
+            soup.poly('rock', [a, b, c, d], [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)], (a[0] + b[0], a[1] + b[1], 0.2), 1)
+    soup.poly('rocktop', pts[2], [(q[0], q[1]) for q in pts[2]], (0.0, 0.0, 1.0), 1)
+    return soup
+
+
+def _build_cactus_mesh(seed):
+    rng = random.Random(seed)
+    soup = _TowerMesh()
+    h = rng.uniform(1.8, 3.2)
+    _soup_box(soup, 0.0, 0.0, 0.0, 0.42, 0.42, h, 1)
+    for sign in (1, -1):
+        if rng.random() < 0.7:
+            z = rng.uniform(0.7, h * 0.6)
+            arm = rng.uniform(0.5, 0.9)
+            _soup_box(soup, sign * 0.4, 0.0, z, 0.55, 0.26, 0.26, 1)
+            _soup_box(soup, sign * 0.55, 0.0, z, 0.26, 0.26, arm, 1)
+    return soup
+
+
+def _build_bush_mesh(seed):
+    rng = random.Random(seed)
+    soup = _TowerMesh()
+    r = rng.uniform(0.5, 0.9)
+    rows, sides = 3, 7
+    for ri in range(rows):
+        a0, a1 = math.pi * (ri / rows) / 2.0, math.pi * ((ri + 1) / rows) / 2.0
+        for i in range(sides):
+            t0, t1 = 2 * math.pi * i / sides, 2 * math.pi * (i + 1) / sides
+            pts = [(r * math.cos(a) * math.cos(t), r * math.cos(a) * math.sin(t), r * 0.8 * math.sin(a))
+                   for a, t in ((a0, t0), (a0, t1), (a1, t1), (a1, t0))]
+            soup.poly('bush', pts, [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)], (sum(q[0] for q in pts), sum(q[1] for q in pts), 1.0), LEAF_SOURCE_SLOT)
+    return soup
+
+
+def _terrain_scatter(context, tp, sampler, pads, seed, path, world, sea_level):
+    """Trees, bushes, rocks and cacti of the biome: one merged mesh per kind, so a forest is a handful of objects."""
+    import numpy as np
+    spec = PLAN_BIOMES[tp["biome"]]
+    area_ha = tp["width"] * tp["depth"] / 10000.0
+    amp = tp["amplitude"]
+    rng = random.Random(seed)
+    wood_mat = get_or_create_wood_material('BROWN')
+    rock_mat = bpy.data.materials.get("LA_Rock") or bpy.data.materials.new("LA_Rock")
+    if not rock_mat.use_nodes:
+        rock_mat.use_nodes = True
+        bsdf = next(n for n in rock_mat.node_tree.nodes if n.type == 'BSDF_PRINCIPLED')
+        _set_input(bsdf, "Base Color", (0.36, 0.34, 0.31, 1.0))
+        _set_input(bsdf, "Roughness", 0.95)
+        rock_mat.diffuse_color = (0.36, 0.34, 0.31, 1.0)
+    cactus_mat = bpy.data.materials.get("LA_Cactus") or bpy.data.materials.new("LA_Cactus")
+    if not cactus_mat.use_nodes:
+        cactus_mat.use_nodes = True
+        bsdf = next(n for n in cactus_mat.node_tree.nodes if n.type == 'BSDF_PRINCIPLED')
+        _set_input(bsdf, "Base Color", (0.18, 0.34, 0.16, 1.0))
+        _set_input(bsdf, "Roughness", 0.8)
+        cactus_mat.diffuse_color = (0.18, 0.34, 0.16, 1.0)
+    objects, counts = [], {}
+    taken = {}                                                       # spatial hash for minimum spacing
+    for si, rule in enumerate(spec["scatter"]):
+        kind = rule["kind"]
+        n_want = int(rule["per_ha"] * area_ha * tp["scatter"])
+        if n_want <= 0:
+            continue
+        leaves = list(rule.get("leaf", ["GREEN"]))
+        slots = [wood_mat, rock_mat, cactus_mat] + [get_or_create_leaf_material(c) for c in sorted(set(leaves))]
+        leaf_slot = {c: 3 + i for i, c in enumerate(sorted(set(leaves)))}
+        merged = _TowerMesh()
+        variants = {}
+        placed = 0
+        cell = 3.0
+        for _ in range(n_want * 4):
+            if placed >= n_want:
+                break
+            x = rng.uniform(-tp["width"] / 2.0 + 2.0, tp["width"] / 2.0 - 2.0)
+            y = rng.uniform(-tp["depth"] / 2.0 + 2.0, tp["depth"] / 2.0 - 2.0)
+            if rule.get("cluster"):
+                scale, thresh = rule["cluster"]
+                cval = plan_fbm2(x / scale, y / scale, seed + 17 * si, 3)
+                if cval < thresh and rng.random() > 0.12:
+                    continue
+            z, slope = sampler(x, y)
+            if z < sea_level + 0.5 or slope > rule.get("slope", 0.3):
+                continue
+            tz = (z - (sea_level - 1.0)) / (amp * 1.6 + 1.0)
+            lo, hi = rule.get("alt", (0.0, 1.0))
+            if tz < lo or tz > hi:
+                continue
+            key = (int(x // cell), int(y // cell))
+            if any((key[0] + dx, key[1] + dy) in taken for dx in (-1, 0, 1) for dy in (-1, 0, 1)
+                   if any(math.hypot(x - q[0], y - q[1]) < (1.6 if kind != "tree" else 2.6) for q in taken.get((key[0] + dx, key[1] + dy), ()))):
+                continue
+            if pads:
+                px, py = np.array([x]), np.array([y])
+                clear = min(float((_np_poly_dist(px, py, g) if k == "poly" else _np_capsule_dist(px, py, g[0], g[1], g[2]))[0]) for k, g, _h in pads)
+                if clear < tp["pad_margin"] * 0.55 + 1.0:
+                    continue
+            taken.setdefault(key, []).append((x, y))
+            if kind == "tree":
+                leaf = rng.choice(leaves)
+                height = round(rng.uniform(*rule["height"]) * 2.0) / 2.0
+                vkey = ("tree", rule["crown"], leaf, height, rng.randrange(3))
+                if vkey not in variants:
+                    soup = _build_tree_mesh({"height": height, "crown": rule["crown"], "leaf": leaf}, plan_child_seed(seed, "%s%s%s%s" % vkey[:4]) % 9973 + vkey[4])
+                    variants[vkey] = (soup, {WOOD_SOURCE_SLOT: 0, LEAF_SOURCE_SLOT: leaf_slot[leaf]})
+            elif kind == "bush":
+                leaf = rng.choice(leaves)
+                vkey = ("bush", leaf, rng.randrange(4))
+                if vkey not in variants:
+                    variants[vkey] = (_build_bush_mesh(seed + vkey[2] * 31), {LEAF_SOURCE_SLOT: leaf_slot[leaf]})
+            elif kind == "cactus":
+                vkey = ("cactus", rng.randrange(5))
+                if vkey not in variants:
+                    variants[vkey] = (_build_cactus_mesh(seed + vkey[1] * 13), {1: 2})
+            else:
+                vkey = ("rock", rng.randrange(6))
+                if vkey not in variants:
+                    variants[vkey] = (_build_rock_mesh(seed + vkey[1] * 7), {1: 1})
+            soup, mat_map = variants[vkey]
+            scale = rng.uniform(0.85, 1.25) if kind in ("rock", "bush") else 1.0
+            merged.append(soup, rot=rng.uniform(0.0, 2 * math.pi), sx=scale, sy=scale, offset=(x, y, z - 0.15), mat_map=mat_map)
+            placed += 1
+        if placed:
+            mesh = merged.to_mesh("Scatter_%s_%d" % (kind, si))
+            for mat_ in slots:
+                mesh.materials.append(mat_)
+            obj = bpy.data.objects.new(mesh.name, mesh)
+            context.scene.collection.objects.link(obj)
+            objects.append(obj)
+            counts[kind] = counts.get(kind, 0) + placed
+    if objects:
+        _plan_adopt_objects(context.scene, path + ("scatter",), world, objects)
+    return counts
+
+
+def _plan_build_terrain(context, root, resolved, node, path):
+    """Builds the ground sheet, the Geometry Nodes tree, the water and the scatter of a terrain plan."""
+    import numpy as np
+    try:
+        tp = plan_terrain_params(node.get("params"))
+    except PlanError as exc:
+        raise PlanError("%s: %s" % ("/".join(path), exc))
+    info = resolved[path]
+    tp["noise_seed"] = info["seed"] % 997
+    pads = _terrain_pads(root, resolved, path)
+    name = "Terrain_" + node["id"]
+    mesh, (nx, ny) = _terrain_grid_mesh(tp, pads, name)
+    mesh.materials.append(_terrain_material("LA_Terrain_" + tp["biome"]))
+    obj = bpy.data.objects.new(name, mesh)
+    context.scene.collection.objects.link(obj)
+    group = _terrain_node_group("GLA_" + name, tp)
+    mod = obj.modifiers.new("GLA Terrain", 'NODES')
+    mod.node_group = group
+    objects = [obj]
+    _plan_adopt_objects(context.scene, path, info["world"], objects)
+    context.view_layer.update()
+    ev = obj.evaluated_get(context.evaluated_depsgraph_get())
+    ev_mesh = ev.to_mesh()
+    co = np.empty(len(ev_mesh.vertices) * 3, dtype=np.float32)
+    ev_mesh.vertices.foreach_get("co", co)
+    ev.to_mesh_clear()
+    heights = co.reshape(-1, 3)[:(nx + 1) * (ny + 1), 2].reshape(ny + 1, nx + 1).astype(float)
+    sea = tp["sea_level"]
+    stats = {"min": float(heights.min()), "max": float(heights.max())}
+    if tp["water"] and heights.min() < sea - 0.2:
+        w, d = tp["width"], tp["depth"]
+        soup = _TowerMesh()
+        soup.poly('water', [(-w / 2, -d / 2, sea), (w / 2, -d / 2, sea), (w / 2, d / 2, sea), (-w / 2, d / 2, sea)],
+                  [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)], (0.0, 0.0, 1.0), 0)
+        wmesh = soup.to_mesh("Water_" + node["id"])
+        wmesh.materials.append(_water_material())
+        wobj = bpy.data.objects.new(wmesh.name, wmesh)
+        context.scene.collection.objects.link(wobj)
+        _plan_adopt_objects(context.scene, path + ("water",), info["world"], [wobj])
+        stats["water"] = True
+    sampler = _terrain_sampler(heights, nx, ny, tp["width"], tp["depth"])
+    stats["scatter"] = _terrain_scatter(context, tp, sampler, pads, info["seed"], path, info["world"], sea) if tp["scatter"] > 0 else {}
+    stats["pads"] = len(pads)
+    return stats
+
+
 def plan_build(context, root):
     """Validates and builds a plan tree. Returns {'built': [paths], 'skipped': [(path, why)], 'warnings': [...]}.
     Raises PlanError on validation errors or a builder failure. Rebuilding replaces the earlier result."""
@@ -11454,6 +12072,13 @@ def plan_build(context, root):
     plan_clear_built(root["id"])
     built, skipped = [], []
     for node, path in plan_iter(root):
+        if node["type"] == "terrain":
+            stats = _plan_build_terrain(context, root, resolved, {**node, "style": None}, path)
+            built.append("/".join(path))
+            warnings.append("%s: terrain %d..%d m, %d pad%s, scatter %s" % (
+                "/".join(path), round(stats["min"]), round(stats["max"]), stats["pads"], "" if stats["pads"] == 1 else "s",
+                ", ".join("%d %s" % (n, k) for k, n in sorted(stats["scatter"].items())) or "none"))
+            continue
         if node["type"] == "compound":
             if _plan_build_compound(context, {**node, "style": plan_pick_style(resolved[path]["style"], resolved[path]["seed"])}, resolved[path]["world"],
                                     resolved[path]["seed"], path):
@@ -11532,6 +12157,38 @@ def plan_new_example(scene, kind, existing_ids):
             ]},
             anchors=[{"id": "gate", "kind": "gate", "pos": [0.0, -half_d, 0.0], "dir": 270.0, "width": 4.0, "level": 0}],
             children=[castle])
+    if kind == 'TERRAIN':
+        hamlet = plan_new_example(scene, 'HAMLET', set())
+        hamlet.update(id="hamlet", transform={"x": 0.0, "y": 0.0, "z": 0.0, "rot": 0.0})
+        hamlet["anchors"] = [{"id": "road", "kind": "road", "pos": [-26.0, -4.0, 0.0], "dir": 180.0, "width": 3.0, "level": 0}]
+        farm = plan_new_example(scene, 'FARM', set())
+        farm.update(id="farm", transform={"x": -72.0, "y": -48.0, "z": 0.0, "rot": 25.0})
+        watch = plan_node("watch", "building", "tower", transform={"x": 62.0, "y": 44.0, "z": 0.0, "rot": 0.0},
+                          params=plan_default_params(scene, PLAN_TOWER_PARAMS))
+        path_ = plan_node("path", "block", "path", params={"from": "farm/gate", "to": "hamlet/road", "road_width": 3.0, "fill": []})
+        return plan_node(unique("land"), "terrain", "terrain", transform=transform,
+                         params={"biome": scene.wfc_plan_biome, "width": 240.0, "depth": 240.0},
+                         children=[hamlet, farm, watch, path_])
+    if kind == 'TOWN':
+        shape = {"kind": "circle", "width": 136.0, "depth": 136.0, "seed": 11}
+        n = len(plan_shape_polygon(shape))
+        streets = plan_node(
+            "streets", "block", "district",
+            params={"road_generator": {"kind": "ring", "radius": 54.0, "rings": 2, "spokes": 6, "segments": 24, "wobble": 0.04},
+                    "shape": {"kind": "circle", "width": 124.0, "depth": 124.0, "seed": 11}, "road_width": 5.0,
+                    "lot_width": 7.0, "lot_depth": 9.0, "skip_chance": 0.1,
+                    "fill": [{"kind": "house", "weight": 8, "size": {"width": [6.0, 8.0], "depth": [5.0, 6.5], "floors": [1, 2]},
+                              "vary": {"brick_color": ["PLAIN", "OCHRE", "SLATE", "SAND", "ROSE"], "roof_color": ["TERRACOTTA", "SLATE"]}},
+                             {"kind": "chapel", "weight": 1}, {"kind": "stable", "weight": 1}]})
+        gate_road = plan_node("gate_road", "block", "road", params={
+            "road_graph": {"nodes": {"a": [0.0, -76.0], "b": [0.0, -40.0]}, "edges": [["a", "b"]]}, "road_width": 5.0, "fill": []})
+        return plan_node(
+            unique("town"), "compound", "town", transform=transform, params={
+                "shape": shape, "fence": "stone", "fence_height": 5.0, "fence_thickness": 1.2, "gate_height": 4.0,
+                "layout": [{"kind": "tower", "at": "corners", "every": max(1, n // 8),
+                            "params": {"radius": 3.2, "height": 10.0, "interior": False, "props": False, "lights": False, "windows": 1}}]},
+            anchors=[{"id": "gate", "kind": "gate", "pos": [0.0, -68.0, 0.0], "dir": 270.0, "width": 5.0, "level": 0}],
+            children=[streets, gate_road])
     if kind == 'HUT':
         return plan_node(unique("hut"), "building", "hut", transform=transform, params={"construction": "timber"})
     if kind == 'HUTS':
@@ -11626,7 +12283,7 @@ class OBJECT_OT_PlanCreate(bpy.types.Operator):
                               ('HOUSE', "House", ""), ('CHAPEL', "Chapel", ""), ('STABLE', "Stable", ""),
                               ('FORTRESS', "Fortress", ""), ('FARM', "Farm", ""), ('HAMLET', "Hamlet", ""),
                               ('STREET', "Street", ""), ('BLOCK', "Block", ""),
-                              ('HUT', "Hut", ""), ('HUTS', "Hut cluster", "")])
+                              ('HUT', "Hut", ""), ('HUTS', "Hut cluster", ""), ('TERRAIN', "Terrain", ""), ('TOWN', "Walled town", "")])
 
     def execute(self, context):
         plan = plan_new_example(context.scene, self.kind, set(plan_list_ids()))
@@ -12971,6 +13628,7 @@ class VIEW3D_PT_GLAPlans(bpy.types.Panel):
         layout = self.layout
         layout.prop(context.scene, "wfc_plan_style", text="Style")
         layout.prop(context.scene, "wfc_plan_shape", text="Shape")
+        layout.prop(context.scene, "wfc_plan_biome", text="Biome")
         layout.label(text="New plan at the 3D cursor:")
         row = layout.row(align=True)
         for kind, label in (('TOWER', "Tower"), ('CASTLE', "Castle"), ('GROUNDS', "Grounds"), ('FORTRESS', "Fortress")):
@@ -12982,7 +13640,7 @@ class VIEW3D_PT_GLAPlans(bpy.types.Panel):
         for kind, label in (('FARM', "Farm"), ('HAMLET', "Hamlet"), ('STREET', "Street"), ('BLOCK', "Block")):
             row.operator("object.gla_plan_create", text=label).kind = kind
         row = layout.row(align=True)
-        for kind, label in (('HUT', "Hut"), ('HUTS', "Hut cluster")):
+        for kind, label in (('HUT', "Hut"), ('HUTS', "Huts"), ('TOWN', "Town"), ('TERRAIN', "Terrain")):
             row.operator("object.gla_plan_create", text=label).kind = kind
         for plan_id in plan_list_ids():
             box = layout.box()
@@ -13668,6 +14326,10 @@ def register():
                              ('ROUND', "Round", "Circular enclosures and ring-and-spoke streets"),
                              ('ORGANIC', "Organic", "Free-form outlines and winding streets")],
         default='REGULAR', description="Outline and street pattern of new compounds and blocks")
+    bpy.types.Scene.wfc_plan_biome = EnumProperty(
+        name="Biome", items=[(k, v["label"], "Ground colours, relief, water and vegetation of a new terrain plan")
+                             for k, v in PLAN_BIOMES.items()],
+        default='meadow', description="Biome of terrain plans created with the Terrain button")
     bpy.types.Scene.wfc_plan_style = EnumProperty(
         name="Style", items=[(k, v["label"], "Style pack for new plans: wall, trim, roof and wood materials and building proportions")
                              for k, v in PLAN_STYLES.items()] + [('mixed', "Mixed", "Every building gets a random style pack")],
@@ -13804,6 +14466,7 @@ def unregister():
     del bpy.types.Scene.wfc_structure_kind
     del bpy.types.Scene.wfc_plan_style
     del bpy.types.Scene.wfc_plan_shape
+    del bpy.types.Scene.wfc_plan_biome
 
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

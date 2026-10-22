@@ -4710,6 +4710,168 @@ check("Layout style: a mixed compound lays out without overlaps", gen and min(ad
 check("Layout style: the alpine pack is a style", "alpine" in addon.PLAN_STYLES)
 
 # ==============================================================================
+print("\n--- Plans: terrain, biomes, scatter ---")
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+
+
+def _terrain_plan(biome="meadow", scatter=1.0, house_z=2.0, extra=None, **params):
+    house = addon.plan_node("cot", "building", "house", transform={"x": 20.0, "y": 10.0, "z": house_z, "rot": 0.0})
+    street = addon.plan_node("lane", "block", "street", transform={"x": -40.0, "y": -30.0, "z": 0.5, "rot": 0.0},
+                             params={"road_graph": {"nodes": {"a": [0.0, 0.0], "b": [30.0, 0.0]}, "edges": [["a", "b"]]},
+                                     "road_width": 4.0})
+    return addon.plan_node("land", "terrain", "terrain", params={"biome": biome, "width": 160.0, "depth": 160.0, "resolution": 4.0,
+                                                                  "scatter": scatter, **params}, children=[house, street] + (extra or []))
+
+
+def _terrain_z(x, y):
+    obj = bpy.data.objects["PB_land_Terrain_land"]
+    ev = obj.evaluated_get(bpy.context.evaluated_depsgraph_get())
+    hit = ev.ray_cast((x, y, 500.0), (0.0, 0.0, -1.0))
+    return hit[1].z if hit[0] else None
+
+
+check("Terrain: every biome has a palette, relief and scatter list",
+      all({"ramp", "amplitude", "scatter", "rock", "earth"} <= set(b) for b in addon.PLAN_BIOMES.values()) and len(addon.PLAN_BIOMES) >= 6)
+tp = addon.plan_terrain_params({"biome": "desert"})
+check("Terrain: params take the biome's numbers", tp["amplitude"] == addon.PLAN_BIOMES["desert"]["amplitude"] and tp["water"] is False)
+check("Terrain: explicit params win over the biome", addon.plan_terrain_params({"biome": "desert", "amplitude": 9.0})["amplitude"] == 9.0)
+for bad, why in (({"biome": "moon"}, "unknown biome"), ({"width": 5.0}, "too small"), ({"resolution": 0.5, "width": 1000.0, "depth": 1000.0}, "grid too fine"),
+                 ({"scatter": 9.0}, "scatter range"), ({"island": 2.0}, "island range")):
+    try:
+        addon.plan_terrain_params(bad)
+        check("Terrain: rejects %s" % why, False)
+    except addon.PlanError:
+        check("Terrain: rejects %s" % why, True)
+errs, _w = addon.plan_validate(addon.plan_node("t", "terrain", "terrain", params={"biome": "moon"}))
+check("Terrain: validation reports a bad biome", any("biome" in e for e in errs), str(errs))
+
+plan = _terrain_plan()
+pads = addon._terrain_pads(plan, addon.plan_resolve(plan), ("land",))
+check("Terrain: pads for a house (polygon) and a street (capsule)", sorted(k for k, _g, _h in pads) == ['capsule', 'poly'], str([k for k, _g, _h in pads]))
+check("Terrain: pad heights are the plans' own z", sorted(round(h if k == "poly" else g[3], 2) for k, g, h in pads) == [0.5, 2.0])
+res = addon.plan_build(bpy.context, plan)
+bpy.context.view_layer.update()
+check("Terrain: the plan builds terrain, house and street", {"land", "land/cot", "land/lane"} <= set(res["built"]), str(res["built"]))
+terrain = bpy.data.objects.get("PB_land_Terrain_land")
+check("Terrain: a ground object exists with a Geometry Nodes modifier",
+      terrain is not None and any(m.type == 'NODES' and m.node_group is not None for m in terrain.modifiers))
+ng = terrain.modifiers[0].node_group
+check("Terrain: the tree exposes amplitude, feature size and sea level",
+      {"Amplitude", "Feature Size", "Sea Level", "Island", "Seed"} <= {i.name for i in ng.interface.items_tree})
+check("Terrain: the tree uses real noise", any(n.bl_idname == "ShaderNodeTexNoise" for n in ng.nodes))
+zs = [_terrain_z(x, y) for x in range(-70, 71, 14) for y in range(-70, 71, 14)]
+check("Terrain: relief varies (more than 2 m between low and high)", None not in zs and max(zs) - min(zs) > 2.0, "%.2f..%.2f" % (min(zs), max(zs)))
+check("Terrain: the ground under the house is flattened to its z (2.0)", abs(_terrain_z(20.0, 10.0) - 2.0) < 0.05, str(_terrain_z(20.0, 10.0)))
+check("Terrain: the ground along the street is flattened to its z (0.5)", abs(_terrain_z(-25.0, -30.0) - 0.5) < 0.05, str(_terrain_z(-25.0, -30.0)))
+check("Terrain: the pad eases into the relief (no cliff within the margin)",
+      abs(_terrain_z(20.0 + 3.5 + 6.0, 10.0) - _terrain_z(20.0 + 3.5 + 8.0, 10.0)) < 1.2)
+col = terrain.evaluated_get(bpy.context.evaluated_depsgraph_get()).data.attributes.get("Col")
+check("Terrain: biome colours are stored on the evaluated mesh", col is not None and col.domain == 'POINT')
+check("Terrain: the ground has its biome material", terrain.data.materials[0].name == "LA_Terrain_meadow")
+check("Terrain: a skirt closes the sides (more vertices than the grid)", len(terrain.data.vertices) > (160 // 4 + 1) ** 2)
+scatter = [o for o in bpy.data.objects if o.name.startswith("PB_land.scatter_Scatter_")]
+check("Terrain: scatter makes a few merged objects (not one per tree)", 1 <= len(scatter) <= 4, str([o.name for o in scatter]))
+check("Terrain: the meadow gets trees", any("tree" in o.name for o in scatter))
+house_poly = [(20.0 + p[0], 10.0 + p[1]) for p in addon.plan_footprint(plan["children"][0])]
+bad = 0
+for o in scatter:
+    for v in o.data.vertices:
+        if min(p[0] for p in house_poly) - 0.1 < v.co.x < max(p[0] for p in house_poly) + 0.1 and \
+           min(p[1] for p in house_poly) - 0.1 < v.co.y < max(p[1] for p in house_poly) + 0.1:
+            bad += 1
+check("Terrain: nothing is scattered on top of the house", bad == 0, str(bad))
+sig = sorted((o.name, len(o.data.vertices)) for o in bpy.data.objects if o.type == 'MESH' and o.name.startswith("PB_land"))
+addon.plan_build(bpy.context, plan)
+sig2 = sorted((o.name, len(o.data.vertices)) for o in bpy.data.objects if o.type == 'MESH' and o.name.startswith("PB_land"))
+check("Terrain: a rebuild gives exactly the same result and leaves no duplicates", sig == sig2)
+check("Terrain: node groups are not leaked on rebuild", len([g for g in bpy.data.node_groups if g.name.startswith("GLA_Terrain_land")]) <= 2)
+
+addon.plan_build(bpy.context, _terrain_plan(scatter=0.0))
+check("Terrain: scatter 0 builds no vegetation", not [o for o in bpy.data.objects if "scatter" in o.name])
+check("Terrain: the meadow has lakes (water plane)", any(o.name.startswith("PB_land.water") for o in bpy.data.objects) or
+      min(_terrain_z(x, y) for x in range(-70, 71, 10) for y in range(-70, 71, 10)) > addon.plan_terrain_params({})["sea_level"] - 0.2)
+for biome in addon.PLAN_BIOMES:
+    r = addon.plan_build(bpy.context, _terrain_plan(biome=biome))
+    check("Terrain: biome %s builds" % biome, "land" in r["built"] and bpy.data.objects.get("PB_land_Terrain_land") is not None)
+r = addon.plan_build(bpy.context, _terrain_plan(biome="island"))
+check("Terrain: the island biome has water around it", any(o.name.startswith("PB_land.water") for o in bpy.data.objects))
+check("Terrain: the island sinks at its rim", _terrain_z(75.0, 0.0) < addon.plan_terrain_params({"biome": "island"})["sea_level"])
+r = addon.plan_build(bpy.context, _terrain_plan(biome="desert"))
+check("Terrain: the desert has cacti and no water", any("cactus" in o.name for o in bpy.data.objects) and not any(o.name.startswith("PB_land.water") for o in bpy.data.objects))
+mountain = _terrain_plan(biome="mountain")
+addon.plan_build(bpy.context, mountain)
+check("Terrain: mountains are tall", max(_terrain_z(x, y) for x in range(-70, 71, 10) for y in range(-70, 71, 10)) > 8.0)
+
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+ya = addon.plan_node("ya", "compound", "yard", transform={"x": -50.0, "y": 0.0, "z": 0.0, "rot": 0.0},
+                     footprint=[[-6, -6], [6, -6], [6, 6], [-6, 6]], params={"fence": "none"},
+                     anchors=[{"id": "gate", "kind": "gate", "pos": [6.0, 0.0, 0.0], "dir": 0.0, "width": 3.0, "level": 0}])
+yb = addon.plan_node("yb", "compound", "yard", transform={"x": 50.0, "y": 0.0, "z": 4.0, "rot": 0.0},
+                     footprint=[[-6, -6], [6, -6], [6, 6], [-6, 6]], params={"fence": "none"},
+                     anchors=[{"id": "gate", "kind": "gate", "pos": [-6.0, 0.0, 0.0], "dir": 180.0, "width": 3.0, "level": 0}])
+lane = addon.plan_node("lane", "block", "path", params={"from": "ya/gate", "to": "yb/gate", "road_width": 3.0, "fill": []})
+slope_plan = addon.plan_node("land", "terrain", "terrain", params={"biome": "meadow", "width": 160.0, "depth": 160.0, "resolution": 2.0,
+                                                                    "scatter": 0.0}, children=[ya, yb, lane])
+exp, _w = addon.plan_expand_layout(slope_plan)
+graph = [c for c in exp["children"] if c["id"] == "lane"][0]["params"]["road_graph"]
+check("Terrain: a block with fill [] is a bare road (no lots)", not [c for c in exp["children"] if c.get("generated")])
+check("Terrain: a path between plans on different heights stores its end heights", graph.get("z") == {"from": 0.0, "to": 4.0}, str(graph.get("z")))
+addon.plan_build(bpy.context, slope_plan)
+bpy.context.view_layer.update()
+road = [o for o in bpy.data.objects if o.name.startswith("PB_land.lane_Road")][0]
+rz = [v.co.z for v in road.data.vertices]
+check("Terrain: the sloping path climbs from 0 to 4 m", min(rz) < 0.2 and max(rz) > 3.8, "%.2f..%.2f" % (min(rz), max(rz)))
+check("Terrain: the ground under the middle of the path follows its slope (about 2 m)", abs(_terrain_z(0.0, 0.0) - 2.0) < 0.35, str(_terrain_z(0.0, 0.0)))
+check("Terrain: the ground at the high yard is flattened to its own height (4 m)", abs(_terrain_z(50.0, 0.0) - 4.0) < 0.05, str(_terrain_z(50.0, 0.0)))
+check("Terrain: the ground at the low yard stays at 0", abs(_terrain_z(-50.0, 0.0)) < 0.05, str(_terrain_z(-50.0, 0.0)))
+check("Terrain: the path surface meets the ground (within 0.3 m) in the middle",
+      abs((min(rz) + max(rz)) / 2.0 - _terrain_z(0.0, 0.0)) < 0.3, "%.2f vs %.2f" % ((min(rz) + max(rz)) / 2.0, _terrain_z(0.0, 0.0)))
+
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+bpy.context.scene.wfc_plan_biome = 'forest'
+bpy.ops.object.gla_plan_create(kind='TERRAIN')
+tid = addon.plan_list_ids()[0]
+stored = addon.plan_read_from_blend(tid)
+check("Terrain: the Terrain button stores a terrain plan with a hamlet, a farm, a watchtower and a path",
+      stored["type"] == "terrain" and {c["id"] for c in stored["children"]} == {"hamlet", "farm", "watch", "path"} and stored["params"]["biome"] == "forest")
+check("Terrain: the summary mentions the terrain's contents", "tower" in addon.plan_summary(stored))
+bpy.ops.object.gla_plan_build(plan_id=tid)
+check("Terrain: the example builds buildings, a path and a forest",
+      any(o.name.startswith("PB_%s.hamlet" % tid) for o in bpy.data.objects) and any(o.name.startswith("PB_%s.path" % tid) for o in bpy.data.objects)
+      and any("scatter" in o.name for o in bpy.data.objects))
+
+
+# ==============================================================================
+print("\n--- Plans: walled town ---")
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+town = addon.plan_new_example(bpy.context.scene, 'TOWN', set())
+exp, tw = addon.plan_expand_layout(town)
+gen = [c for c in exp["children"] if c.get("generated")]
+towers = [c for c in gen if c["kind"] == "tower"]
+check("Town: a ring of wall towers (4..10)", 4 <= len(towers) <= 10, str(len(towers)))
+gate = town["anchors"][0]["pos"]
+check("Town: no tower stands in the gateway", all(math.hypot(t["transform"]["x"] - gate[0], t["transform"]["y"] - gate[1]) > 5.0 for t in towers))
+streets = [c for c in exp["children"] if c["id"] == "streets"][0]
+lots = [c for c in streets["children"] if c.get("generated")]
+check("Town: the streets are lined with houses (15+)", len(lots) >= 15, str(len(lots)))
+check("Town: every lot lies inside the wall circle", all(math.hypot(c["transform"]["x"], c["transform"]["y"]) < 66.0 for c in lots))
+res = addon.plan_build(bpy.context, town)
+check("Town: the walled town builds (wall, towers, roads, houses)", len(res["built"]) >= 20, str(len(res["built"])))
+check("Town: the wall and the gate road exist", any("Fence" in o.name for o in bpy.data.objects) and any("gate_road" in o.name for o in bpy.data.objects))
+
+# ==============================================================================
 print()
 if failures:
     print(f"{len(failures)} CHECK(S) FAILED:")

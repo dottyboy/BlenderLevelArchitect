@@ -4,7 +4,7 @@
 
 Jobs: castle_still, castle_turntable, ruin_slider, tint_cycle, tower_trio, tower_cutaway, hall_cutaway,
       level_still, round_rooms_still, seeds_gallery, houses_still, grounds_still, fortress_still, fortress_turntable, block_still, farm_still,
-      styles_still, hutforms_still, organic_still, roundtown_still, mixed_still, hutcluster_still
+      styles_still, hutforms_still, organic_still, roundtown_still, mixed_still, hutcluster_still, biomes_still, townland_still
 quality: draft (default, 16 samples) or final (64 samples).
 The frames land as PNGs; tools/make_gif.sh turns a frame folder into a GIF with ffmpeg.
 """
@@ -324,5 +324,27 @@ elif JOB in ("styles_still", "hutforms_still", "organic_still", "roundtown_still
         la.plan_build(bpy.context, plan)
         camera(cam[0], cam[1], lens=32)
         render(JOB.replace("_still", ""))
+elif JOB == "biomes_still":
+    setup_render(960, 540)
+    for biome in ([os.environ["BIOME_ONLY"]] if os.environ.get("BIOME_ONLY") else la.PLAN_BIOMES):
+        clear_scene()
+        world_and_sun(ground=None)
+        sc.wfc_plan_biome = biome
+        plan = la.plan_new_example(sc, 'TERRAIN', set())
+        plan["children"][2]["transform"]["z"] = 4.0          # the watchtower on its own height
+        if biome == "mountain":
+            plan["params"]["amplitude"] = 12.0
+        la.plan_build(bpy.context, plan)
+        camera((-15, -165, 62), (0, -30, 0), lens=30)
+        render("biome_" + biome)
+elif JOB == "townland_still":
+    setup_render(1280, 720)
+    clear_scene()
+    world_and_sun(ground=None)
+    town = la.plan_new_example(sc, 'TOWN', set())
+    land = la.plan_node("land", "terrain", "terrain", params={"biome": "meadow", "width": 320.0, "depth": 320.0}, children=[town])
+    la.plan_build(bpy.context, land)
+    camera((0, -215, 125), (0, 0, 0), lens=30)
+    render("townland")
 else:
     raise SystemExit("unknown job " + JOB)

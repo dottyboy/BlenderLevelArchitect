@@ -30,7 +30,7 @@ brick-textured masonry, real doors and windows, spiral-stair towers, ruins, and 
 | **Structures** | A round **Tower** (spiral stairs, railing, lanterns, furniture) and a walled **Castle** (four towers, wall walk, gate, furnished keep). |
 | **Ruins** | One slider breaks towers, castles and walls down: stepped jagged tops, breaches, collapsed arches, rubble. Doorways stay passable. |
 | **Doors, windows, props** | Arched / pointed / flat doors with swinging panels, windows with glass, torches with real lights, themed furniture. |
-| **Plans** *(experimental)* | Describe a site as a nested plan — fortress, farm, hamlet, street, district, hut cluster — in one of **seven style packs** (or a mix), with regular, round or organic shapes; stored in the .blend and as JSON. See [Plans](#plans-from-one-building-to-a-site-experimental) and [the roadmap](docs/WORLD_GENERATOR_PLAN.md). |
+| **Plans** *(experimental)* | Describe a site as a nested plan — fortress, farm, hamlet, street, district, walled town, hut cluster — in one of **seven style packs** (or a mix), with regular, round or organic shapes, standing on a **Geometry Nodes terrain** in one of six biomes; stored in the .blend and as JSON. See [Plans](#plans-from-one-building-to-a-site-experimental) and [the roadmap](docs/WORLD_GENERATOR_PLAN.md). |
 | **Engine export** | glTF/GLB, collision mesh, and **game packages**: glb + JSON of walkable areas, rooms, stairs, lights and props — per floor if you like. |
 | **Tested** | 1000+ automated checks (ray-cast passability, normals, vertex budgets, round-trips) on Blender 4.2 LTS and 5.2. |
 
@@ -87,6 +87,16 @@ generator builds it. Plans live in the .blend and as `.plan.json`, are fully see
 </tr>
 </table>
 
+### Terrain and biomes
+
+<p align="center"><img src="docs/img/townland.png" alt="A walled round town on a meadow terrain with lakes, trees and a trodden-earth pad under the town" width="900"></p>
+
+A **terrain** plan is a ground sheet made by a **Geometry Nodes** modifier (noise relief, island fall-off, colours by altitude and slope).
+Everything planned on it stands on a flattened pad at its own height, and paths between plans on different heights slope. Six biomes —
+meadow, forest, desert, tundra, mountains, island — bring their own palette, relief, lakes or sea, and trees, bushes, rocks and cacti.
+
+<p align="center"><img src="docs/img/biomes_sheet.png" alt="The same hamlet, farm and watchtower in the meadow, forest, desert, tundra, mountains and island biomes" width="900"></p>
+
 ### Seven style packs and a mix
 
 <p align="center"><img src="docs/img/styles_sheet.png" alt="The same village in Medieval, Egyptian, Mexican, Chinese, Inca, Futuristic and Alpine styles, and a mixed street" width="900"></p>
@@ -112,9 +122,9 @@ levels above a basement, on stilts, as dwelling or storage — and they can be *
   keep the way from the gate to the castle free and turn doors toward it.
 * **Blocks**: a road graph (hand-made or generated: grid, organic, ring) with kerbed stone roads and buildings along both sides; a block can
   also be a road between two anchors, e.g. farm gate to castle gate.
-* In Blender: sidebar **Level Architect > Plans (experimental)** — choose **Style** and **Shape**, pick a button, press **Build**.
+* In Blender: sidebar **Level Architect > Plans (experimental)** — choose **Style**, **Shape** and **Biome**, pick a button, press **Build**.
   Full guide: [docs/USER_GUIDE.md](docs/USER_GUIDE.md#plans-sites-villages-towns); format: [docs/PLAN_FORMAT.md](docs/PLAN_FORMAT.md);
-  roadmap towards towns, terrain and biomes: [docs/WORLD_GENERATOR_PLAN.md](docs/WORLD_GENERATOR_PLAN.md).
+  roadmap towards bigger settlements, rivers and regions: [docs/WORLD_GENERATOR_PLAN.md](docs/WORLD_GENERATOR_PLAN.md).
 
 ## Install
 

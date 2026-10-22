@@ -67,25 +67,40 @@ building plans are a thin wrapper over the existing builders.
 
 ## 5. Terrain and biomes (Geometry Nodes)
 
+Implemented in 0.48.0. A `terrain` node is a rectangular ground sheet centred on its transform; the plans below it are
+placed on it and the ground is flattened under them.
+
 ```json
 {
-  "type": "terrain", "id": "land", "footprint": [[-200,-200],[200,-200],[200,200],[-200,200]],
+  "type": "terrain", "id": "land", "kind": "terrain",
   "params": {
-    "heightfield": {"base": 0.0, "noise_scale": 80.0, "amplitude": 12.0, "seed": null},
-    "water_level": -1.0,
-    "rivers": [{"path": [[-200,40],[0,10],[200,60]], "width": 6.0, "depth": 1.5}],
-    "pads": "auto",                    // flatten a pad under every plan; auto = from footprints
-    "pad_blend": 6.0,                  // metres over which terrain blends into a pad
-    "biomes": [{"id": "meadow", "region": "noise", "weight": 1.0}, {"id": "forest", "region": [[...]]}]
-  }
+    "biome": "forest",            // meadow | forest | desert | tundra | mountain | island
+    "width": 240.0, "depth": 240.0, "resolution": 2.0,   // metres; grid cell size 0.5..10 (max 250 000 cells)
+    "pad_margin": 10.0,           // metres over which the ground eases into a pad (never less than 0.9 x amplitude)
+    "scatter": 1.0,               // vegetation / rock density multiplier, 0 = none
+    // optional overrides of the biome's own numbers:
+    "amplitude": 6.0, "feature_size": 55.0, "detail": 4.0, "roughness": 0.5,
+    "base": 0.0, "sea_level": -4.5, "island": 0.0, "water": true
+  },
+  "children": [ ... plans placed on the terrain ... ]
 }
 ```
 
-* One Geometry Nodes group builds the heightfield from these values; pads and rivers come in as point/curve inputs,
-  so changing a building moves its pad.
-* A **biome** is a named parameter set: ground materials, vegetation kinds and density, rock density, allowed building
-  kinds, default style pack. Regions are polygons or noise masks; transitions blend.
-* Biome list for later: meadow, forest, desert, tundra, mountain, valley, wetland, urban.
+* **Heights.** Python lays the grid and writes four per-vertex attributes (`pad_h`, `pad_w`, `edge`, `skirt`); a **Geometry Nodes**
+  modifier (`GLA_Terrain_<id>`) makes the relief from 4D noise (inputs *Amplitude, Feature Size, Detail, Roughness, Seed, Base,
+  Sea Level, Island, Skirt Depth* stay editable in the modifier panel), blends the pads in, drops the rim for islands and adds a skirt
+  so the sheet is a solid slab. The same tree writes the biome colours to a `Col` attribute (altitude ramp, rock on steep slopes,
+  trodden earth under plans, dark skirt) that the terrain material reads.
+* **Pads.** Every top-level building or compound below the terrain (and every road of a block) flattens the ground to the plan's own
+  world `z`, 1.2 m + 0.75 cells beyond its outline, then eases back into the relief over `pad_margin`. Overlapping pads blend by weight.
+  A path between plans on different heights (`from` / `to` anchors) slopes: the pad and the road follow the line between the anchor heights
+  (`road_graph.z` holds the two end heights, filled in by the layout step).
+* **Water.** If any ground lies below `sea_level` a translucent water plane is added at that height (lakes, or the sea around an island).
+* **Scatter.** Each biome lists vegetation rules (`tree` with crown/leaf/height, `bush`, `rock`, `cactus`; per hectare, slope and altitude
+  limits, a noise-based cluster mask). Points are tested against the evaluated terrain, kept away from pads and each other, and merged
+  into one mesh per rule (`PB_<id>.scatter`).
+* `"fill": []` on a block means "a bare road, no lots" (the default fill still makes houses when the key is absent).
+* Not yet: rivers, biome regions blended across one terrain, terrain from a heightmap image, roads that curve with the ground.
 
 ## 6. Storage
 

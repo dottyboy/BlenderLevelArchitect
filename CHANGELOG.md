@@ -3,6 +3,19 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.48.0 — plans: terrain, biomes, towns
+
+- **Terrain plans** (`type: "terrain"`): a gridded ground sheet whose relief and colours come from a **Geometry Nodes** modifier
+  (4D noise, island fall-off, flattening pads, skirt; *Amplitude, Feature Size, Detail, Roughness, Seed, Base, Sea Level, Island* stay
+  editable in the modifier panel). Every building, compound and road below it flattens the ground to its own height and eases back into
+  the relief; paths between plans on different heights slope.
+- **Six biomes**: meadow, forest, desert, tundra, mountains, island — ground palette (altitude ramp, rock on slopes, trodden earth under
+  plans), relief, lakes or sea, and scattered trees, bushes, rocks and cacti (merged into a few meshes). A *Biome* dropdown and a
+  **Terrain** button (hamlet + farm + watchtower + path on a terrain) in the Plans panel.
+- **Walled town** example (**Town** button): round wall with towers, gate and approach road, ring-and-spoke streets with houses.
+  Wall towers are never placed in a gateway.
+- `"fill": []` on a block now means a bare road (no lots); sloping connection roads; terrain, biome and town docs.
+
 ## 0.47.0 — plans: styles, shapes, huts
 
 - **Seven style packs** — Medieval, Egyptian, Mexican adobe, Chinese, Inca, Futuristic, Alpine chalet — plus **Mixed** (every building,

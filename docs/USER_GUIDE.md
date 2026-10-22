@@ -102,8 +102,8 @@ gone. Doorways stay passable. The result is seeded, so a ruin is reproducible.
 *Experimental.* A **plan** describes a whole site as nested data — a fortress with a keep and corner towers, a farm, a hamlet,
 a street, a district, a cluster of huts — and builds it for you. Open **Level Architect > Plans (experimental)** in the sidebar.
 
-1. Pick a **Style** (the look of the buildings) and a **Shape** (regular, round or organic outlines and streets).
-2. Press one of the buttons — **Tower, Castle, Grounds, Fortress, Farm, Hamlet, Street, Block, House, Chapel, Stable, Hut, Hut cluster**.
+1. Pick a **Style** (the look of the buildings), a **Shape** (regular, round or organic outlines and streets) and, for terrain, a **Biome**.
+2. Press one of the buttons — **Tower, Castle, Grounds, Fortress, Farm, Hamlet, Street, Block, House, Chapel, Stable, Hut, Huts, Town, Terrain**.
    A plan is created at the 3D cursor and listed below the buttons with a one-line summary.
 3. Press **Build** on the plan. Everything the plan describes appears in a `Built_<name>` collection; **Build** again after any
    change replaces it. **Freeze** writes the automatically laid-out buildings into the plan as ordinary entries (so you can
@@ -178,7 +178,35 @@ A **block** has a road graph (nodes and straight edges, or a generator: `grid`, 
 Buildings are generated along both sides of every road — `fill` rules choose the kind with a weight, with random size ranges, colours
 and roofs — with their doors toward the road; lots that would touch a road, another building or the block's outline are skipped.
 A block with only `from` and `to` anchor references (for example `"farm/gate"` to `"castle/gate"`) becomes a straight road between those
-two anchors, wherever the plans are placed or turned.
+two anchors, wherever the plans are placed or turned. Such a block gets houses along it unless it says `"fill": []` (a bare road).
+
+### Terrain and biomes
+
+A **terrain** plan is a ground sheet with the other plans standing on it. The **Terrain** button makes a 240 x 240 m meadow (or whichever
+**Biome** you chose) with a hamlet, a farm, a watchtower and a path between the farm and the hamlet; put any plan inside a terrain
+(as its child) and the ground is flattened under it, at the plan's own height (`z`), easing back into the relief over a few metres.
+A path between two plans on different heights slopes from one to the other.
+
+| Biome | Look |
+|---|---|
+| Meadow | rolling grass, lakes in the hollows, scattered trees, bushes and stones |
+| Forest | dense dark conifers and round trees, bushes, small lakes |
+| Desert | dunes of sand, cacti and stones, no water |
+| Tundra | snow and moss, a few small conifers, many stones, ponds |
+| Mountains | tall relief, forest in the valleys, rock and snow above |
+| Island | land in the middle, sea all around, beach, trees and bushes |
+
+The relief is made by a **Geometry Nodes** modifier on the terrain object (`GLA Terrain`): change *Amplitude, Feature Size, Detail,
+Roughness, Seed, Base, Sea Level* or *Island* in the modifier panel and the ground, colours and water-line react at once (the water plane
+and the vegetation are placed at build time, so press **Build** again after big changes). In the plan itself you can set `biome`, `width`,
+`depth`, `resolution` (grid cell, smaller = finer and slower), `scatter` (vegetation density, 0 = none), and override the biome's numbers
+(`amplitude`, `feature_size`, `sea_level`, `island`, ...) — see [PLAN_FORMAT.md](PLAN_FORMAT.md).
+
+### Walled towns
+
+The **Town** button makes a round town: a stone wall with towers (none in the gateway) and a gate with an approach road, and inside
+it a ring-and-spoke street pattern lined with houses, chapels and stables. Put it inside a terrain to see it on the ground. Use the
+**Style** dropdown for another culture, or change `params.shape` / the block's `road_generator` for another layout.
 
 ### Tips for plans
 
