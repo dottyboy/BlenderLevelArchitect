@@ -82,11 +82,16 @@ in the .blend and as `.plan.json`, are fully seeded, and can place buildings for
 <td width="50%"><img src="docs/img/plans_grounds.png" alt="Castle grounds with a chapel, stables, houses, a well and a watchtower inside a stone enclosure"><br><sub><b>Castle grounds</b> — chapel, stable, houses, well and watchtower laid out automatically</sub></td>
 </tr>
 <tr>
+<td><img src="docs/img/plans_block.png" alt="A district: a grid of streets with varied houses facing the road"><br><sub><b>Block</b> — a grid of streets, houses facing the road in varied colours and roofs</sub></td>
+<td><img src="docs/img/plans_farm.png" alt="A farm with a wooden fence, a barn, a house and a well"><br><sub><b>Farm</b> — wooden fence with a gate, barn, house and well</sub></td>
+</tr>
+<tr>
 <td colspan="2"><img src="docs/img/plans_houses.png" alt="A house, a two-storey house, a chapel, a stable and a ruin"><br><sub>Building plans: house, two-storey house, chapel (slate roof), stable, ruin</sub></td>
 </tr>
 </table>
 
-* **Building plans**: tower, castle, house, chapel, stable, barn, well — masonry walls, doors, windows, terracotta or slate roofs, ruin.
+* **Building plans**: tower, castle, keep, house (with chimney), chapel, stable, barn, well — masonry walls, doors, windows, terracotta or slate roofs, ruin.
+* **Block plans**: a road graph with kerbed stone roads, lots along both sides (weighted building rules, random sizes, colours and roofs, doors toward the road); a block can also be just a road between two anchors, e.g. farm gate to castle gate.
 * **Compound plans**: a footprint with a stone enclosure and gate, and `layout` rules ("1 chapel on the wall, 1-2 stables, 3 houses")
   that place buildings without overlap, keep the way from the gate to the castle free and turn doors toward it.
 * In Blender: sidebar **Level Architect > Plans (experimental)** — pick Tower, Castle, Grounds, Fortress, Farm, Hamlet, House, Chapel or

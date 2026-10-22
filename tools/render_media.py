@@ -3,7 +3,7 @@
     blender --background --factory-startup --python tools/render_media.py -- <job> <out_dir> [quality]
 
 Jobs: castle_still, castle_turntable, ruin_slider, tint_cycle, tower_trio, tower_cutaway, hall_cutaway,
-      level_still, round_rooms_still, seeds_gallery, houses_still, grounds_still, fortress_still, fortress_turntable
+      level_still, round_rooms_still, seeds_gallery, houses_still, grounds_still, fortress_still, fortress_turntable, block_still, farm_still
 quality: draft (default, 16 samples) or final (64 samples).
 The frames land as PNGs; tools/make_gif.sh turns a frame folder into a GIF with ffmpeg.
 """
@@ -224,7 +224,7 @@ elif JOB == "seeds_gallery":
         mid = sc.wfc_tile_size * sc.wfc_width / 2
         camera((mid, mid - 24, 36), (mid, mid, 0), lens=34)
         render("f%03d" % i)
-elif JOB in ("houses_still", "grounds_still", "fortress_still", "fortress_turntable"):
+elif JOB in ("houses_still", "grounds_still", "fortress_still", "fortress_turntable", "block_still", "farm_still"):
     setup_render(1280, 720) if JOB.endswith("_still") else setup_render(640, 360)
     clear_scene()
     world_and_sun()
@@ -243,10 +243,16 @@ elif JOB in ("houses_still", "grounds_still", "fortress_still", "fortress_turnta
         camera((8, -58, 22), (8, 0, 2.0), lens=34)
         render("houses")
     else:
-        plan = la.plan_new_example(sc, 'GROUNDS' if JOB == "grounds_still" else 'FORTRESS', set())
+        plan = la.plan_new_example(sc, {"grounds_still": 'GROUNDS', "block_still": 'BLOCK', "farm_still": 'FARM'}.get(JOB, 'FORTRESS'), set())
         la.plan_write_to_blend(sc, plan)
         la.plan_build(bpy.context, plan)
-        if JOB == "grounds_still":
+        if JOB == "block_still":
+            camera((0, -75, 70), (0, 0, 0), lens=32)
+            render("block")
+        elif JOB == "farm_still":
+            camera((0, -44, 26), (0, 0, 0), lens=32)
+            render("farm")
+        elif JOB == "grounds_still":
             camera((10, -85, 55), (6, 0, 0), lens=30)
             render("grounds")
         elif JOB == "fortress_still":

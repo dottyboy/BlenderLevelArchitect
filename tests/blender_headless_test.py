@@ -3908,7 +3908,7 @@ for c in list(bpy.data.collections):
 scene.cursor.location = (0.0, 0.0, 0.0)
 fort = addon.plan_new_example(scene, 'FORTRESS', set())
 check("Fortress: the example is a compound with a castle inside", fort["type"] == "compound"
-      and [c["kind"] for c in fort["children"]] == ["castle"] and "layout" in fort["params"])
+      and [c["kind"] for c in fort["children"]] == ["keep"] and "layout" in fort["params"])
 exp, warns = addon.plan_expand_layout(fort)
 towers = [c for c in exp["children"] if c["kind"] == "tower"]
 check("Fortress: one tower on each of the four corners",
@@ -4089,6 +4089,105 @@ check("Connect: a missing target anchor is a validation error",
       bool(addon.plan_validate(addon.plan_node("w2", "settlement", "pair", children=[sitea, siteb, broken]))[0]))
 check("Panel: Street and Block buttons create plans",
       bpy.ops.object.gla_plan_create(kind='STREET') == {'FINISHED'} and bpy.ops.object.gla_plan_create(kind='BLOCK') == {'FINISHED'})
+
+# ==============================================================================
+print("\n--- Plans: polish round 1 (vary, chimney, keep, wood) ---")
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+scene.cursor.location = (0.0, 0.0, 0.0)
+street = addon.plan_new_example(scene, 'STREET', set())
+exp, _ = addon.plan_expand_layout(street)
+houses = [c for c in exp["children"] if c["kind"] == "house"]
+check("Polish: street houses get varied brick and roof colours",
+      len({c["params"]["brick_color"] for c in houses}) >= 3 and len({c["params"]["roof_color"] for c in houses}) == 2)
+check("Polish: the variation is deterministic", exp == addon.plan_expand_layout(street)[0])
+bad = addon.plan_node("v", "block", "street", params={"road_graph": {"nodes": {"a": [0, 0], "b": [9, 0]}, "edges": [["a", "b"]]},
+                                                      "fill": [{"kind": "house", "vary": {"brick_color": []}}]})
+check("Polish: an empty vary list is refused", bool(addon.plan_validate(bad)[0]))
+bad2 = addon.plan_node("v2", "compound", "yard", footprint=[[0, 0], [20, 0], [20, 20], [0, 20]],
+                       params={"layout": [{"kind": "house", "vary": "red"}]})
+check("Polish: a non-object vary is refused in layouts too", bool(addon.plan_validate(bad2)[0]))
+# chimney
+with_c = addon.plan_node("wc", "building", "house", transform={"x": 0.0, "y": 0.0, "z": 0.0, "rot": 0.0})
+without_c = addon.plan_node("nc", "building", "house", params={"chimney": False}, transform={"x": 50.0, "y": 0.0, "z": 0.0, "rot": 0.0})
+addon.plan_build(bpy.context, with_c)
+addon.plan_build(bpy.context, without_c)
+check("Polish: a default house has a chimney above the ridge", _bounds_of("wc")[5] > _bounds_of("nc")[5] + 0.5,
+      "%s vs %s" % (_bounds_of("wc")[5], _bounds_of("nc")[5]))
+check("Polish: chapel and stable have no chimney by default",
+      not addon.plan_house_params("chapel", {})["chimney"] and not addon.plan_house_params("stable", {})["chimney"])
+try:
+    addon.plan_build(bpy.context, addon.plan_node("bc", "building", "house", params={"chimney": "yes"}))
+    refused = False
+except addon.PlanError as exc:
+    refused = "chimney" in str(exc)
+check("Polish: chimney must be true or false", refused)
+# keep
+keep = addon.plan_node("kp", "building", "keep", transform={"x": 200.0, "y": 0.0, "z": 0.0, "rot": 0.0})
+check("Keep: builds", addon.plan_build(bpy.context, keep)["built"] == ["kp"])
+x0, x1, y0, y1, z0, z1 = _bounds_of("kp")
+check("Keep: a single free-standing block with the requested size (no towers or walls)",
+      abs((x1 - x0) - 9.0) < 0.8 and abs((y1 - y0) - 9.0) < 0.8 and z1 > 5.0, str((x1 - x0, y1 - y0, z1)))
+check("Keep: default footprint is its size plus wall thickness", addon.plan_footprint(keep) == addon._footprint_rect({"width": 9.0, "depth": 9.0}))
+hit = _ray((200.0, -9.0, 1.0), (0.0, 1.0, 0.0))
+check("Keep: the south door is open", hit is not None and hit.y > 2.0, str(hit))
+try:
+    addon.plan_build(bpy.context, addon.plan_node("kb", "building", "keep", params={"size": 2.0}))
+    refused = False
+except addon.PlanError as exc:
+    refused = "size" in str(exc)
+check("Keep: a tiny size is refused", refused)
+# fortress now uses the keep as its inner building
+fort = addon.plan_new_example(scene, 'FORTRESS', set())
+check("Polish: the fortress's inner building is a keep (no second curtain wall)", fort["children"][0]["kind"] == "keep")
+exp, _ = addon.plan_expand_layout(fort)
+check("Polish: layout doors face a keep like a castle",
+      all(abs(((math.degrees(math.atan2(-c["transform"]["y"], -c["transform"]["x"])) % 360.0) - (c["transform"]["rot"] - 90.0) % 360.0) + 180.0) % 360.0 - 180.0 <= 46.0
+          for c in exp["children"] if c["kind"] == "house"))
+# wood texture
+wf2 = addon.plan_node("w2", "compound", "paddock", footprint=[[-5, -5], [5, -5], [5, 5], [-5, 5]], params={"fence": "wood"},
+                      transform={"x": 300.0, "y": 0.0, "z": 0.0, "rot": 0.0})
+addon.plan_build(bpy.context, wf2)
+wimg = bpy.data.images.get("LA_Wood_Albedo")
+check("Polish: wood has a packed plank texture", wimg is not None and wimg.packed_file is not None
+      and any(n.type == 'TEX_IMAGE' for n in bpy.data.materials["LA_Wood"].node_tree.nodes))
+check("Polish: terracotta is less saturated than before (red channel under 0.6 at the palette centre)",
+      addon._terracotta_palette(__import__("numpy"), 0.0, 0.0, 1.0)[0] < 0.6)
+
+# ==============================================================================
+print("\n--- Plans: panel summary ---")
+sm = addon.plan_summary(addon.plan_new_example(scene, 'GROUNDS', set()))
+check("Summary: grounds lists its buildings and layout rules", "castle" in sm and "tower" in sm and "layout rule" in sm, sm)
+sm = addon.plan_summary(addon.plan_new_example(scene, 'STREET', set()))
+check("Summary: a street mentions its road segment and fill rules", "road segment" in sm and "layout rule" in sm, sm)
+check("Summary: a lone house", addon.plan_summary(addon.plan_node("h", "building", "house")) == "1 house")
+addon.plan_write_to_blend(scene, addon.plan_new_example(scene, 'STREET', set()))
+check("Summary: the panel draws with plans stored", addon.plan_list_ids() != [] and
+      (lambda: [addon.VIEW3D_PT_GLAPlans.draw(types.SimpleNamespace(layout=_FakeLayout({"props": [], "ops": [], "sections": []}, False)), bpy.context)] and True)())
+
+# ==============================================================================
+print("\n--- Plans: kerbs ---")
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+cross = addon.plan_node("cx", "block", "crossing", params={
+    "road_graph": {"nodes": {"w": [-20, 0], "e": [20, 0], "s": [0, -20], "n": [0, 20], "c": [0, 0]},
+                   "edges": [["w", "c"], ["c", "e"], ["s", "c"], ["c", "n"]]}, "skip_chance": 1.0})
+addon.plan_build(bpy.context, cross)
+bpy.context.view_layer.update()
+hit = _ray((10.0, 2.45, 2.0), (0.0, 0.0, -1.0))
+check("Kerb: a raised kerb runs along the side of the road", hit is not None and hit.z > 0.12, str(hit))
+hit = _ray((0.0, 2.45, 2.0), (0.0, 0.0, -1.0))
+check("Kerb: no kerb across the junction", hit is not None and hit.z < 0.1, str(hit))
+hit = _ray((10.0, 0.0, 2.0), (0.0, 0.0, -1.0))
+check("Kerb: the carriageway between the kerbs stays low", hit is not None and hit.z < 0.1, str(hit))
+seg = addon._clip_segment_to_convex((-5.0, 0.0), (5.0, 0.0), [(-1, -1), (1, -1), (1, 1), (-1, 1)])
+check("Kerb: segment clipping finds the part inside a square", seg is not None and abs(seg[0] - 0.4) < 1e-6 and abs(seg[1] - 0.6) < 1e-6, str(seg))
+check("Kerb: a segment that misses the square is not clipped",
+      addon._clip_segment_to_convex((-5.0, 3.0), (5.0, 3.0), [(-1, -1), (1, -1), (1, 1), (-1, 1)]) is None)
 
 # ==============================================================================
 print()

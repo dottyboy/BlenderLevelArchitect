@@ -3,7 +3,18 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
-## Unreleased — plans (M4)
+## 0.46.0 — plans (M3, M4 and a first polish round)
+
+Polish round 1 (on top of the M3/M4 entries below):
+- **Variety**: layout and fill rules take `vary` (`{"brick_color": [...], "roof_color": [...]}`), so houses on a street differ.
+  Streets, blocks and the hamlet use it. Terracotta is less saturated.
+- **Houses get a chimney** (`chimney`, on by default for houses only).
+- **Wood** has a packed plank texture instead of a flat colour.
+- **Keep** building plan (a free-standing keep); the Fortress now uses it, so there is no second curtain wall inside the ward.
+- **Roads get kerbs**, cut away where roads cross.
+- The Plans panel shows a one-line summary per plan.
+
+### plans (M4)
 
 - **Blocks and streets.** A `block` plan carries a road graph (`params.road_graph`: nodes and straight edges with optional
   widths); the road surface is built as flat stone ribbons and buildings are generated along both sides of every edge
@@ -14,7 +25,7 @@ reproduced exactly from its settings (see **Debug: Last Generation Params** in t
   straight road between those two anchors, wherever the plans are placed or rotated.
 - New **Street** (72 m street with houses, stables and barns on both sides) and **Block** (a grid of streets) examples.
 
-## Unreleased — plans (M3)
+### plans (M3)
 
 - **Wooden fence** (`fence: "wood"`): posts about every 2 m and two rails along the footprint, an open gap with taller gate posts at
   `gate` anchors; plain wood material.

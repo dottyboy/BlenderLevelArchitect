@@ -3,6 +3,37 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.46.0 — plans (M3, M4 and a first polish round)
+
+Polish round 1 (on top of the M3/M4 entries below):
+- **Variety**: layout and fill rules take `vary` (`{"brick_color": [...], "roof_color": [...]}`), so houses on a street differ.
+  Streets, blocks and the hamlet use it. Terracotta is less saturated.
+- **Houses get a chimney** (`chimney`, on by default for houses only).
+- **Wood** has a packed plank texture instead of a flat colour.
+- **Keep** building plan (a free-standing keep); the Fortress now uses it, so there is no second curtain wall inside the ward.
+- **Roads get kerbs**, cut away where roads cross.
+- The Plans panel shows a one-line summary per plan.
+
+### plans (M4)
+
+- **Blocks and streets.** A `block` plan carries a road graph (`params.road_graph`: nodes and straight edges with optional
+  widths); the road surface is built as flat stone ribbons and buildings are generated along both sides of every edge
+  (`lot_width`, `lot_depth`, `setback`, `lot_gap`, `skip_chance`, weighted `fill` rules with `size` ranges for width, depth
+  and floors). Doors face the road; buildings are skipped where they would touch a road, another building or the block's
+  footprint. Dead ends of the graph get `road` anchors.
+- **Connecting roads.** A block with `params.from` / `params.to` (anchor references, e.g. `"farm/gate"`) and no graph becomes a
+  straight road between those two anchors, wherever the plans are placed or rotated.
+- New **Street** (72 m street with houses, stables and barns on both sides) and **Block** (a grid of streets) examples.
+
+### plans (M3)
+
+- **Wooden fence** (`fence: "wood"`): posts about every 2 m and two rails along the footprint, an open gap with taller gate posts at
+  `gate` anchors; plain wood material.
+- **Barn** building plan; layout rule `near: "ring"` with `ring: [inner, outer]` places buildings in a ring around the compound's
+  centre; compounds without a castle (no `layout_target`) now turn doors toward their centre.
+- **Farm** example (wooden fence with gate, barn, house, optional stable, well in the yard) and **Hamlet** example (well in the
+  middle, chapel and 5-7 houses on a ring facing it) in the Plans panel.
+
 ## 0.45.0 — plans (M2)
 
 M2 in one list: house, chapel, stable and well plans; stone enclosure with gate anchors; automatic seeded layout with Freeze; roof tiles; corner towers and the Fortress example; fix for double-offset wrapped buildings.
