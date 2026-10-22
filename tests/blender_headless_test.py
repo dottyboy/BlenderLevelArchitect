@@ -3755,7 +3755,7 @@ nf = addon.plan_node("nf", "compound", "yard", footprint=[[-5, -5], [5, -5], [5,
 check("Fence: fence none builds nothing", addon.plan_build(bpy.context, nf)["built"] == [])
 try:
     addon.plan_build(bpy.context, addon.plan_node("wf", "compound", "yard", footprint=[[-5, -5], [5, -5], [5, 5], [-5, 5]],
-                                                  params={"fence": "wood"}))
+                                                  params={"fence": "iron"}))
     refused = False
 except addon.PlanError as exc:
     refused = "fence" in str(exc)
@@ -3929,6 +3929,66 @@ bad = addon.plan_node("bc", "compound", "yard", footprint=[[0, 0], [20, 0], [20,
                       params={"layout": [{"kind": "tower", "at": "middle"}]})
 check("Fortress: an unknown 'at' value is refused", bool(addon.plan_validate(bad)[0]))
 check("Fortress: the panel creates it", bpy.ops.object.gla_plan_create(kind='FORTRESS') == {'FINISHED'})
+
+# ==============================================================================
+print("\n--- Plans: farm, hamlet, wooden fence ---")
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+scene.cursor.location = (0.0, 0.0, 0.0)
+wf = addon.plan_node("wf", "compound", "paddock", footprint=[[-10, -8], [10, -8], [10, 8], [-10, 8]],
+                     params={"fence": "wood", "fence_height": 1.3}, transform={"x": 600.0, "y": 0.0, "z": 0.0, "rot": 0.0},
+                     anchors=[{"id": "gate", "kind": "gate", "pos": [0.0, -8.0, 0.0], "dir": 270.0, "width": 3.0}])
+check("Wood fence: builds", addon.plan_build(bpy.context, wf)["built"] == ["wf"])
+fobj = next(o for o in bpy.data.objects if o.name.startswith("PB_wf") and o.type == 'MESH')
+check("Wood fence: slots are brick, stone, roof(filler), wood and the wood slot is used",
+      [m.name for m in fobj.data.materials][-1] == "LA_Wood" and any(p.material_index == 3 for p in fobj.data.polygons))
+x0, x1, y0, y1, z0, z1 = _bounds_of("wf")
+check("Wood fence: spans the footprint, gate posts rise above the rails",
+      abs((x1 - x0) - 20.16) < 0.5 and abs((y1 - y0) - 16.16) < 0.5 and z1 > 1.5, str((x1 - x0, y1 - y0, z1)))
+hit = _ray((600.0, -14.0, 0.8), (0.0, 1.0, 0.0))
+check("Wood fence: the gate is open (ray at rail height runs through)", hit is None or hit.y > 6.0, str(hit))
+hit = _ray((606.0, -14.0, 0.5), (0.0, 1.0, 0.0))
+check("Wood fence: rails block away from the gate", hit is not None and hit.y < -7.0, str(hit))
+hit = _ray((620.0, 0.0, 0.5), (-1.0, 0.0, 0.0))
+check("Wood fence: the east side has rails", hit is not None and hit.x > 608.0, str(hit))
+check("Wood fence: cheap (< 1500 vertices)", len(fobj.data.vertices) < 1500, str(len(fobj.data.vertices)))
+# barn
+barn = addon.plan_node("bn", "building", "barn", transform={"x": 700.0, "y": 0.0, "z": 0.0, "rot": 0.0})
+check("Barn: builds", addon.plan_build(bpy.context, barn)["built"] == ["bn"])
+hit = _ray((700.0, -8.0, 1.0), (0.0, 1.0, 0.0))
+check("Barn: the wide door is passable", hit is not None and hit.y > 2.5, str(hit))
+# farm
+farm = addon.plan_new_example(scene, 'FARM', set())
+exp, warns = addon.plan_expand_layout(farm)
+kinds = sorted(c["kind"] for c in exp["children"])
+check("Farm: layout places barn, house and well (and maybe a stable)",
+      kinds.count("barn") == 1 and kinds.count("house") == 1 and kinds.count("well") == 1 and kinds.count("stable") <= 1, str(kinds) + str(warns))
+check("Farm: no castle, so doors face the middle of the yard",
+      all(abs(((math.degrees(math.atan2(-c["transform"]["y"], -c["transform"]["x"])) % 360.0) - (c["transform"]["rot"] - 90.0) % 360.0) + 180.0) % 360.0 - 180.0 <= 46.0
+          for c in exp["children"] if c["kind"] in ("barn", "house", "stable")))
+res = addon.plan_build(bpy.context, farm)
+check("Farm: builds the fence and every building", len(res["built"]) == 1 + len(exp["children"]), str(res))
+# hamlet
+ham = addon.plan_new_example(scene, 'HAMLET', set())
+exp, warns = addon.plan_expand_layout(ham)
+houses = [c for c in exp["children"] if c["kind"] == "house"]
+check("Hamlet: 5-7 houses and a chapel around the well", 5 <= len(houses) <= 7 and any(c["kind"] == "chapel" for c in exp["children"]), str(warns))
+ringd = [math.hypot(c["transform"]["x"], c["transform"]["y"]) for c in exp["children"] if c.get("generated")]
+check("Hamlet: everything sits inside the ring radii (8-20 m)", all(7.5 <= d <= 20.5 for d in ringd), str(ringd))
+check("Hamlet: house doors face the well", all(
+    abs(((math.degrees(math.atan2(-c["transform"]["y"], -c["transform"]["x"])) % 360.0) - (c["transform"]["rot"] - 90.0) % 360.0) + 180.0) % 360.0 - 180.0 <= 46.0
+    for c in houses))
+polys = [addon._convex_hull(_world_poly(c)) for c in exp["children"]]
+gaps = [addon._convex_gap(a, b) for i, a in enumerate(polys) for b in polys[i + 1:]]
+check("Hamlet: nothing overlaps", min(gaps) > 0.0, str(min(gaps)))
+check("Hamlet: builds the well and every generated building", len(addon.plan_build(bpy.context, ham)["built"]) == len(exp["children"]))
+bad = addon.plan_node("br", "compound", "yard", footprint=[[0, 0], [20, 0], [20, 20], [0, 20]],
+                      params={"layout": [{"kind": "house", "near": "ring", "ring": [9, 3]}]})
+check("Hamlet: a reversed ring is refused", bool(addon.plan_validate(bad)[0]))
+check("Panel: Farm and Hamlet buttons create plans",
+      bpy.ops.object.gla_plan_create(kind='FARM') == {'FINISHED'} and bpy.ops.object.gla_plan_create(kind='HAMLET') == {'FINISHED'})
 
 # ==============================================================================
 print()

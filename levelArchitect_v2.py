@@ -7558,7 +7558,25 @@ def get_or_create_tower_brick_tint_material(index):
     return mat
 
 
-def masonry_material_list(room_colors, roof=None):
+WOOD_SOURCE_SLOT = 3                 # material slot of wooden parts (fences); needs the roof slot before it
+
+
+def get_or_create_wood_material():
+    """Plain weathered-wood colour (no texture yet)."""
+    mat = bpy.data.materials.get("LA_Wood")
+    if mat is not None:
+        return mat
+    mat = bpy.data.materials.new("LA_Wood")
+    mat.use_nodes = True
+    bsdf = next((n for n in mat.node_tree.nodes if n.type == 'BSDF_PRINCIPLED'), None)
+    if bsdf is not None:
+        _set_input(bsdf, 'Base Color', (0.26, 0.17, 0.09, 1.0))
+        _set_input(bsdf, 'Roughness', 0.85)
+    mat.diffuse_color = (0.26, 0.17, 0.09, 1.0)
+    return mat
+
+
+def masonry_material_list(room_colors, roof=None, wood=False):
     """Material slots for masonry meshes: [brick] + [stone], or with per-room colours
     [tint0 .. tintN-1] + [stone] (see _TowerMesh.append's mat_map). `roof` ('TERRACOTTA' / 'SLATE' / 'STONE')
     appends one more slot with the roof material (source slot ROOF_SOURCE_SLOT)."""
@@ -7566,8 +7584,10 @@ def masonry_material_list(room_colors, roof=None):
         slots = [get_or_create_tower_brick_tint_material(i) for i in range(len(BRICK_TINTS))] + [get_or_create_tower_stone_material()]
     else:
         slots = [get_or_create_tower_brick_material(), get_or_create_tower_stone_material()]
-    if roof is not None:
-        slots.append(get_or_create_roof_material(roof))
+    if roof is not None or wood:
+        slots.append(get_or_create_roof_material(roof or 'STONE'))
+    if wood:
+        slots.append(get_or_create_wood_material())
     return slots
 
 
@@ -9237,8 +9257,12 @@ def _layout_rule_problem(rule):
         and count[0] <= count[1])
     if not ok:
         return "layout count must be an integer >= 0 or [min, max]"
-    if rule.get("near", "free") not in ("free", "wall"):
-        return "layout 'near' must be 'free' or 'wall'"
+    if rule.get("near", "free") not in ("free", "wall", "ring"):
+        return "layout 'near' must be 'free', 'wall' or 'ring'"
+    ring = rule.get("ring")
+    if ring is not None and not (isinstance(ring, (list, tuple)) and len(ring) == 2
+                                 and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in ring) and 0 <= ring[0] <= ring[1]):
+        return "layout 'ring' must be [inner, outer] radii"
     if rule.get("at", None) not in (None, "corners"):
         return "layout 'at' must be 'corners'"
     gap = rule.get("min_gap", 2.0)
@@ -9258,11 +9282,15 @@ def _expand_compound(node, seed):
     margin = float(params.get("layout_margin", 1.5)) + (float(params.get("fence_thickness", 0.5)) if params.get("fence", "none") != "none" else 0.0)
     target = None
     target_id = params.get("layout_target")
+    cxs, cys = [p[0] for p in container], [p[1] for p in container]
+    centre = (sum(cxs) / len(cxs), sum(cys) / len(cys))
     for child in node.get("children", []):
         if (target_id and child.get("id") == target_id) or (not target_id and child.get("kind") == "castle"):
             t = child.get("transform") or {}
             target = (float(t.get("x", 0.0)), float(t.get("y", 0.0)))
             break
+    if target is None:
+        target = centre                            # no castle / layout_target: doors face the middle of the compound
     placed = []                                    # convex polygons already taken (existing children first)
     for child in node.get("children", []):
         cfp = plan_footprint(child)
@@ -9313,6 +9341,11 @@ def _expand_compound(node, seed):
                     inward = (-ey / ln, ex / ln)
                     depth = max(abs(p[1]) for p in base) + margin + 0.3
                     cx, cy = a[0] + ex * f + inward[0] * depth, a[1] + ey * f + inward[1] * depth
+                elif rule.get("near") == "ring":
+                    r0, r1 = rule.get("ring", [6.0, 14.0])
+                    ang = rng.uniform(0.0, 2.0 * math.pi)
+                    rad = rng.uniform(r0, r1)
+                    cx, cy = centre[0] + rad * math.cos(ang), centre[1] + rad * math.sin(ang)
                 else:
                     xs, ys = [p[0] for p in container], [p[1] for p in container]
                     cx, cy = rng.uniform(min(xs), max(xs)), rng.uniform(min(ys), max(ys))
@@ -9659,6 +9692,9 @@ PLAN_HOUSE_DEFAULTS = {
     "chapel": dict(width=6.0, depth=11.0, wall_height=5.0, floors=1, wall_thickness=0.6, roof='GABLE', roof_color='SLATE',
                    roof_pitch=1.0, door='S', door_style='pointed', door_width=1.5, door_height=3.0,
                    window_kind='pointed', window_width=0.7, window_height=1.8, window_sill=1.8, windows=True),
+    "barn": dict(width=10.0, depth=7.0, wall_height=3.6, floors=1, wall_thickness=0.45, roof='GABLE',
+                 roof_pitch=0.7, door='S', door_style='rect', door_width=3.0, door_height=2.9,
+                 window_kind='rect', window_width=0.5, window_height=0.6, window_sill=2.4, windows=False),
     "stable": dict(width=12.0, depth=5.5, wall_height=2.6, floors=1, wall_thickness=0.45, roof='GABLE',
                    roof_pitch=0.55, door='S', door_style='rect', door_width=2.6, door_height=2.1,
                    window_kind='rect', window_width=0.6, window_height=0.5, window_sill=1.6, windows=True),
@@ -9802,7 +9838,7 @@ PLAN_WELL_DEFAULTS = dict(radius=1.0, wall_height=0.9, roof=True, brick_color='P
 PLAN_WELL_RANGES = {"radius": (0.5, 3.0), "wall_height": (0.4, 1.5), "ruin": (0.0, 1.0)}
 PLAN_FENCE_DEFAULTS = dict(fence='none', fence_height=2.4, fence_thickness=0.5, gate_height=3.0,
                            brick_color='PLAIN', ruin=0.0, detail='MEDIUM')
-PLAN_FENCE_RANGES = {"fence_height": (1.0, 6.0), "fence_thickness": (0.2, 1.2), "gate_height": (1.8, 6.0),
+PLAN_FENCE_RANGES = {"fence_height": (0.8, 6.0), "fence_thickness": (0.2, 1.2), "gate_height": (1.8, 6.0),
                      "ruin": (0.0, 1.0)}
 PLAN_DEFAULT_FOOTPRINTS["well"] = lambda params: _footprint_rect(
     {"width": 2 * float(params.get("radius", 1.0)) + 0.8, "depth": 2 * float(params.get("radius", 1.0)) + 0.8})
@@ -9911,11 +9947,52 @@ def _build_fence_mesh(footprint, p, seed, gates):
     return big
 
 
-def _plan_add_mesh_object(context, soup, name, brick_color, path, world, roof_color=None):
+def _build_wood_fence_mesh(footprint, p, seed, gates):
+    """Posts every ~2 m and two rails along the polygon edges; gaps (with taller gate posts) at `gate` anchors."""
+    big = _TowerMesh()
+    H = p["fence_height"]
+    n_pts = len(footprint)
+    for i in range(n_pts):
+        ax, ay = footprint[i]
+        bx, by = footprint[(i + 1) % n_pts]
+        L0 = math.hypot(bx - ax, by - ay)
+        if L0 < 0.5:
+            continue
+        ux, uy = (bx - ax) / L0, (by - ay) / L0
+        gaps = []
+        for gate in gates:
+            gx, gy = gate["pos"][0], gate["pos"][1]
+            u = (gx - ax) * ux + (gy - ay) * uy
+            v = -(gx - ax) * uy + (gy - ay) * ux
+            if abs(v) < 0.6 and 0.0 <= u <= L0:
+                half = float(gate.get("width", 3.0)) / 2.0
+                gaps.append((max(0.0, u - half), min(L0, u + half)))
+        gaps.sort()
+        local = _TowerMesh()
+        n = max(1, int(round(L0 / 2.0)))
+        for k in range(n + 1):
+            x = L0 * k / n
+            if any(g0 + 0.05 < x < g1 - 0.05 for g0, g1 in gaps):
+                continue
+            _soup_box(local, x, 0.0, 0.0, 0.16, 0.16, H, WOOD_SOURCE_SLOT)
+        for g0, g1 in gaps:
+            for x in (g0, g1):
+                _soup_box(local, x, 0.0, 0.0, 0.2, 0.2, H + 0.35, WOOD_SOURCE_SLOT)
+        edges = [0.0] + [v for g in gaps for v in g] + [L0]
+        for s0, s1 in zip(edges[0::2], edges[1::2]):
+            if s1 - s0 < 0.1:
+                continue
+            for zr in (H * 0.38, H * 0.78):
+                _soup_box(local, (s0 + s1) / 2.0, 0.0, zr - 0.05, s1 - s0, 0.07, 0.1, WOOD_SOURCE_SLOT)
+        big.append(local, rot=math.atan2(uy, ux), offset=(ax, ay, 0.0))
+    return big
+
+
+def _plan_add_mesh_object(context, soup, name, brick_color, path, world, roof_color=None, wood=False):
     mesh = soup.to_mesh(name)
     obj = bpy.data.objects.new(name, mesh)
     context.scene.collection.objects.link(obj)
-    for mat_ in masonry_material_list(brick_color not in ('PLAIN',), roof=roof_color):
+    for mat_ in masonry_material_list(brick_color not in ('PLAIN',), roof=roof_color, wood=wood):
         mesh.materials.append(mat_)
     _add_viewport_color_attribute(mesh)
     _plan_adopt_objects(context.scene, path, world, [obj])
@@ -9938,10 +10015,13 @@ def _plan_build_compound(context, node, world, seed, path):
         return []
     try:
         p = _plan_checked({**PLAN_FENCE_DEFAULTS, **(node.get("params") or {})}, PLAN_FENCE_RANGES,
-                          {"fence": ('none', 'stone'), "detail": ('LOW', 'MEDIUM', 'HIGH')})
+                          {"fence": ('none', 'stone', 'wood'), "detail": ('LOW', 'MEDIUM', 'HIGH')})
     except PlanError as exc:
         raise PlanError("%s: %s" % ("/".join(path), exc))
     gates = [a for a in node.get("anchors", []) if a.get("kind") == "gate"]
+    if p["fence"] == 'wood':
+        soup = _build_wood_fence_mesh(plan_footprint(node), p, int(seed) % 1_000_000, gates)
+        return [_plan_add_mesh_object(context, soup, "Fence_" + node["id"], 'PLAIN', path, world, 'STONE', wood=True)]
     soup = _build_fence_mesh(plan_footprint(node), p, int(seed) % 1_000_000, gates)
     return [_plan_add_mesh_object(context, soup, "Fence_" + node["id"], p["brick_color"], path, world)]
 
@@ -9959,7 +10039,7 @@ def _plan_build_house(context, node, world, seed, path):
 
 PLAN_BUILDERS = {"tower": _plan_build_tower, "castle": _plan_build_castle,
                  "house": _plan_build_house, "chapel": _plan_build_house, "stable": _plan_build_house,
-                 "well": _plan_build_well}
+                 "barn": _plan_build_house, "well": _plan_build_well}
 
 
 def plan_build(context, root):
@@ -10015,6 +10095,26 @@ def plan_new_example(scene, kind, existing_ids):
             ]},
             anchors=[{"id": "gate", "kind": "gate", "pos": [0.0, -half_d, 0.0], "dir": 270.0, "width": 4.0, "level": 0}],
             children=[castle])
+    if kind == 'FARM':
+        return plan_node(
+            unique("farm"), "compound", "farm", transform=transform,
+            footprint=[[-22.0, -16.0], [22.0, -16.0], [22.0, 16.0], [-22.0, 16.0]],
+            params={"fence": "wood", "fence_height": 1.3, "layout": [
+                {"kind": "barn", "count": 1, "near": "wall"},
+                {"kind": "house", "count": 1, "near": "wall"},
+                {"kind": "stable", "count": [0, 1], "near": "wall"},
+                {"kind": "well", "count": 1, "near": "ring", "ring": [0.0, 5.0]},
+            ]},
+            anchors=[{"id": "gate", "kind": "gate", "pos": [0.0, -16.0, 0.0], "dir": 270.0, "width": 4.0, "level": 0}])
+    if kind == 'HAMLET':
+        return plan_node(
+            unique("hamlet"), "compound", "hamlet", transform=transform,
+            footprint=[[26.0 * math.cos(2 * math.pi * i / 16), 26.0 * math.sin(2 * math.pi * i / 16)] for i in range(16)],
+            params={"fence": "none", "layout": [
+                {"kind": "chapel", "count": 1, "near": "ring", "ring": [10.0, 20.0], "min_gap": 3.0},   # the big one first
+                {"kind": "house", "count": [5, 7], "near": "ring", "ring": [8.0, 19.0], "min_gap": 3.0},
+            ]},
+            children=[plan_node("well", "building", "well")])
     if kind in ('HOUSE', 'CHAPEL', 'STABLE'):
         return plan_node(unique(kind.lower()), "building", kind.lower(), transform=transform, params={})
     castle = plan_node("castle", "building", "castle", params=plan_default_params(scene, PLAN_CASTLE_PARAMS))
@@ -10048,7 +10148,7 @@ class OBJECT_OT_PlanCreate(bpy.types.Operator):
 
     kind: EnumProperty(items=[('TOWER', "Tower", ""), ('CASTLE', "Castle", ""), ('GROUNDS', "Castle Grounds", ""),
                               ('HOUSE', "House", ""), ('CHAPEL', "Chapel", ""), ('STABLE', "Stable", ""),
-                              ('FORTRESS', "Fortress", "")])
+                              ('FORTRESS', "Fortress", ""), ('FARM', "Farm", ""), ('HAMLET', "Hamlet", "")])
 
     def execute(self, context):
         plan = plan_new_example(context.scene, self.kind, set(plan_list_ids()))
@@ -11394,6 +11494,9 @@ class VIEW3D_PT_GLAPlans(bpy.types.Panel):
             row.operator("object.gla_plan_create", text=label).kind = kind
         row = layout.row(align=True)
         for kind, label in (('HOUSE', "House"), ('CHAPEL', "Chapel"), ('STABLE', "Stable")):
+            row.operator("object.gla_plan_create", text=label).kind = kind
+        row = layout.row(align=True)
+        for kind, label in (('FARM', "Farm"), ('HAMLET', "Hamlet")):
             row.operator("object.gla_plan_create", text=label).kind = kind
         for plan_id in plan_list_ids():
             box = layout.box()

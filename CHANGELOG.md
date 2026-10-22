@@ -3,6 +3,15 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## Unreleased — plans (M3)
+
+- **Wooden fence** (`fence: "wood"`): posts about every 2 m and two rails along the footprint, an open gap with taller gate posts at
+  `gate` anchors; plain wood material.
+- **Barn** building plan; layout rule `near: "ring"` with `ring: [inner, outer]` places buildings in a ring around the compound's
+  centre; compounds without a castle (no `layout_target`) now turn doors toward their centre.
+- **Farm** example (wooden fence with gate, barn, house, optional stable, well in the yard) and **Hamlet** example (well in the
+  middle, chapel and 5-7 houses on a ring facing it) in the Plans panel.
+
 ## 0.45.0 — plans (M2)
 
 M2 in one list: house, chapel, stable and well plans; stone enclosure with gate anchors; automatic seeded layout with Freeze; roof tiles; corner towers and the Fortress example; fix for double-offset wrapped buildings.
