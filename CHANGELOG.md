@@ -3,6 +3,28 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.57.0 — plans: the terraced hill city
+
+- **`terrace_city` building** (**Terraces** and **Twin** buttons): a stepped hill with terraces all round it — each a ring round the next — joined by one to three flights of real steps (`flights`) per terrace, on different
+  sides and not in line, so the way up winds round the hill; you can walk from the gate over the arched bridge, up every level, round the hill and into the palace. `peaks: 2` gives **two summits**
+  on a shared base, each with a palace, joined by an arched viaduct. `width` / `depth` 0 = the smallest size that fits (`terrace_city_size`). Open domed pavilions, domed houses with windows (sills, reveals) and a door, slim minarets, a domed palace with
+  four spired turrets and a lantern, a gate house with an arch, a pool, trees and bushes, ribbed domes, plinth and cornice rings, a paved central lane.
+- **More buildings**: houses, chapels and huts from the village generator (`village`) with the textures of the node's `style`, arcades, belfries, summer-houses; **crenellated walls with towers and a gate** (`walls`);
+  **waterfalls** (`waterfalls`) with a spillway and a pool; **city on land** (**Land** button, `terrace_city_heightmap()`): the city in a terrain whose heightmap makes a valley, hills and mountains.
+- **Mixed terrace shapes** (`shapes`: `mixed`, `rect`, `round`, `polygon`): round, 6/8/10/12-sided, capsule (half-round ends) and apse (one half-round end) terraces, each inscribed in its rectangle
+  and shrunk until a ring of at least 14 m fits round it; a summit that comes out too small is redrawn. Two summits can have different shapes; the viaduct finds where a line across both meets their outlines.
+- **Irregular, off-centre terraces** (`irregular`): every terrace is a polygon — corners cut diagonally or stepped, bays bitten out of the sides — pulled in by a different amount on each
+  side, so the summit sits to one side. New buildings: eight-sided houses with double doors, tower houses with pointed roofs, **ruins** (`ruins`: broken wall ring, column stumps, rubble, an open doorway),
+  **fountains** (`fountains`: basin, water, stem, bowl, spray) on the plaza and the terraces. The walk check also handles polygons, flights at any angle and thin walls at any angle.
+- **Interiors**: about 70 % of the houses (`interiors`) are furnished with a dwelling (bed, chest, round table, stools), a library (shelves, reading table) or a shrine
+  (altar, candles, pillars, runner); the palace has a hall (mosaic floor, ten columns, dais with a throne, runner, chandelier). Every room gets a warm point light (`lights`).
+  The other houses have a fixed shut door.
+- **Doors that open**: every doorway has its leaf as a separate object `Door_Panel_NNN` with its origin on the hinge (two leaves on the palace), the convention the
+  game engines swing.
+- **Proper UVs**: the new builder maps every face planar (the old box helper smeared tops and bottoms into stripes), so stone and paving look like stone and paving.
+- **`terrace_city_walk_check(layout)`**: walks a height grid from the gate (steps of at most two risers) and reports whether the palace front, every furnished room (85 %+ of its
+  floor) and 97 % of the free terrace cells can be reached. The tests also check that a missing flight of stairs or a wall in front of the palace is noticed.
+
 ## 0.56.0 — plans: pictures, instancing, rounded roads, round-hut UVs
 
 - **Import a floor plan from a picture** (PNG, JPG, BMP, TIFF, WebP — *Import Plan (SVG, DXF, image)...*): a colour legend says what each colour is

@@ -115,6 +115,17 @@ The same village painted as a picture with the colour legend ([docs/examples/vil
 
 <p align="center"><img src="docs/img/picplan.png" alt="A village imported from a coloured PNG: houses, a barn, a wooden yard, a tower, roads with rounded ends and a desert region" width="900"></p>
 
+### A terraced hill city
+
+<p align="center"><img src="docs/img/terrace_city.png" alt="A walled terraced hill city: round, polygonal and rectangular terraces joined by flights of steps, domed houses, village houses, arcades, fountains, trees and a domed palace on the summit" width="900"></p>
+
+The **Terraces** button builds a stepped hill city you can walk through: irregular, off-centre terraces (rectangles with cut corners and bays, ellipses, six to twelve sided polygons, capsules), one to three flights of
+real steps up to each, a crenellated wall with towers and a gate across a pool, waterfalls, fountains, trees, and buildings of many kinds — domed houses with furnished rooms and doors that swing (separate `..._Panel_NNN` objects with their
+origin on the hinge), ruins, arcades, belfries, and houses, chapels and huts from the village generator in the textures of the plan's style — with a domed palace on each summit. **Twin** gives two summits joined by an arched
+viaduct, **Land** puts the city in a heightmap terrain. A built-in height-grid walk proves you can get from the gate to every palace and room. See the [user guide](docs/USER_GUIDE.md).
+
+<p align="center"><img src="docs/img/terrace_twin.png" alt="Two summits in the Egyptian style joined by a viaduct" width="445"> <img src="docs/img/terrace_land.png" alt="The city in a heightmap valley with mountains behind" width="445"></p>
+
 ### Seven style packs and a mix
 
 <p align="center"><img src="docs/img/styles_sheet.png" alt="The same village in Medieval, Egyptian, Mexican, Chinese, Inca, Futuristic and Alpine styles, and a mixed street" width="900"></p>

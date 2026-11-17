@@ -257,6 +257,24 @@ The **City** button makes a walled city: a ring-and-spoke market centre, a grid 
 avenues, inside a 250 m wall with four gates. Every district is a block of its own — give it another `road_generator`, `fill` rules, `style` or `infill` —
 and blocks keep their houses clear of each other's streets and houses, so you can add a district anywhere in the plan.
 
+The **Terraces** button makes a stepped hill city that you can walk round on all sides: five stone terraces (4 m apart), each a ring round the next, **irregular**, **off-centre** and of **mixed shapes**
+(`irregular` 0..1: corners cut diagonally or stepped, bays bitten out of the sides, every terrace pulled in by a different amount so the summit sits to one side; `shapes`: `mixed` gives each terrace its
+own shape — rectangle, ellipse, a 6-12 sided polygon, a capsule with half-round ends or a rectangle with a half-round end — or `rect` / `round` / `polygon` keep them all alike) and joined by flights of real steps (0.18 m
+risers, stepped cheek walls): one to three flights up to each terrace, on different sides and at different places (`flights` is the most), so the way up winds round the hill. A ring holds domed
+houses, open domed pavilions, eight-sided houses with double doors, tower houses with pointed roofs, ruins (broken walls, column stumps, rubble; `ruins` is their share) and slim minarets at the corners,
+with fountains (`fountains`), trees and bushes along the edges and the flights kept clear. About 70 % of the houses are furnished (a dwelling, a library or a shrine) and their door opens; on the summit stands a
+domed palace with four spired turrets and a hall (columns, a dais with a throne, a runner, a chandelier). In front are a plaza with fountains, a pool with an arched bridge and a gate house.
+The base is closed by a **crenellated wall** with towers and a gate across the pool (`walls`), **waterfalls** (`waterfalls`) spill from a terrace edge over the retaining wall into a stone-rimmed pool below, and the ring holds, besides the domed houses,
+**houses, chapels and huts made by the village generator** (`village`: gabled, hipped, flat or curved roofs, domes, silos, tunnels, A-frames, with the textures of the plan's `style` — `egyptian`, `chinese`,
+`mexican`, `inca`, `alpine`, `futuristic` ...), arcades, belfries and summer-houses. The **Land** button builds the city in a heightmap terrain: a valley with forested hills that grow into mountains behind
+(`terrace_city_heightmap()` makes the picture; any other heightmap works the same). The **Twin** button makes **two summits** (`peaks: 2`) on a shared base, each with its own palace and rings, joined by an arched viaduct.
+Parameters: `tiers` (2-7), `peaks` (1-2), `flights` (1-3 per terrace), `irregular`, `shapes`, `width` / `depth` (0 = the smallest that fits), `rise`, `density` (buildings), `bushes`, `trees`, `interiors` (share
+of houses with a room, 0..1), `ruins`, `fountains`, `village`, `waterfalls`, `walls`, `lights` (a warm point light in every room), `roof_color`. `terrace_city_size(params)` returns the width and depth that fit (more irregular = larger).
+
+Doors are separate objects named `..._Panel_NNN` with their origin on the hinge, the convention game engines already swing. Everything is walkable by
+construction and `terrace_city_walk_check(layout)` proves it on a height grid (steps of at most two risers): from the gate to every palace door, over the viaduct, into every
+furnished room and over 97 % of the free terrace cells. The layout is stored on the mesh object as `gla_walk_layout` (JSON). Export as glTF and give the mesh a collision shape.
+
 ### Walled towns
 
 The **Town** button makes a round town: a stone wall with towers (none in the gateway) and a gate with an approach road, and inside

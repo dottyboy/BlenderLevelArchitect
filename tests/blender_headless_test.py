@@ -5353,6 +5353,141 @@ check("Town: the walled town builds (wall, towers, roads, houses)", len(res["bui
 check("Town: the wall and the gate road exist", any("Fence" in o.name for o in bpy.data.objects) and any("gate_road" in o.name for o in bpy.data.objects))
 
 # ==============================================================================
+print("\n--- Plans: terraced hill city ---")
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+terr = addon.plan_new_example(bpy.context.scene, 'TERRACES', set())
+check("Terraces: the example is a terrace_city building", terr["kind"] == "terrace_city" and terr["type"] == "building")
+fp = addon.plan_footprint(terr)
+tw, td = addon.terrace_city_size(terr["params"])
+check("Terraces: the footprint is the smallest size that fits (auto width and depth)", abs((fp[2][0] - fp[0][0]) - tw) < 1e-6 and abs((fp[2][1] - fp[0][1]) - td) < 1e-6, "%s x %s" % (tw, td))
+res = addon.plan_build(bpy.context, terr)
+tobj = [o for o in bpy.data.objects if "TerraceCity" in o.name and o.type == 'MESH' and "Door" not in o.name]
+check("Terraces: it builds one mesh with seven materials (wall, trim, roof, wood, leaf, water, paving)", len(tobj) == 1 and len(tobj[0].data.materials) == 7, str(len(tobj)))
+check("Terraces: a detailed mesh (40000+ faces)", tobj and len(tobj[0].data.polygons) > 40000, str(tobj and len(tobj[0].data.polygons)))
+tlay = json.loads(tobj[0]["gla_walk_layout"])
+walk = addon.terrace_city_walk_check(tlay)
+check("Terraces: walkable from the gate to the palace door, into every furnished room and over 97% of the terraces", walk["ok"], str(walk))
+per_level = {}
+for f_ in tlay["flights"]:
+    per_level[(f_["tier"], f_["rect"])] = per_level.get((f_["tier"], f_["rect"]), 0) + 1
+check("Terraces: five tiers, one to three flights up to each, on different sides", len(tlay["tiers"]) == 5 and sorted(per_level) == [(1, 0), (2, 0), (3, 0), (4, 0)]
+      and all(1 <= n <= 3 for n in per_level.values()), str(per_level))
+check("Terraces: the flights of one level stand on different sides", all(len({f_["side"] for f_ in tlay["flights"] if f_["tier"] == k}) == per_level[(k, 0)] for k in (1, 2, 3, 4)))
+check("Terraces: every stair riser is 0.2 m or less", tlay["step"][0] <= 0.2, str(tlay["step"]))
+check("Terraces: the palace hall is furnished, and a dozen houses too", [e["kind"] for e in tlay["enter"]].count("hall") == 1 and len(tlay["enter"]) >= 8,
+      str([e["kind"] for e in tlay["enter"]]))
+panels = [o for o in bpy.data.objects if "_Panel_" in o.name]
+rooms_ = [e for e in tlay["enter"] if e["kind"] != "ruin"]                               # a ruin has an open doorway, no leaf, no lamp
+check("Terraces: doors are separate objects named ..._Panel_NNN (two leaves on the palace and on eight-sided houses, one on each other room)",
+      len(panels) == len(tlay["door_panels"]) and len(rooms_) + 1 <= len(panels) <= 2 * len(rooms_), "%d panels, %d rooms" % (len(panels), len(rooms_)))
+xs = [v.co.x for v in panels[0].data.vertices]
+check("Terraces: a door's origin is its hinge (the leaf runs from x = 0 along +x)", min(xs) > -0.01 and max(xs) > 0.8, "%.2f..%.2f" % (min(xs), max(xs)))
+check("Terraces: every furnished room has a lamp, the hall has three", len([o for o in bpy.data.objects if o.type == 'LIGHT']) == len(tlay["lights"]) >= len(rooms_) + 2)
+check("Terraces: trees stand on the terraces (40+)", tlay["trees"] >= 40, str(tlay["trees"]))
+broken = dict(tlay, flights=[f_ for f_ in tlay["flights"] if f_["z0"] != 4.0])          # no stairs from tier 1 to tier 2
+check("Terraces: the walk check notices a missing flight of stairs", not addon.terrace_city_walk_check(broken)["ok"])
+walled = dict(tlay, circles=tlay["circles"] + [[0.0, tlay["palace_fronts"][0][1], 12.0]])  # a wall of stone in front of the palace
+check("Terraces: the walk check notices a blocked way to the palace", not addon.terrace_city_walk_check(walled)["ok"])
+for seed_ in (1, 7, 23):
+    _, lay_ = addon._build_terrace_city({**addon.PLAN_TERRACE_DEFAULTS, "tiers": 4, "interiors": 1.0}, seed_)
+    wk = addon.terrace_city_walk_check(lay_)
+    check("Terraces: seed %d is walkable too, every house furnished" % seed_, wk["ok"] and len(lay_["enter"]) >= 8, str(wk))
+_, bare = addon._build_terrace_city({**addon.PLAN_TERRACE_DEFAULTS, "interiors": 0.0, "trees": 0.0, "bushes": 0.0, "ruins": 0.0, "fountains": 0.0}, 3)
+check("Terraces: interiors, ruins, trees and fountains at 0 leave only the palace hall, 2 door leaves", len(bare["enter"]) == 1 and len(bare["door_panels"]) == 2 and bare["trees"] == 0 and bare["fountains"] == 0)
+for seed_ in (2, 11):
+    _, twin = addon._build_terrace_city({**addon.PLAN_TERRACE_DEFAULTS, "peaks": 2, "tiers": 4}, seed_)
+    wt = addon.terrace_city_walk_check(twin)
+    check("Terraces: two peaks (seed %d): two summits, two halls, a viaduct between them, all walkable" % seed_,
+          wt["ok"] and wt["summits"] == 2 and [e["kind"] for e in twin["enter"]].count("hall") == 2 and len(twin["decks"]) == 1, str(wt))
+twin_plan = addon.plan_new_example(bpy.context.scene, 'TWIN', set())
+check("Terraces: the Twin peaks example asks for two peaks", twin_plan["params"].get("peaks") == 2)
+_, one = addon._build_terrace_city({**addon.PLAN_TERRACE_DEFAULTS, "flights": 1}, 5)
+check("Terraces: flights = 1 gives exactly one flight to every terrace and stays walkable", len(one["flights"]) == 4 and addon.terrace_city_walk_check(one)["ok"])
+def _tc_poly_counts(lay):
+    return [len(P) for t in lay["tiers"] for P in t["polys"]]
+
+
+_, rect_city = addon._build_terrace_city({**addon.PLAN_TERRACE_DEFAULTS, "irregular": 0.0, "shapes": "rect"}, 4)
+check("Terraces: irregular = 0 gives plain rectangles", all(n == 4 for n in _tc_poly_counts(rect_city)), str(_tc_poly_counts(rect_city)))
+_, wild = addon._build_terrace_city({**addon.PLAN_TERRACE_DEFAULTS, "irregular": 1.0, "shapes": "rect"}, 4)
+check("Terraces: irregular = 1 gives cut corners and bays (outlines of 8+ corners on most terraces) and stays walkable",
+      sum(1 for n in _tc_poly_counts(wild) if n >= 8) >= 3 and addon.terrace_city_walk_check(wild)["ok"], str(_tc_poly_counts(wild)))
+cs = [(sum(v[0] for v in t["polys"][0]) / len(t["polys"][0]), sum(v[1] for v in t["polys"][0]) / len(t["polys"][0])) for t in wild["tiers"]]
+check("Terraces: the terraces are shifted off-centre against each other (summit 4+ m from the base's middle)", math.hypot(cs[-1][0] - cs[0][0], cs[-1][1] - cs[0][1]) > 4.0, str(cs))
+check("Terraces: the more irregular, the larger the smallest size that fits", addon.terrace_city_size({"irregular": 1.0})[0] > addon.terrace_city_size({"irregular": 0.0})[0])
+_, rnd = addon._build_terrace_city({**addon.PLAN_TERRACE_DEFAULTS, "shapes": "round"}, 3)
+check("Terraces: shapes = round gives round upper terraces (16+ corners) and stays walkable",
+      all(len(t_["polys"][0]) >= 16 for t_ in rnd["tiers"][1:]) and addon.terrace_city_walk_check(rnd)["ok"], str(_tc_poly_counts(rnd)))
+_, pol = addon._build_terrace_city({**addon.PLAN_TERRACE_DEFAULTS, "shapes": "polygon"}, 3)
+check("Terraces: shapes = polygon gives regular 6, 8, 10 or 12 sided upper terraces and stays walkable",
+      all(len(t_["polys"][0]) in (6, 8, 10, 12) for t_ in pol["tiers"][1:]) and addon.terrace_city_walk_check(pol)["ok"], str(_tc_poly_counts(pol)))
+seen_kinds = set()
+for seed_ in (1, 2, 3, 4, 5):
+    _, mx = addon._build_terrace_city({**addon.PLAN_TERRACE_DEFAULTS}, seed_)
+    seen_kinds |= {k_ for ks in mx["shapes"] for k_ in ks}
+    check("Terraces: mixed shapes (seed %d) are walkable" % seed_, addon.terrace_city_walk_check(mx)["ok"], str(mx["shapes"]))
+check("Terraces: the mixed shapes combine rectangles, round, polygon, capsule and apse terraces", {"rect", "round", "poly"} <= seen_kinds and len(seen_kinds) >= 4, str(sorted(seen_kinds)))
+_, twr = addon._build_terrace_city({**addon.PLAN_TERRACE_DEFAULTS, "peaks": 2, "tiers": 4, "shapes": "round"}, 2)
+check("Terraces: two round summits are joined by the viaduct and walkable", addon.terrace_city_walk_check(twr)["ok"] and len(twr["decks"]) == 1)
+kinds_ = [e["kind"] for e in tlay["enter"]]
+check("Terraces: the default city has fountains (4+) and some ruins among its buildings", tlay["fountains"] >= 4 and "ruin" in [e["kind"] for e in addon._build_terrace_city({**addon.PLAN_TERRACE_DEFAULTS, "ruins": 1.0}, 2)[1]["enter"]], str(tlay["fountains"]))
+_, no_ruin = addon._build_terrace_city({**addon.PLAN_TERRACE_DEFAULTS, "ruins": 0.0}, 2)
+check("Terraces: ruins = 0 builds none", "ruin" not in [e["kind"] for e in no_ruin["enter"]])
+_, wf0 = addon._build_terrace_city({**addon.PLAN_TERRACE_DEFAULTS, "waterfalls": 0.0}, 3)
+_, wf1 = addon._build_terrace_city({**addon.PLAN_TERRACE_DEFAULTS, "waterfalls": 1.0}, 3)
+check("Terraces: waterfalls = 0 builds none, waterfalls = 1 builds several (3+) and the city stays walkable",
+      wf0["waterfalls"] == 0 and wf1["waterfalls"] >= 3 and addon.terrace_city_walk_check(wf1)["ok"], "%s %s" % (wf0["waterfalls"], wf1["waterfalls"]))
+_, nowall = addon._build_terrace_city({**addon.PLAN_TERRACE_DEFAULTS, "walls": False}, 3)
+_, walled_ = addon._build_terrace_city({**addon.PLAN_TERRACE_DEFAULTS, "walls": True}, 3)
+check("Terraces: walls = true walls the base (thick wall runs) and moves the gate across the pool; false leaves a low parapet and the gate at the plaza",
+      any(s_[4] > 0.6 for s_ in walled_["segs"]) and not any(s_[4] > 0.6 for s_ in nowall["segs"])
+      and abs(walled_["gate_y"] - (walled_["channel"][1] + 1.6)) < 1e-6 and abs(nowall["gate_y"] - (nowall["y_front"] + 1.6)) < 1e-6)
+check("Terraces: the walled city is walkable through its gate", addon.terrace_city_walk_check(walled_)["ok"] and addon.terrace_city_walk_check(nowall)["ok"])
+_, vil1 = addon._build_terrace_city({**addon.PLAN_TERRACE_DEFAULTS, "village": 1.0}, 5)
+_, vil0 = addon._build_terrace_city({**addon.PLAN_TERRACE_DEFAULTS, "village": 0.0}, 5)
+check("Terraces: village = 1 uses the village generator's houses, chapels and huts (6+), village = 0 none",
+      vil1["buildings"].get("village", 0) + vil1["buildings"].get("hut", 0) >= 6 and vil0["buildings"].get("village", 0) + vil0["buildings"].get("hut", 0) == 0, str(vil1["buildings"]))
+seen_b = set()
+for seed_ in (1, 2, 3, 4, 5, 6):
+    seen_b |= set(addon._build_terrace_city({**addon.PLAN_TERRACE_DEFAULTS}, seed_)[1]["buildings"])
+check("Terraces: the buildings are varied (domes, octagons, towers, village houses, huts, arcades, belfries, summer-houses, ruins)", len(seen_b) >= 8, str(sorted(seen_b)))
+for st_ in ("egyptian", "chinese", "alpine"):
+    _, ls_ = addon._build_terrace_city({**addon.PLAN_TERRACE_DEFAULTS, "style": st_}, 4)
+    check("Terraces: style %s is walkable (its own village houses and huts)" % st_, addon.terrace_city_walk_check(ls_)["ok"], str(ls_["buildings"]))
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+egy = addon.plan_node("egy", "building", "terrace_city", params={}, style="egyptian")
+addon.plan_build(bpy.context, egy)
+em = [o for o in bpy.data.objects if "TerraceCity" in o.name and o.type == 'MESH' and "Door" not in o.name][0]
+check("Terraces: the Egyptian style gives the mesh the pack's own materials (sandstone), not the stone of the medieval look",
+      em.data.materials[0].name == addon.plan_material_slots("egyptian")[0].name and em.data.materials[0].name != addon.get_style_material('FITTED').name, em.data.materials[0].name)
+hm_name = addon.terrace_city_heightmap()
+hm_px = bpy.data.images[hm_name].pixels[:]
+check("Terraces: the generated heightmap is a real picture (dark valley, bright mountains)", min(hm_px[0::4]) < 0.05 and max(hm_px[0::4]) > 0.95)
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+land = addon.plan_new_example(bpy.context.scene, 'LAND', set())
+lres = addon.plan_build(bpy.context, land)
+tw_ = [w_ for w_ in lres["warnings"] if "terrain" in w_]
+import re as _re
+mx_ = float(_re.search(r"terrain (-?\d+)\.\.(-?\d+) m", tw_[0]).group(2)) if tw_ else 0.0
+check("Terraces: the city on land builds a heightmap terrain (mountains 60+ m) and the city on it", mx_ > 60 and any("TerraceCity" in o.name for o in bpy.data.objects)
+      and any("Terrain" in o.name for o in bpy.data.objects), str(tw_))
+shallow = addon.plan_node("shallow", "building", "terrace_city", params={"depth": 70.0, "tiers": 6})
+try:
+    addon.plan_build(bpy.context, shallow)
+    check("Terraces: too shallow for its tiers is refused", False)
+except addon.PlanError as exc:
+    check("Terraces: too shallow for its tiers is refused", "too small" in str(exc), str(exc))
+
+# ==============================================================================
 print()
 if failures:
     print(f"{len(failures)} CHECK(S) FAILED:")

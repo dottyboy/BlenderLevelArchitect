@@ -33,7 +33,7 @@ from bpy_extras.io_utils import ExportHelper, ImportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 56, 0),
+    "version": (0, 57, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -12293,11 +12293,1673 @@ def _plan_build_house(context, node, world, seed, path):
     return [obj]
 
 
+# ------------------------------------------------------------------------------
+# Terraced hill city: stepped stone terraces joined by real stairs, open rotundas, domed houses and a domed palace (windows,
+# doors that swing, furnished rooms with a lamp), slim minarets, trees and bushes, a gate house, a pool with an arched bridge.
+# Everything is walkable by construction (flat terraces, steps <= 0.18 m, a clear central lane, doorways and rooms that stay
+# open) and `terrace_city_walk_check` proves it on a height grid. Doors are separate objects named `..._Panel_NNN` with the
+# origin on the hinge, the convention the game engines already swing.
+# ------------------------------------------------------------------------------
+TC_STEP_RISE, TC_STEP_RUN = 0.18, 0.34
+TC_SKIRT = -2.8                       # slabs reach down to here so the city sits in the ground
+TC_LEAF_SLOT, TC_WATER_SLOT, TC_PAVING_SLOT = 4, 5, 6      # slot 6: cobbled paving for the floors, whatever the style
+
+
+def _tc_quad(soup, pts, toward, mat):
+    t = TOWER_TILE_W
+    ax, ay, az = abs(toward[0]), abs(toward[1]), abs(toward[2])
+    if az >= ax and az >= ay:
+        uv = [(p[0] / t, p[1] / t) for p in pts]
+    elif ax >= ay:
+        uv = [(p[1] / t, p[2] / t) for p in pts]
+    else:
+        uv = [(p[0] / t, p[2] / t) for p in pts]
+    soup.poly('tc', pts, uv, toward, mat)
+
+
+def _tc_box(soup, cx, cy, z0, sx, sy, sz, mat=0, top=None):
+    """Axis-aligned box with a proper planar UV on every face (the older _soup_box smears its top and bottom into stripes); `top` gives the top face its own material."""
+    x0, x1, y0, y1, z1 = cx - sx / 2, cx + sx / 2, cy - sy / 2, cy + sy / 2, z0 + sz
+    for pts, nrm in (([(x0, y0, z0), (x1, y0, z0), (x1, y0, z1), (x0, y0, z1)], (0, -1, 0)),
+                     ([(x1, y0, z0), (x1, y1, z0), (x1, y1, z1), (x1, y0, z1)], (1, 0, 0)),
+                     ([(x1, y1, z0), (x0, y1, z0), (x0, y1, z1), (x1, y1, z1)], (0, 1, 0)),
+                     ([(x0, y1, z0), (x0, y0, z0), (x0, y0, z1), (x0, y1, z1)], (-1, 0, 0)),
+                     ([(x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1)], (0, 0, 1)),
+                     ([(x0, y0, z0), (x0, y1, z0), (x1, y1, z0), (x1, y0, z0)], (0, 0, -1))):
+        _tc_quad(soup, pts, nrm, top if (top is not None and nrm == (0, 0, 1)) else mat)
+
+
+def _tc_cyl(soup, cx, cy, z0, r, h, n, mat=0):
+    for i in range(n):
+        a0, a1 = 2 * math.pi * i / n, 2 * math.pi * (i + 1) / n
+        am = (a0 + a1) / 2
+        _tc_quad(soup, [_tc_pt(cx, cy, z0, r, a0), _tc_pt(cx, cy, z0, r, a1), _tc_pt(cx, cy, z0 + h, r, a1), _tc_pt(cx, cy, z0 + h, r, a0)],
+                 (math.cos(am), math.sin(am), 0.0), mat)
+        _tc_quad(soup, [(cx, cy, z0 + h), _tc_pt(cx, cy, z0 + h, r, a0), _tc_pt(cx, cy, z0 + h, r, a1)], (0, 0, 1), mat)
+
+
+def _tc_pt(cx, cy, z, r, a):
+    return (cx + r * math.cos(a), cy + r * math.sin(a), z)
+
+
+def _tc_dome(soup, cx, cy, z0, R, H, n=16, rings=5, shell=0.2, mat=ROOF_SOURCE_SLOT, ribs=0):
+    """A hollow dome: outer and inner shell, a rim below, a triangle fan at the apex; `ribs` adds raised trim ribs along the meridians."""
+    prof = [(R * math.cos(math.pi / 2 * i / rings), z0 + H * math.sin(math.pi / 2 * i / rings)) for i in range(rings + 1)]
+    k = max(0.05, 1.0 - shell / R)
+    inner = [(r * k, z - shell) for r, z in prof]
+    for shell_pts, sign in ((prof, 1.0), (inner, -1.0)):
+        for i in range(rings):
+            (r0, za), (r1, zb) = shell_pts[i], shell_pts[i + 1]
+            for j in range(n):
+                a0, a1 = 2 * math.pi * j / n, 2 * math.pi * (j + 1) / n
+                am = (a0 + a1) / 2
+                toward = (sign * math.cos(am), sign * math.sin(am), sign * 0.8)
+                if i == rings - 1:
+                    _tc_quad(soup, [_tc_pt(cx, cy, za, r0, a0), _tc_pt(cx, cy, za, r0, a1), (cx, cy, zb)], toward, mat)
+                else:
+                    _tc_quad(soup, [_tc_pt(cx, cy, za, r0, a0), _tc_pt(cx, cy, za, r0, a1),
+                                    _tc_pt(cx, cy, zb, r1, a1), _tc_pt(cx, cy, zb, r1, a0)], toward, mat)
+    for j in range(n):
+        a0, a1 = 2 * math.pi * j / n, 2 * math.pi * (j + 1) / n
+        _tc_quad(soup, [_tc_pt(cx, cy, z0, prof[0][0], a0), _tc_pt(cx, cy, z0, prof[0][0], a1),
+                        _tc_pt(cx, cy, z0 - shell, inner[0][0], a1), _tc_pt(cx, cy, z0 - shell, inner[0][0], a0)], (0.0, 0.0, -1.0), mat)
+    for q in range(ribs):                                # thin raised ribs: a strip of quads just above the shell
+        a = 2 * math.pi * q / ribs
+        hw_ = 0.5 * 0.09
+        for i in range(rings - 1):
+            (r0, za), (r1, zb) = prof[i], prof[i + 1]
+            lift = 0.07
+            pts = []
+            for rr, zz in ((r0, za), (r1, zb)):
+                for off in (-hw_, hw_):
+                    pts.append((cx + (rr + lift) * math.cos(a) - off * math.sin(a), cy + (rr + lift) * math.sin(a) + off * math.cos(a), zz + lift))
+            _tc_quad(soup, [pts[0], pts[1], pts[3], pts[2]], (math.cos(a), math.sin(a), 0.8), 1)
+
+
+def _tc_drum(soup, cx, cy, z0, R, H, n, door_angle=0.0, gap=0, door_h=2.6, thick=0.5, mat=0, windows=(), sill=1.1, head=2.7):
+    """A round wall ring of thickness `thick`. `gap` neighbouring segments centred on `door_angle` are an open doorway under a lintel;
+    segments listed in `windows` get a rectangular window (sill..head) with reveals."""
+    da = 2 * math.pi / n
+    a_start = door_angle - gap * da / 2.0
+    solid = thick >= R - 0.05                         # no hollow inside: a plain round tower (windows become dark recesses)
+    Ri = R - thick
+    zt = z0 + H
+
+    def face(rr, ang0, ang1, za, zb, outward):
+        if zb - za < 1e-6 or ang1 - ang0 < 1e-9:
+            return
+        am = (ang0 + ang1) / 2
+        nrm = (math.cos(am), math.sin(am), 0.0) if outward else (-math.cos(am), -math.sin(am), 0.0)
+        _tc_quad(soup, [_tc_pt(cx, cy, za, rr, ang0), _tc_pt(cx, cy, za, rr, ang1), _tc_pt(cx, cy, zb, rr, ang1), _tc_pt(cx, cy, zb, rr, ang0)], nrm, mat)
+
+    for i in range(n):
+        a0, a1 = a_start + i * da, a_start + (i + 1) * da
+        am = (a0 + a1) / 2
+        if solid:
+            face(R, a0, a1, z0, zt, True)
+            if i in windows:                          # a dark recess drawn on the wall
+                w0, w1 = a0 + 0.3 * da, a1 - 0.3 * da
+                _tc_quad(soup, [_tc_pt(cx, cy, z0 + sill, R + 0.03, w0), _tc_pt(cx, cy, z0 + sill, R + 0.03, w1),
+                                _tc_pt(cx, cy, z0 + head, R + 0.03, w1), _tc_pt(cx, cy, z0 + head, R + 0.03, w0)], (math.cos(am), math.sin(am), 0.0), 3)
+            _tc_quad(soup, [(cx, cy, zt), _tc_pt(cx, cy, zt, R, a0), _tc_pt(cx, cy, zt, R, a1)], (0, 0, 1), mat)
+            continue
+        if i < gap:
+            zl = z0 + door_h
+            face(R, a0, a1, zl, zt, True)
+            face(Ri, a0, a1, zl, zt, False)
+            _tc_quad(soup, [_tc_pt(cx, cy, zl, R, a0), _tc_pt(cx, cy, zl, R, a1), _tc_pt(cx, cy, zl, Ri, a1), _tc_pt(cx, cy, zl, Ri, a0)], (0, 0, -1), mat)
+        elif i in windows:
+            w0, w1 = a0 + 0.27 * da, a1 - 0.27 * da
+            zs, zh = z0 + sill, z0 + head
+            for rr, out in ((R, True), (Ri, False)):
+                face(rr, a0, a1, z0, zs, out)
+                face(rr, a0, a1, zh, zt, out)
+                face(rr, a0, w0, zs, zh, out)
+                face(rr, w1, a1, zs, zh, out)
+            for a, sgn in ((w0, 1.0), (w1, -1.0)):
+                _tc_quad(soup, [_tc_pt(cx, cy, zs, R, a), _tc_pt(cx, cy, zs, Ri, a), _tc_pt(cx, cy, zh, Ri, a), _tc_pt(cx, cy, zh, R, a)],
+                         (-math.sin(a) * sgn, math.cos(a) * sgn, 0.0), mat)
+            _tc_quad(soup, [_tc_pt(cx, cy, zs, R, w0), _tc_pt(cx, cy, zs, R, w1), _tc_pt(cx, cy, zs, Ri, w1), _tc_pt(cx, cy, zs, Ri, w0)], (0, 0, 1), 1)
+            _tc_quad(soup, [_tc_pt(cx, cy, zh, R, w0), _tc_pt(cx, cy, zh, R, w1), _tc_pt(cx, cy, zh, Ri, w1), _tc_pt(cx, cy, zh, Ri, w0)], (0, 0, -1), mat)
+            ledge = _tc_pt(cx, cy, zs, R + 0.12, (w0 + w1) / 2)
+            _tc_box_rot(soup, ledge[0], ledge[1], zs - 0.08, 2 * R * math.sin((w1 - w0) / 2) + 0.25, 0.3, 0.1, (w0 + w1) / 2 + math.pi / 2, 1)
+        else:
+            face(R, a0, a1, z0, zt, True)
+            face(Ri, a0, a1, z0, zt, False)
+        _tc_quad(soup, [_tc_pt(cx, cy, zt, R, a0), _tc_pt(cx, cy, zt, R, a1), _tc_pt(cx, cy, zt, Ri, a1), _tc_pt(cx, cy, zt, Ri, a0)], (0, 0, 1), mat)
+    if gap and not solid:
+        for a, sgn in ((a_start, 1.0), (a_start + gap * da, -1.0)):
+            _tc_quad(soup, [_tc_pt(cx, cy, z0, R, a), _tc_pt(cx, cy, z0, Ri, a), _tc_pt(cx, cy, z0 + door_h, Ri, a), _tc_pt(cx, cy, z0 + door_h, R, a)],
+                     (-math.sin(a) * sgn, math.cos(a) * sgn, 0.0), mat)
+
+
+def _tc_box_rot(soup, cx, cy, z0, length, width, height, ang, mat):
+    """A box whose long side runs along direction `ang` (built in a small local soup, then rotated into place)."""
+    loc = _TowerMesh()
+    _tc_box(loc, 0.0, 0.0, 0.0, length, width, height, mat)
+    soup.append(loc, rot=ang, offset=(cx, cy, z0))
+
+
+def _tc_ring_trim(soup, cx, cy, z0, R, n, h=0.3, out=0.18, mat=1):
+    """A projecting ring band (plinth or cornice) around a drum."""
+    _tc_drum(soup, cx, cy, z0, R + out, h, n, 0.0, 0, 0.0, out + 0.1, mat)
+
+
+def _tc_door_panels(layout, cx, cy, z0, R, thick, ang, gap, n, door_h, double=False):
+    """Records the door leaf (or two leaves) filling a doorway of `gap` segments on a drum of n sides."""
+    da = 2 * math.pi / n
+    a_s = ang - gap * da / 2.0
+    a_e = a_s + gap * da
+    rm = R - thick / 2.0
+    ps, pe = (cx + rm * math.cos(a_s), cy + rm * math.sin(a_s)), (cx + rm * math.cos(a_e), cy + rm * math.sin(a_e))
+    span = math.hypot(pe[0] - ps[0], pe[1] - ps[1])
+    ux, uy = (pe[0] - ps[0]) / span, (pe[1] - ps[1]) / span
+    if double:
+        layout["door_panels"].append([ps[0], ps[1], z0, math.atan2(uy, ux), span / 2 - 0.04, door_h - 0.05])
+        layout["door_panels"].append([pe[0], pe[1], z0, math.atan2(-uy, -ux), span / 2 - 0.04, door_h - 0.05])
+    else:
+        layout["door_panels"].append([ps[0], ps[1], z0, math.atan2(uy, ux), span - 0.08, door_h - 0.05])
+
+
+def _tc_closed_door(soup, cx, cy, z0, R, ang, n, door_h=2.5):
+    """A shut, fixed door drawn on the wall (a house that is not furnished)."""
+    da = 2 * math.pi / n
+    a0, a1 = ang - da / 2.0, ang + da / 2.0
+    k = 0.18
+    w0, w1 = a0 + k * da, a1 - k * da
+    off = 0.05
+    _tc_quad(soup, [_tc_pt(cx, cy, z0, R + off, w0), _tc_pt(cx, cy, z0, R + off, w1), _tc_pt(cx, cy, z0 + door_h, R + off, w1),
+                    _tc_pt(cx, cy, z0 + door_h, R + off, w0)], (math.cos(ang), math.sin(ang), 0.0), 3)
+
+
+# -------------------------------------------------------------------------------------------------- interiors
+def _tc_local_to_world(cx, cy, ang, u, v):
+    return (cx + u * math.cos(ang) - v * math.sin(ang), cy + u * math.sin(ang) + v * math.cos(ang))
+
+
+def _tc_room(rng, Ri, H, kind):
+    """A furnished round room in a local frame (door on +x, centre at the origin). Returns (soup, furniture [(u, v, r)])."""
+    s = _TowerMesh()
+    fur = []
+    _tc_cyl(s, 0.0, 0.0, 0.0, Ri - 0.15, 0.03, 20, 1)                                   # a floor medallion
+    if kind == 'dwelling':
+        by = Ri - 1.15
+        _tc_box(s, -0.6, by, 0.0, 2.1, 1.05, 0.5, 3)                                      # bed frame
+        _tc_box(s, -0.6, by, 0.5, 2.0, 0.95, 0.18, 1)                                     # mattress
+        _tc_box(s, -1.45, by, 0.68, 0.45, 0.6, 0.14, 1)                                   # pillow
+        fur.append((-0.6, by, 1.15))
+        _tc_box(s, -0.9, -(Ri - 0.95), 0.0, 1.1, 0.6, 0.55, 3)                            # chest
+        _tc_box(s, -0.9, -(Ri - 0.95), 0.55, 1.14, 0.64, 0.1, 1)
+        fur.append((-0.9, -(Ri - 0.95), 0.7))
+        _tc_cyl(s, -0.4, 0.0, 0.0, 0.14, 0.72, 8, 3)                                      # a round table on one leg
+        _tc_cyl(s, -0.4, 0.0, 0.72, 0.75, 0.07, 14, 3)
+        fur.append((-0.4, 0.0, 0.8))
+        for a in (0.6, 2.4, 4.4):
+            _tc_cyl(s, -0.4 + 1.25 * math.cos(a), 1.25 * math.sin(a), 0.0, 0.23, 0.45, 8, 3)
+    elif kind == 'library':
+        for v in (-1.7, 0.0, 1.7):
+            u = -(Ri - 0.75)
+            _tc_box(s, u, v, 0.0, 0.45, 1.3, 2.2, 3)
+            for zz in (0.55, 1.05, 1.55, 2.0):
+                _tc_box(s, u + 0.02, v, zz, 0.44, 1.26, 0.04, 1)
+            fur.append((u, v, 0.9))
+        _tc_cyl(s, 0.3, 0.0, 0.0, 0.12, 0.72, 8, 3)
+        _tc_cyl(s, 0.3, 0.0, 0.72, 0.8, 0.07, 14, 3)
+        fur.append((0.3, 0.0, 0.85))
+        _tc_box(s, 0.3, 0.0, 0.79, 0.45, 0.32, 0.05, 1)                                   # an open book
+    else:                                                                               # shrine
+        _tc_box(s, 0.5, 0.0, 0.02, Ri * 1.5, 1.1, 0.03, 1)                                # a runner from the door
+        _tc_box(s, -(Ri - 1.15), 0.0, 0.0, 1.3, 1.5, 0.95, 1)                             # altar
+        _tc_box(s, -(Ri - 1.15), 0.0, 0.95, 1.4, 1.6, 0.08, 3)
+        fur.append((-(Ri - 1.15), 0.0, 1.1))
+        for v in (-0.5, 0.0, 0.5):
+            _tc_cyl(s, -(Ri - 1.15), v, 1.03, 0.07, 0.35, 6, 1)
+        for v in (-1.6, 1.6):
+            _tc_cyl(s, -(Ri - 2.1), v, 0.0, 0.22, H - 0.3, 8, 1)                          # two pillars
+            fur.append((-(Ri - 2.1), v, 0.3))
+    return s, fur
+
+
+def _tc_hall(rng, Ri, H, door_h):
+    """The palace hall: a mosaic floor, a runner, a dais with a throne, a ring of columns, a hanging chandelier."""
+    s = _TowerMesh()
+    fur = []
+    _tc_cyl(s, 0.0, 0.0, 0.0, Ri - 0.2, 0.04, 28, 1)
+    _tc_cyl(s, 0.0, 0.0, 0.04, Ri * 0.55, 0.02, 24, 0)
+    _tc_box(s, 0.5 * (Ri - 4.5), 0.0, 0.06, Ri - 4.5 + 1.0, 2.6, 0.03, 3)                # the runner, door to dais
+    du = -(Ri - 5.2)
+    _tc_cyl(s, du, 0.0, 0.0, 4.4, 0.18, 20, 1)
+    _tc_cyl(s, du, 0.0, 0.18, 3.4, 0.18, 20, 1)
+    _tc_box(s, du, 0.0, 0.36, 1.1, 1.0, 0.65, 3)                                       # throne seat
+    _tc_box(s, du - 0.45, 0.0, 0.36, 0.22, 1.1, 2.3, 3)                                # its back
+    fur.append((du, 0.0, 4.4))
+    for q in range(10):
+        a = 2 * math.pi * q / 10 + 0.31
+        u, v = 0.58 * Ri * math.cos(a), 0.58 * Ri * math.sin(a)
+        if math.hypot(u - du, v) < 5.2:
+            continue
+        _tc_cyl(s, u, v, 0.0, 0.5, H - 0.1, 10, 1)
+        fur.append((u, v, 0.65))
+    zc = H - 2.6
+    _tc_cyl(s, 0.0, 0.0, zc, 1.9, 0.16, 16, 1)
+    for q in range(8):
+        a = 2 * math.pi * q / 8
+        _tc_cyl(s, 1.8 * math.cos(a), 1.8 * math.sin(a), zc + 0.16, 0.07, 0.3, 6, 1)
+    for q in range(4):
+        a = math.pi / 2 * q + 0.4
+        _tc_box(s, 1.2 * math.cos(a), 1.2 * math.sin(a), zc + 0.16, 0.06, 0.06, 2.2, 1)  # chains up to the ceiling
+    return s, fur
+
+
+def _tc_domed_house(soup, layout, cx, cy, z0, R, door_angle, rng, furnished, lights):
+    H = rng.uniform(3.6, 4.4)
+    n = 12
+    wins = {i for i in range(1, n) if i % 3 == 1}
+    _tc_drum(soup, cx, cy, z0, R, H, n, door_angle, 1 if furnished else 0, 2.6, 0.5, 0, wins, 1.2, 2.9)
+    _tc_ring_trim(soup, cx, cy, z0, R, n, 0.3, 0.16)                                    # plinth
+    _tc_ring_trim(soup, cx, cy, z0 + H - 0.35, R, n, 0.35, 0.2)                          # cornice
+    _tc_dome(soup, cx, cy, z0 + H, R + 0.3, R * rng.uniform(0.85, 1.1), n=12, rings=4, ribs=6)
+    top = z0 + H + (R + 0.3) * 0.9
+    _cone(soup, cx, cy, top - 0.1, 0.35, 1.5, 6, ROOF_SOURCE_SLOT)
+    if furnished:
+        kind = rng.choice(('dwelling', 'library', 'shrine'))
+        room, fur = _tc_room(rng, R - 0.5, H, kind)
+        soup.append(room, rot=door_angle, offset=(cx, cy, z0))
+        _tc_door_panels(layout, cx, cy, z0, R, 0.5, door_angle, 1, n, 2.6)
+        layout["enter"].append({"x": cx, "y": cy, "R": R, "Ri": R - 0.5, "ang": door_angle, "z": z0, "gap": 1.2,
+                                "furniture": [list(_tc_local_to_world(cx, cy, door_angle, u, v)) + [r] for u, v, r in fur], "kind": kind})
+        lights.append([cx, cy, z0 + H - 0.7, 220.0])
+    else:
+        _tc_closed_door(soup, cx, cy, z0, R, door_angle, n)
+
+
+def _tc_rotunda(soup, cx, cy, z0, R, rng, columns):
+    """An open pavilion: a ring of columns, a ring beam, a dome with ribs (walk straight through)."""
+    n = 8
+    hc = 3.6
+    for i in range(n):
+        a = 2 * math.pi * i / n
+        px, py = cx + (R - 0.5) * math.cos(a), cy + (R - 0.5) * math.sin(a)
+        columns.append((px, py))
+        _tc_cyl(soup, px, py, z0, 0.32, hc, 8, 1)
+        _tc_box(soup, px, py, z0, 0.9, 0.9, 0.2, 1)
+        _tc_box(soup, px, py, z0 + hc - 0.2, 0.8, 0.8, 0.2, 1)
+    _tc_drum(soup, cx, cy, z0 + hc, R, 0.45, n * 2, 0.0, 0, 0.0, 0.5, 1)
+    _tc_dome(soup, cx, cy, z0 + hc + 0.45, R + 0.2, R * rng.uniform(0.8, 1.0), n=16, rings=4, ribs=8)
+    _cone(soup, cx, cy, z0 + hc + 0.35 + (R + 0.2) * 0.85, 0.3, 1.3, 6, ROOF_SOURCE_SLOT)
+    _tc_cyl(soup, cx, cy, z0, R - 1.3, 0.12, 14, 1)                                      # a raised tile floor
+
+
+def _tc_minaret(soup, cx, cy, z0, rng):
+    """A slim tower: shaft, balcony ring, upper shaft, onion-ish cap and a spire."""
+    r = 1.5
+    h1 = rng.uniform(9.0, 12.0)
+    _tc_cyl(soup, cx, cy, z0, r + 0.35, 0.8, 12, 1)
+    _tc_drum(soup, cx, cy, z0 + 0.8, r, h1, 12, 0.0, 0, 0.0, r, 0, (3,), h1 * 0.55, h1 * 0.55 + 1.6)
+    _tc_drum(soup, cx, cy, z0 + 0.8 + h1, r + 1.0, 0.35, 12, 0.0, 0, 0.0, 1.2, 1)
+    _tc_drum(soup, cx, cy, z0 + 1.15 + h1, r + 1.0, 0.8, 12, 0.0, 0, 0.0, 0.18, 1)        # a railing wall
+    _tc_drum(soup, cx, cy, z0 + 1.15 + h1, r * 0.8, 3.2, 10, 0.0, 0, 0.0, r * 0.8, 0)
+    _tc_dome(soup, cx, cy, z0 + 4.35 + h1, r * 0.95, 2.6, n=10, rings=4, ribs=5)
+    _cone(soup, cx, cy, z0 + 6.8 + h1, 0.25, 3.2, 6, ROOF_SOURCE_SLOT)
+
+
+def _tc_palace(soup, layout, cx, cy, z0, R, turrets, lights, rng):
+    k = R / 11.0
+    n = 24
+    hd = 8.0 * k
+    thick = 0.5 + 0.2 * k
+    wins = {i for i in range(2, n) if i % 2 == 0}
+    _tc_drum(soup, cx, cy, z0, R, hd, n, -math.pi / 2, 2, 5.0, thick, 0, wins, 2.0 * k, 6.0 * k)
+    _tc_ring_trim(soup, cx, cy, z0, R, n, 0.5, 0.25)
+    _tc_ring_trim(soup, cx, cy, z0 + hd - 0.6, R, n, 0.6, 0.3)
+    _tc_dome(soup, cx, cy, z0 + hd, R + 0.5, 9.0 * k, n=24, rings=6, ribs=12)
+    zl = z0 + hd + 9.0 * k * 0.97
+    _tc_drum(soup, cx, cy, zl - 0.2, 2.6 * k, 2.6 * k, 12, 0.0, 0, 0.0, 0.5, 0, (1, 4, 7, 10), 0.6, 1.9)
+    _tc_dome(soup, cx, cy, zl + 2.4 * k, 2.9 * k, 2.8 * k, n=12, rings=4, ribs=6)
+    _cone(soup, cx, cy, zl + 5.0 * k, 0.4, 3.0 * k, 6, ROOF_SOURCE_SLOT)
+    for q in range(4):
+        a = math.radians(45 + 90 * q)
+        tx, ty = cx + (R + 0.8 * k) * math.cos(a), cy + (R + 0.8 * k) * math.sin(a)
+        _tc_drum(soup, tx, ty, z0, 2.3 * k, 14.0 * k, 10, 0.0, 0, 0.0, 2.3 * k, 0, (2, 7), 5.0 * k, 7.0 * k)
+        _tc_ring_trim(soup, tx, ty, z0 + 14.0 * k - 0.5, 2.3 * k, 10, 0.5, 0.25)
+        _cone(soup, tx, ty, z0 + 14.0 * k, 2.7 * k, 6.5 * k, 10, ROOF_SOURCE_SLOT)
+        turrets.append((tx, ty, 2.5 * k))
+    hall, fur = _tc_hall(rng, R - thick, hd, 5.0)
+    soup.append(hall, rot=-math.pi / 2, offset=(cx, cy, z0))
+    _tc_door_panels(layout, cx, cy, z0, R, thick, -math.pi / 2, 2, n, 5.0, double=True)
+    layout["enter"].append({"x": cx, "y": cy, "R": R, "Ri": R - thick, "ang": -math.pi / 2, "z": z0, "gap": 4.4,
+                            "furniture": [list(_tc_local_to_world(cx, cy, -math.pi / 2, u, v)) + [r] for u, v, r in fur], "kind": "hall"})
+    lights.append([cx, cy, z0 + hd - 2.2, 900.0])
+    lights.append([cx + (R - 4.0) * 0.0, cy - R * 0.55, z0 + 3.0, 300.0])
+    lights.append([cx, cy + R * 0.55, z0 + 3.0, 300.0])
+
+
+def _tc_gate(soup, cy, rng, turrets):
+    """Two round towers joined by an arched wall; the passage stays open 4.2 m high at its sides, 5.8 m in the middle."""
+    for sx_ in (-1.0, 1.0):
+        tx = sx_ * 7.0
+        _tc_drum(soup, tx, cy, 0.0, 3.2, 11.0, 12, 0.0, 0, 0.0, 3.2, 0, (2, 8), 5.5, 8.0)
+        _tc_ring_trim(soup, tx, cy, 10.5, 3.2, 12, 0.5, 0.25)
+        _cone(soup, tx, cy, 11.0, 3.7, 5.5, 12, ROOF_SOURCE_SLOT)
+        turrets.append((tx, cy, 3.4))
+    slices = 16
+    for i in range(slices):
+        u0, u1 = -1.0 + 2.0 * i / slices, -1.0 + 2.0 * (i + 1) / slices
+        um = (u0 + u1) / 2
+        zb = 4.2 + 1.6 * math.sqrt(max(0.0, 1.0 - um * um))
+        _tc_box(soup, um * 3.6, cy, zb, 7.2 / slices + 0.01, 2.6, 9.5 - zb, 0)
+    _tc_box(soup, 0.0, cy - 1.4, 9.5, 8.0, 0.3, 0.5, 1)
+    _tc_box(soup, 0.0, cy + 1.4, 9.5, 8.0, 0.3, 0.5, 1)
+
+
+def _tc_bush(soup, cx, cy, z0, r, rng):
+    """A low round shrub: three bands of a squashed sphere, a triangle fan at the top."""
+    sides = 7
+    lat = [(-0.25, 0.25), (0.25, 0.7), (0.7, 1.0)]
+    zc = z0 + r * 0.55
+    for ri, (f0, f1) in enumerate(lat):
+        a0, a1 = f0 * math.pi / 2, f1 * math.pi / 2
+        for i in range(sides):
+            t0, t1 = 2 * math.pi * i / sides, 2 * math.pi * (i + 1) / sides
+            p00 = (cx + r * math.cos(a0) * math.cos(t0), cy + r * math.cos(a0) * math.sin(t0), zc + r * 0.85 * math.sin(a0))
+            p01 = (cx + r * math.cos(a0) * math.cos(t1), cy + r * math.cos(a0) * math.sin(t1), zc + r * 0.85 * math.sin(a0))
+            if ri == len(lat) - 1:
+                pts = [p00, p01, (cx, cy, zc + r * 0.85)]
+            else:
+                pts = [p00, p01, (cx + r * math.cos(a1) * math.cos(t1), cy + r * math.cos(a1) * math.sin(t1), zc + r * 0.85 * math.sin(a1)),
+                       (cx + r * math.cos(a1) * math.cos(t0), cy + r * math.cos(a1) * math.sin(t0), zc + r * 0.85 * math.sin(a1))]
+            tm = (t0 + t1) / 2
+            _tc_quad(soup, pts, (math.cos(tm), math.sin(tm), 0.4 + ri * 0.4), TC_LEAF_SLOT)
+
+
+TC_TOP_HALF = 28.0                    # half size of a summit terrace: room for the palace and a walk round it
+TC_FRONT = 24.0                       # the plaza (12 m) and the pool (12 m) in front of the hill
+
+
+# -------------------------------------------------------------------------------------------------- polygon helpers
+def _tc_area(poly):
+    return 0.5 * sum(poly[i][0] * poly[(i + 1) % len(poly)][1] - poly[(i + 1) % len(poly)][0] * poly[i][1] for i in range(len(poly)))
+
+
+def _tc_in_poly(poly, x, y):
+    inside = False
+    n = len(poly)
+    for i in range(n):
+        ax, ay = poly[i]
+        bx, by = poly[(i + 1) % n]
+        if (ay > y) != (by > y) and x < ax + (y - ay) * (bx - ax) / (by - ay):
+            inside = not inside
+    return inside
+
+
+def _tc_seg_dist(px, py, ax, ay, bx, by):
+    dx, dy = bx - ax, by - ay
+    L2 = dx * dx + dy * dy
+    t = 0.0 if L2 < 1e-12 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / L2))
+    qx, qy = ax + t * dx, ay + t * dy
+    return math.hypot(px - qx, py - qy), qx, qy
+
+
+def _tc_poly_dist(poly, x, y):
+    """(distance to the outline, nearest point) of a polygon."""
+    best = (1e18, x, y)
+    n = len(poly)
+    for i in range(n):
+        d = _tc_seg_dist(x, y, poly[i][0], poly[i][1], poly[(i + 1) % n][0], poly[(i + 1) % n][1])
+        if d[0] < best[0]:
+            best = d
+    return best
+
+
+def _tc_ears(poly):
+    """Ear-clipping triangulation of a simple counter-clockwise polygon: a list of index triples."""
+    idx = list(range(len(poly)))
+    tris = []
+
+    def cross(a, b, c):
+        return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+
+    def inside(p, a, b, c):
+        return cross(a, b, p) > 1e-9 and cross(b, c, p) > 1e-9 and cross(c, a, p) > 1e-9
+
+    guard = 0
+    while len(idx) > 3 and guard < 5000:
+        guard += 1
+        for ii in range(len(idx)):
+            a, b, c = idx[ii - 1], idx[ii], idx[(ii + 1) % len(idx)]
+            if cross(poly[a], poly[b], poly[c]) <= 1e-9:
+                continue
+            if any(j not in (a, b, c) and inside(poly[j], poly[a], poly[b], poly[c]) for j in idx):
+                continue
+            tris.append((a, b, c))
+            idx.pop(ii)
+            break
+        else:
+            break
+    if len(idx) == 3:
+        tris.append(tuple(idx))
+    return tris
+
+
+def _tc_prism(soup, poly, z0, z1, mat=0, top=None):
+    """A solid slab on a polygon: outward side walls and a triangulated top."""
+    n = len(poly)
+    for i in range(n):
+        a, b = poly[i], poly[(i + 1) % n]
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        _tc_quad(soup, [(a[0], a[1], z0), (b[0], b[1], z0), (b[0], b[1], z1), (a[0], a[1], z1)], (dy, -dx, 0.0), mat)
+    for a, b, c in _tc_ears(poly):
+        _tc_quad(soup, [(poly[a][0], poly[a][1], z1), (poly[b][0], poly[b][1], z1), (poly[c][0], poly[c][1], z1)], (0, 0, 1), mat if top is None else top)
+
+
+def _tc_shape(rect, rng, irr, straight=()):
+    """An irregular terrace outline inside `rect`: corners cut diagonally or stepped, bays bitten out of the long sides. Returns
+    (counter-clockwise polygon, intrusion per side {F, B, L, R} = how far the outline pulls back from the rectangle)."""
+    x0, y0, x1, y1 = rect
+    cmax = 8.0 * irr
+    intr = {"F": 0.0, "B": 0.0, "L": 0.0, "R": 0.0}
+
+    def cut():
+        return rng.uniform(3.0, cmax) if cmax >= 3.2 and rng.random() < 0.3 + 0.6 * irr else 0.0
+
+    cs = {k: cut() for k in ("sw", "se", "ne", "nw")}
+    kinds = {k: rng.choice(("diag", "step")) for k in cs}
+    for k, sides_ in (("sw", "LF"), ("se", "RF"), ("ne", "RB"), ("nw", "LB")):
+        for s_ in sides_:
+            intr[s_] = max(intr[s_], cs[k])
+    c = cs["sw"]
+    sw = [(x0, y0)] if c == 0 else ([(x0, y0 + c), (x0 + c, y0)] if kinds["sw"] == "diag" else [(x0, y0 + c), (x0 + c, y0 + c), (x0 + c, y0)])
+    c = cs["se"]
+    se = [(x1, y0)] if c == 0 else ([(x1 - c, y0), (x1, y0 + c)] if kinds["se"] == "diag" else [(x1 - c, y0), (x1 - c, y0 + c), (x1, y0 + c)])
+    c = cs["ne"]
+    ne = [(x1, y1)] if c == 0 else ([(x1, y1 - c), (x1 - c, y1)] if kinds["ne"] == "diag" else [(x1, y1 - c), (x1 - c, y1 - c), (x1 - c, y1)])
+    c = cs["nw"]
+    nw = [(x0, y1)] if c == 0 else ([(x0 + c, y1), (x0, y1 - c)] if kinds["nw"] == "diag" else [(x0 + c, y1), (x0 + c, y1 - c), (x0, y1 - c)])
+
+    def bay(side, lo, hi):
+        """Points of a bay on a side, between the along-coordinates lo..hi (empty when none)."""
+        if side in straight or hi - lo < 34.0 or rng.random() > 0.75 * irr:
+            return []
+        w = rng.uniform(12.0, min(22.0, hi - lo - 12.0))
+        a = rng.uniform(lo + 6.0, hi - 6.0 - w)
+        b = a + w
+        d = rng.uniform(2.5, max(2.6, cmax))
+        intr[side] = max(intr[side], d)
+        if side == "F":
+            return [(a, y0), (a, y0 + d), (b, y0 + d), (b, y0)]
+        if side == "R":
+            return [(x1, a), (x1 - d, a), (x1 - d, b), (x1, b)]
+        if side == "B":
+            return [(b, y1), (b, y1 - d), (a, y1 - d), (a, y1)]
+        return [(x0, b), (x0 + d, b), (x0 + d, a), (x0, a)]
+
+    poly = sw + bay("F", x0 + cs["sw"], x1 - cs["se"]) + se + bay("R", y0 + cs["se"], y1 - cs["ne"]) + ne \
+        + bay("B", x0 + cs["nw"], x1 - cs["ne"]) + nw + bay("L", y0 + cs["sw"], y1 - cs["nw"])
+    return [list(p_) for p_ in poly], intr
+
+
+def _tc_arc(cx, cy, rx, ry, a0, a1, n):
+    return [[cx + rx * math.cos(a0 + (a1 - a0) * i / n), cy + ry * math.sin(a0 + (a1 - a0) * i / n)] for i in range(n + 1)]
+
+
+def _tc_poly_shape(kind, rect, rng, irr):
+    """Rounded terrace outlines inscribed in `rect`: 'round' (an ellipse), 'poly' (a 6-12 sided polygon), 'capsule' (a stadium with half-round ends),
+    'apse' (a rectangle with one half-round end). Counter-clockwise polygons."""
+    x0, y0, x1, y1 = rect
+    cx, cy, hx, hy = (x0 + x1) / 2, (y0 + y1) / 2, (x1 - x0) / 2, (y1 - y0) / 2
+    if kind == "round":
+        per = math.pi * (3 * (hx + hy) - math.sqrt((3 * hx + hy) * (hx + 3 * hy)))
+        n = max(10, int(per / 15.0))
+        n += n % 2
+        return [[cx + hx * (1 + rng.uniform(-0.03, 0.03) * irr) * math.cos(-math.pi / 2 + math.pi / n + 2 * math.pi * i / n),
+                 cy + hy * (1 + rng.uniform(-0.03, 0.03) * irr) * math.sin(-math.pi / 2 + math.pi / n + 2 * math.pi * i / n)] for i in range(n)]
+    if kind == "poly":
+        k = rng.choice((6, 8, 10, 12))
+        a0 = -math.pi / 2 + (math.pi / k if rng.random() < 0.6 else 0.0)
+        return [[cx + hx * math.cos(a0 + 2 * math.pi * i / k), cy + hy * math.sin(a0 + 2 * math.pi * i / k)] for i in range(k)]
+    if kind == "capsule":
+        if hx >= hy:
+            r_, L = hy, hx - hy
+            m = max(5, int(math.pi * r_ / 12.0))
+            return _tc_arc(cx + L, cy, r_, r_, -math.pi / 2, math.pi / 2, m) + _tc_arc(cx - L, cy, r_, r_, math.pi / 2, 3 * math.pi / 2, m)
+        r_, L = hx, hy - hx
+        m = max(5, int(math.pi * r_ / 12.0))
+        return _tc_arc(cx, cy - L, r_, r_, math.pi, 2 * math.pi, m) + _tc_arc(cx, cy + L, r_, r_, 0.0, math.pi, m)
+    side = rng.choice("RLFB")                                                   # apse
+    if side == "R":
+        rho = hy
+        m = max(5, int(math.pi * rho / 12.0))
+        return [[x0, y0]] + _tc_arc(x1 - rho, cy, rho, rho, -math.pi / 2, math.pi / 2, m) + [[x0, y1]]
+    if side == "L":
+        rho = hy
+        m = max(5, int(math.pi * rho / 12.0))
+        return _tc_arc(x0 + rho, cy, rho, rho, math.pi / 2, 3 * math.pi / 2, m) + [[x1, y0], [x1, y1]]
+    if side == "B":
+        rho = hx
+        m = max(5, int(math.pi * rho / 12.0))
+        return [[x0, y0], [x1, y0]] + _tc_arc(cx, y1 - rho, rho, rho, 0.0, math.pi, m)
+    rho = hx                                                                    # a half-round front
+    m = max(5, int(math.pi * rho / 12.0))
+    return _tc_arc(cx, y0 + rho, rho, rho, math.pi, 2 * math.pi, m) + [[x1, y1], [x0, y1]]
+
+
+def _tc_axes(p):
+    """Geometry constants of a terrace city from its parameters (steps, ring widths, size per axis); raises PlanError when too small."""
+    tiers, peaks, rise, irr = int(p["tiers"]), int(p["peaks"]), p["rise"], p["irregular"]
+    n_steps = int(math.ceil(rise / TC_STEP_RISE - 1e-9))
+    run_total = n_steps * TC_STEP_RUN
+    rmin = run_total + 6.0
+    reff = rmin + 8.0 * irr + 5.0 * irr                  # the ring a terrace needs in the worst case: cut corners and a shift
+    if peaks == 2:
+        if tiers < 3:
+            raise PlanError("terrace_city: two peaks need at least 3 tiers")
+        split = max(1, tiers // 2)
+        m = tiers - split
+        ax, bx, ay, by = 2 * TC_TOP_HALF, 2 * m + split - 1, TC_TOP_HALF, m + split - 1
+    else:
+        split, m = tiers, tiers
+        ax, bx, ay, by = TC_TOP_HALF, tiers - 1, TC_TOP_HALF, tiers - 1
+    return dict(tiers=tiers, peaks=peaks, rise=rise, n_steps=n_steps, sr=rise / n_steps, run_total=run_total, rmin=rmin, reff=reff, split=split, m=m,
+                ax=ax, bx=bx, ay=ay, by=by, wmin=2 * (ax + bx * reff), dmin=TC_FRONT + 2 * (ay + by * reff))
+
+
+def terrace_city_size(params=None):
+    """(width, depth) in metres of a terrace city: the given ones, or the smallest that fits its tiers, peaks and irregularity."""
+    p = {**PLAN_TERRACE_DEFAULTS, **(params or {})}
+    g = _tc_axes(p)
+    return (p["width"] or g["wmin"], p["depth"] or g["dmin"])
+
+
+PLAN_TERRACE_DEFAULTS = dict(tiers=5, peaks=1, flights=3, irregular=0.7, shapes='mixed', width=0.0, depth=0.0, rise=4.0, density=0.7, bushes=0.7, trees=0.7, interiors=0.7,
+                             ruins=0.5, fountains=0.8, village=0.6, waterfalls=0.6, walls=True, lights=True, roof_color=None, brick_color='PLAIN')
+PLAN_TERRACE_RANGES = {"tiers": (2, 7), "peaks": (1, 2), "flights": (1, 3), "irregular": (0.0, 1.0), "width": (0.0, 500.0), "depth": (0.0, 500.0),
+                       "rise": (2.0, 6.0), "density": (0.0, 1.0), "bushes": (0.0, 1.0), "trees": (0.0, 1.0), "interiors": (0.0, 1.0),
+                       "ruins": (0.0, 1.0), "fountains": (0.0, 1.0), "village": (0.0, 1.0), "waterfalls": (0.0, 1.0)}
+PLAN_DEFAULT_FOOTPRINTS["terrace_city"] = lambda params: _footprint_rect(dict(zip(("width", "depth"), terrace_city_size(params))))
+
+
+def _tc_flight(w, n, run, sr, mat=1):
+    """A flight of steps with stepped cheek walls in its own frame: runs along +y and ends at y = 0, centred on x = 0, rising from z = 0."""
+    s = _TowerMesh()
+    for i in range(n):
+        yc = -(n - i - 0.5) * run
+        _tc_box(s, 0.0, yc, 0.0, w, run + 0.005, (i + 1) * sr, mat)
+        for sg in (-1.0, 1.0):
+            _tc_box(s, sg * (w / 2 + 0.25), yc, 0.0, 0.5, run + 0.005, (i + 1) * sr + 0.8, 0)
+    return s
+
+
+# -------------------------------------------------------------------------------------------------- more kinds of building
+def _tc_octagon_house(soup, layout, cx, cy, z0, R, door_angle, rng, furnished, lights):
+    H = rng.uniform(3.8, 4.6)
+    n = 8
+    _tc_drum(soup, cx, cy, z0, R, H, n, door_angle, 1 if furnished else 0, 2.8, 0.55, 0, {2, 4, 6}, 1.3, 3.0)
+    _tc_ring_trim(soup, cx, cy, z0, R, n, 0.3, 0.16)
+    _tc_ring_trim(soup, cx, cy, z0 + H - 0.35, R, n, 0.35, 0.2)
+    _cone(soup, cx, cy, z0 + H, R + 0.4, R * 1.0, n, ROOF_SOURCE_SLOT)                        # an eight-sided pyramid roof
+    _tc_cyl(soup, cx, cy, z0 + H + R * 0.95 - 0.2, 0.5, 0.9, 8, 1)
+    _cone(soup, cx, cy, z0 + H + R * 0.95 + 0.7, 0.6, 1.1, 8, ROOF_SOURCE_SLOT)
+    if furnished:
+        kind = rng.choice(('dwelling', 'library', 'shrine'))
+        room, fur = _tc_room(rng, R - 0.55, H, kind)
+        soup.append(room, rot=door_angle, offset=(cx, cy, z0))
+        _tc_door_panels(layout, cx, cy, z0, R, 0.55, door_angle, 1, n, 2.8, double=True)
+        layout["enter"].append({"x": cx, "y": cy, "R": R, "Ri": R - 0.55, "ang": door_angle, "z": z0, "gap": 2.4,
+                                "furniture": [list(_tc_local_to_world(cx, cy, door_angle, u, v)) + [r] for u, v, r in fur], "kind": kind})
+        lights.append([cx, cy, z0 + H - 0.7, 240.0])
+    else:
+        _tc_closed_door(soup, cx, cy, z0, R, door_angle, n, 2.6)
+
+
+def _tc_tower_house(soup, layout, cx, cy, z0, R, door_angle, rng, furnished, lights):
+    H = rng.uniform(6.5, 8.0)
+    n = 12
+    _tc_drum(soup, cx, cy, z0, R, H, n, door_angle, 1 if furnished else 0, 2.6, 0.5, 0, {1, 4, 7, 10}, 3.6, 5.6)
+    _tc_ring_trim(soup, cx, cy, z0, R, n, 0.3, 0.16)
+    _tc_ring_trim(soup, cx, cy, z0 + H - 0.5, R, n, 0.5, 0.25)
+    _cone(soup, cx, cy, z0 + H, R + 0.5, R * 1.3 + 1.5, n, ROOF_SOURCE_SLOT)
+    _cone(soup, cx, cy, z0 + H + R * 1.3 + 1.2, 0.3, 1.6, 6, ROOF_SOURCE_SLOT)
+    if furnished:
+        kind = rng.choice(('dwelling', 'library', 'shrine'))
+        room, fur = _tc_room(rng, R - 0.5, H, kind)
+        soup.append(room, rot=door_angle, offset=(cx, cy, z0))
+        _tc_door_panels(layout, cx, cy, z0, R, 0.5, door_angle, 1, n, 2.6)
+        layout["enter"].append({"x": cx, "y": cy, "R": R, "Ri": R - 0.5, "ang": door_angle, "z": z0, "gap": 1.2,
+                                "furniture": [list(_tc_local_to_world(cx, cy, door_angle, u, v)) + [r] for u, v, r in fur], "kind": kind})
+        lights.append([cx, cy, z0 + 2.8, 220.0])
+    else:
+        _tc_closed_door(soup, cx, cy, z0, R, door_angle, n)
+
+
+def _tc_ruin(soup, layout, cx, cy, z0, R, door_angle, rng):
+    """A fallen round building: broken wall ring of uneven height, an open doorway, a few standing column stumps and rubble."""
+    n = 12
+    da = 2 * math.pi / n
+    a_start = door_angle - da / 2.0
+    thick = 0.55
+    Ri = R - thick
+    heights = [0.0] + [rng.choice((rng.uniform(0.6, 1.4), rng.uniform(1.8, 3.2), rng.uniform(3.4, 4.6))) for _ in range(n - 1)]
+    for i in range(n):
+        a0, a1 = a_start + i * da, a_start + (i + 1) * da
+        h = heights[i]
+        am = (a0 + a1) / 2
+        if h > 0.05:
+            _tc_quad(soup, [_tc_pt(cx, cy, z0, R, a0), _tc_pt(cx, cy, z0, R, a1), _tc_pt(cx, cy, z0 + h, R, a1), _tc_pt(cx, cy, z0 + h, R, a0)], (math.cos(am), math.sin(am), 0), 0)
+            _tc_quad(soup, [_tc_pt(cx, cy, z0, Ri, a0), _tc_pt(cx, cy, z0, Ri, a1), _tc_pt(cx, cy, z0 + h, Ri, a1), _tc_pt(cx, cy, z0 + h, Ri, a0)], (-math.cos(am), -math.sin(am), 0), 0)
+            _tc_quad(soup, [_tc_pt(cx, cy, z0 + h, R, a0), _tc_pt(cx, cy, z0 + h, R, a1), _tc_pt(cx, cy, z0 + h, Ri, a1), _tc_pt(cx, cy, z0 + h, Ri, a0)], (0, 0, 1), 0)
+        hp = heights[i - 1]                                   # the wall end between this segment and the one before it
+        if abs(h - hp) > 0.05:
+            lo, hi = min(h, hp), max(h, hp)
+            sgn = 1.0 if hp > h else -1.0
+            _tc_quad(soup, [_tc_pt(cx, cy, z0 + lo, R, a0), _tc_pt(cx, cy, z0 + lo, Ri, a0), _tc_pt(cx, cy, z0 + hi, Ri, a0), _tc_pt(cx, cy, z0 + hi, R, a0)],
+                     (-math.sin(a0) * sgn, math.cos(a0) * sgn, 0.0), 0)
+    _tc_ring_trim(soup, cx, cy, z0, R, n, 0.3, 0.16)
+    fur = []
+    cone = math.radians(32)
+
+    def clear_of_door(a):
+        d = abs((a - door_angle + math.pi) % (2 * math.pi) - math.pi)
+        return d > cone
+
+    for _ in range(2):                                         # column stumps inside
+        for _t in range(12):
+            a, r = rng.uniform(0, 2 * math.pi), rng.uniform(1.4, Ri - 1.4)
+            if clear_of_door(a) and all(math.hypot(r * math.cos(a) - f_[0] + 0.0, r * math.sin(a) - f_[1] + 0.0) > 1.8 for f_ in []):
+                x, y = cx + r * math.cos(a), cy + r * math.sin(a)
+                _tc_cyl(soup, x, y, z0, 0.38, rng.uniform(1.0, 3.0), 8, 1)
+                fur.append(list((x, y, 0.55)))
+                break
+    inside = 0
+    for _ in range(rng.randint(5, 8)):                         # rubble: mostly round the ring, at most two pieces inside
+        for _t in range(12):
+            a = rng.uniform(0, 2 * math.pi)
+            if not clear_of_door(a):
+                continue
+            if inside < 2 and rng.random() < 0.25:
+                r = rng.uniform(1.4, Ri - 1.3)
+            else:
+                r = rng.uniform(R + 0.9, R + 2.4)
+            s_ = rng.uniform(0.4, 0.9)
+            x, y = cx + r * math.cos(a), cy + r * math.sin(a)
+            _tc_box_rot(soup, x, y, z0, s_ * 1.4, s_, s_ * rng.uniform(0.5, 1.0), rng.uniform(0, 3.14), 0)
+            if r < Ri - 0.5:
+                fur.append([x, y, s_ * 0.75])
+                inside += 1
+            else:
+                layout["circles"].append([x, y, s_ * 0.75])
+            break
+    layout["enter"].append({"x": cx, "y": cy, "R": R, "Ri": Ri, "ang": door_angle, "z": z0, "gap": 1.6, "furniture": fur, "kind": "ruin"})
+
+
+def _tc_fountain(soup, cx, cy, z0, R):
+    """A round basin with water, a stem, a bowl and a spray."""
+    _tc_drum(soup, cx, cy, z0, R, 0.7, 16, 0.0, 0, 0.0, 0.6, 1)
+    _tc_cyl(soup, cx, cy, z0, R - 0.55, 0.3, 16, 0)
+    _tc_quad(soup, [_tc_pt(cx, cy, z0 + 0.5, R - 0.55, 2 * math.pi * i / 16) for i in range(16)], (0, 0, 1), TC_WATER_SLOT)
+    _tc_cyl(soup, cx, cy, z0 + 0.3, 0.55, 1.4, 10, 1)
+    _tc_cyl(soup, cx, cy, z0 + 1.45, 1.4, 0.25, 12, 1)
+    _tc_quad(soup, [_tc_pt(cx, cy, z0 + 1.7, 1.25, 2 * math.pi * i / 12) for i in range(12)], (0, 0, 1), TC_WATER_SLOT)
+    _cone(soup, cx, cy, z0 + 1.7, 0.35, 1.5, 8, TC_WATER_SLOT)
+
+
+# -------------------------------------------------------------------------------------------------- the city
+def _tc_village_building(soup, x, y, z0, ang, rng, style, kind, w, d, floors):
+    """A house or chapel from the village generator (real doorway, windows, roof, rooms inside), its door turned to the angle `ang`."""
+    prm = plan_house_params(kind, {"width": w, "depth": d, "floors": floors, "door": "S", "windows": True, "chimney": False, "roof_color": "TERRACOTTA"}
+                            if style == 'medieval' else {"width": w, "depth": d, "floors": floors, "door": "S", "windows": True, "chimney": False}, style)
+    if prm["style"] == 'medieval':
+        prm["style"] = 'alpine'                        # only the slot numbering matters here: no brick tints
+    soup.append(_build_house_mesh(kind, prm, rng.randint(1, 999999)), rot=ang + math.pi / 2, offset=(x, y, z0))
+
+
+def _tc_hut_building(soup, x, y, z0, ang, rng, style, form, w, d):
+    """A hut of the village generator in one of its forms (dome, silo, tunnel, A-frame, box)."""
+    hut, house = plan_hut_params({"form": form, "width": w, "depth": d}, style if style in PLAN_PACKS else None)
+    seed = rng.randint(1, 999999)
+    hs = _build_house_mesh('house', house, seed) if form == 'BOX' else _build_hut_round(hut, house, seed)
+    soup.append(hs, rot=ang + math.pi / 2, offset=(x, y, z0))
+
+
+def _tc_arcade(soup, x, y, z0, ang, columns, rng):
+    """A covered walk: two rows of columns joined by round arches, a beam and a flat roof (walk straight through)."""
+    loc = _TowerMesh()
+    xs = (-3.6, -1.2, 1.2, 3.6)
+    for yy in (-1.6, 1.6):
+        for xc in xs:
+            _tc_cyl(loc, xc, yy, 0.0, 0.3, 2.9, 8, 1)
+            _tc_box(loc, xc, yy, 0.0, 0.8, 0.8, 0.2, 1)
+            columns.append(_tc_local_to_world(x, y, ang + math.pi / 2, xc, yy))
+        for a in range(3):
+            xa = xs[a]
+            for i in range(8):
+                xm = xa + 2.4 * (i + 0.5) / 8
+                um = (xm - (xa + 1.2)) / 1.2
+                zb = 2.9 + 0.85 * math.sqrt(max(0.0, 1.0 - um * um))
+                _tc_box(loc, xm, yy, zb, 2.4 / 8 + 0.01, 0.5, 3.75 - zb, 0)
+    for xc in (-3.6, 3.6):
+        _tc_box(loc, xc, 0.0, 3.7, 0.5, 3.8, 0.3, 0)
+    _tc_box(loc, 0.0, 0.0, 3.95, 9.4, 4.4, 0.3, 1)
+    _tc_box(loc, 0.0, 0.0, 4.25, 8.8, 3.8, 0.35, 2)
+    soup.append(loc, rot=ang + math.pi / 2, offset=(x, y, z0))
+
+
+def _tc_belltower(soup, x, y, z0, rng):
+    """A square tower with an open belfry on four slender piers, a bell and a pointed roof."""
+    _tc_drum(soup, x, y, z0, 3.3, 9.0, 4, 0.0, 0, 0.0, 3.3, 0, {1, 3}, 4.0, 6.0)
+    _tc_ring_trim(soup, x, y, z0 + 8.6, 3.3, 4, 0.5, 0.3)
+    for q in range(4):
+        a = math.pi / 2 * q
+        _tc_box(soup, x + 2.6 * math.cos(a), y + 2.6 * math.sin(a), z0 + 9.0, 0.8, 0.8, 4.0, 1)
+    _tc_cyl(soup, x, y, z0 + 10.2, 0.55, 1.1, 8, 3)
+    _tc_ring_trim(soup, x, y, z0 + 13.0, 3.1, 4, 0.5, 0.3)
+    _cone(soup, x, y, z0 + 13.5, 3.8, 5.0, 4, ROOF_SOURCE_SLOT)
+    _cone(soup, x, y, z0 + 18.3, 0.3, 1.8, 6, ROOF_SOURCE_SLOT)
+
+
+def _tc_kiosk(soup, x, y, z0, columns, rng):
+    """A small open summer-house: four columns, a low rail and a pyramid roof."""
+    for q in range(4):
+        a = math.pi / 2 * q
+        cx, cy = x + 1.9 * math.cos(a), y + 1.9 * math.sin(a)
+        _tc_cyl(soup, cx, cy, z0, 0.22, 2.8, 8, 1)
+        columns.append((cx, cy))
+    _tc_ring_trim(soup, x, y, z0 + 2.7, 2.1, 4, 0.3, 0.2)
+    _cone(soup, x, y, z0 + 3.0, 2.9, 2.2, 4, ROOF_SOURCE_SLOT)
+    _tc_cyl(soup, x, y, z0, 1.6, 0.12, 12, 1)
+
+
+def _tc_waterfall(soup, ex, ey, out_ang, z_up, z_low):
+    """A spillway on the upper terrace, a sheet of water down the retaining wall and a stone-rimmed pool on the lower one.
+    Built with the origin on the terrace edge and +y pointing away from the hill."""
+    s = _TowerMesh()
+    hw = 2.6
+    for sg in (-1.0, 1.0):
+        _tc_box(s, sg * (hw + 0.2), -3.0, z_up, 0.4, 6.0, 0.4, 1)
+    _tc_quad(s, [(-hw, -6.0, z_up + 0.14), (hw, -6.0, z_up + 0.14), (hw, 0.0, z_up + 0.14), (-hw, 0.0, z_up + 0.14)], (0, 0, 1), TC_WATER_SLOT)
+    zp = z_low + 0.42
+    _tc_quad(s, [(-hw, 0.0, z_up + 0.14), (hw, 0.0, z_up + 0.14), (hw, 0.7, zp), (-hw, 0.7, zp)], (0, 1, 0.35), TC_WATER_SLOT)
+    for sg in (-1.0, 1.0):
+        _tc_box(s, sg * (hw + 0.6), 3.4, z_low, 0.5, 6.0, 0.6, 1)
+    _tc_box(s, 0.0, 6.4, z_low, 2 * hw + 1.7, 0.5, 0.6, 1)
+    _tc_box(s, 0.0, 3.4, z_low, 2 * hw + 0.4, 5.6, 0.3, 0)
+    _tc_quad(s, [(-hw - 0.3, 0.4, zp), (hw + 0.3, 0.4, zp), (hw + 0.3, 6.1, zp), (-hw - 0.3, 6.1, zp)], (0, 0, 1), TC_WATER_SLOT)
+    soup.append(s, rot=out_ang - math.pi / 2, offset=(ex, ey, 0.0))
+
+
+def _tc_wall_run(soup, layout, a, b, lo, hi, z0, H, T, rng):
+    """A crenellated curtain wall along the outline edge a-b between the along-coordinates lo..hi (its outer face on the outline)."""
+    L = math.hypot(b[0] - a[0], b[1] - a[1])
+    ux, uy = (b[0] - a[0]) / L, (b[1] - a[1]) / L
+    nx_, ny_ = -uy, ux
+    ang = math.atan2(uy, ux)
+    mid = (lo + hi) / 2
+    _tc_box_rot(soup, a[0] + ux * mid + nx_ * T / 2, a[1] + uy * mid + ny_ * T / 2, z0, hi - lo, T, H, ang, 0)
+    _tc_box_rot(soup, a[0] + ux * mid + nx_ * T / 2, a[1] + uy * mid + ny_ * T / 2, z0 + H - 0.1, hi - lo + 0.1, T + 0.3, 0.25, ang, 1)
+    t = lo + 0.6
+    while t < hi - 0.5:
+        _tc_box_rot(soup, a[0] + ux * t + nx_ * (T - 0.35), a[1] + uy * t + ny_ * (T - 0.35), z0 + H + 0.15, 1.0, 0.7, 0.9, ang, 0)
+        t += 2.2
+    layout["segs"].append([a[0] + ux * lo + nx_ * T / 2, a[1] + uy * lo + ny_ * T / 2, a[0] + ux * hi + nx_ * T / 2, a[1] + uy * hi + ny_ * T / 2, T / 2, z0])
+
+
+def _tc_wall_tower(soup, x, y, z0, rng):
+    _tc_drum(soup, x, y, z0, 3.4, 9.0, 10, 0.0, 0, 0.0, 3.4, 0, {2, 6}, 4.5, 6.5)
+    _tc_ring_trim(soup, x, y, z0 + 8.5, 3.4, 10, 0.5, 0.3)
+    _cone(soup, x, y, z0 + 9.0, 3.9, 4.4, 10, ROOF_SOURCE_SLOT)
+
+
+def _build_terrace_city(p, seed):
+    """Returns (soup, layout). `layout` (plain data) holds everything `terrace_city_walk_check` needs plus the door panels and lamps."""
+    rng = random.Random(int(seed) % 1_000_000)
+    soup = _TowerMesh()
+    g = _tc_axes(p)
+    tiers, peaks, rise, n_steps, sr, run_total, split, rmin = g["tiers"], g["peaks"], g["rise"], g["n_steps"], g["sr"], g["run_total"], g["split"], g["rmin"]
+    irr = p["irregular"]
+    W, D = p["width"] or g["wmin"], p["depth"] or g["dmin"]
+    if W < g["wmin"] - 1e-6 or D < g["dmin"] - 1e-6:
+        raise PlanError("terrace_city: %d tiers%s of rise %.1f with irregularity %.1f need at least %.0f x %.0f m, the plan is %.0f x %.0f m (too small)"
+                        % (tiers, " and two peaks" if peaks == 2 else "", rise, irr, g["wmin"], g["dmin"], W, D))
+    y_front = -D / 2.0
+    y_ch0, y_ch1 = y_front + 12.0, y_front + TC_FRONT
+    hw_p = W / 2.0 * 1.05
+    shift = 5.0 * irr
+    cmax = 8.0 * irr
+    style = p.get("style", "medieval")
+    walls_on = bool(p["walls"])
+    # --- the outline of every tier: a shape inscribed in a rectangle pulled in by a different amount on each side (so the terraces sit off-centre)
+    rect0 = [-W / 2.0, y_ch1, W / 2.0, D / 2.0]
+    zero_intr = {"F": 0.0, "B": 0.0, "L": 0.0, "R": 0.0}
+
+    def bbox(poly_):
+        return [min(v[0] for v in poly_), min(v[1] for v in poly_), max(v[0] for v in poly_), max(v[1] for v in poly_)]
+
+    def scaled(poly_, f):
+        b_ = bbox(poly_)
+        cx_, cy_ = (b_[0] + b_[2]) / 2, (b_[1] + b_[3]) / 2
+        return [[cx_ + (v[0] - cx_) * f, cy_ + (v[1] - cy_) * f] for v in poly_]
+
+    def fits(c, par):
+        """True when the outline c lies inside par with at least rmin metres of ring everywhere (both ways round)."""
+        m_ = len(c)
+        for i in range(m_):
+            for x, y in (c[i], ((c[i][0] + c[(i + 1) % m_][0]) / 2, (c[i][1] + c[(i + 1) % m_][1]) / 2)):
+                if not _tc_in_poly(par, x, y) or _tc_poly_dist(par, x, y)[0] < rmin:
+                    return False
+        return not any(_tc_in_poly(c, v[0], v[1]) or _tc_poly_dist(c, v[0], v[1])[0] < rmin for v in par)
+
+    def pick_kind(k):
+        mode = p["shapes"]
+        if (peaks == 2 and k < split) or mode == "rect":
+            return "rect"
+        if mode == "round":
+            return "round"
+        if mode == "polygon":
+            return "poly"
+        return rng.choices(("rect", "round", "poly", "capsule", "apse"), weights=(3, 2.5, 2.5, 1, 1))[0]
+
+    def make_child(kind, rect, par_poly, straight):
+        """One terrace outline inside its parent: the wanted shape, shrunk until the ring fits; a rounder shape if it has to shrink a lot."""
+        chain = [kind] + [kd for kd in ("poly", "round") if kd != kind]
+        best = None
+        for kd in chain:
+            base, in_ = _tc_shape(rect, rng, irr, straight) if kd == "rect" else (_tc_poly_shape(kd, rect, rng, irr), dict(zero_intr))
+            f, cur = 1.0, base
+            while not fits(cur, par_poly) and f > 0.45:
+                f *= 0.96
+                cur = scaled(base, f)
+            ok = fits(cur, par_poly)
+            if ok and f < 1.0:                                  # win back what a uniform shrink gave away along the looser axis
+                bb0 = bbox(base)
+                bx0, by0 = (bb0[0] + bb0[2]) / 2, (bb0[1] + bb0[3]) / 2
+                fx = fy = f
+                for axis in (0, 1, 0, 1):
+                    for _ in range(12):
+                        tx_, ty_ = (min(1.0, fx * 1.03), fy) if axis == 0 else (fx, min(1.0, fy * 1.03))
+                        trial = [[bx0 + (v[0] - bx0) * tx_, by0 + (v[1] - by0) * ty_] for v in base]
+                        if tx_ == fx and ty_ == fy or not fits(trial, par_poly):
+                            break
+                        fx, fy, cur = tx_, ty_, trial
+                f = (fx + fy) / 2.0
+            if ok and f >= 0.8:
+                return cur, in_, kd
+            if ok and (best is None or f > best[0]):
+                best = (f, cur, in_, kd)
+        return best[1:] if best else None
+
+    def gen_tiers():
+        """The outlines of all tiers, or None when a terrace cannot be fitted or a summit is too small for its palace."""
+        out_p, out_r, out_i, out_k = [], [], [], []
+        poly0, in0 = _tc_shape(rect0, rng, irr, ("F",))
+        out_p.append([poly0]), out_r.append([bbox(poly0)]), out_i.append([in0]), out_k.append(["rect"])
+        for k in range(1, tiers):
+            kids = []
+            if peaks == 2 and k == split:
+                par, intr = out_r[k - 1][0], out_i[k - 1][0]
+                gap = 2 * (rmin + cmax)
+                mF, mB = rmin + intr["F"] + rng.uniform(0, shift), rmin + intr["B"] + rng.uniform(0, shift)
+                mL, mR = rmin + intr["L"] + rng.uniform(0, shift), rmin + intr["R"] + rng.uniform(0, shift)
+                xm = (par[0] + par[2]) / 2.0
+                for rect_, st in (([par[0] + mL, par[1] + mF, xm - gap / 2.0, par[3] - mB], ("R",)), ([xm + gap / 2.0, par[1] + mF, par[2] - mR, par[3] - mB], ("L",))):
+                    kids.append((rect_, st, out_p[k - 1][0]))
+            else:
+                for par_r, par_i, par_p in zip(out_r[k - 1], out_i[k - 1], out_p[k - 1]):
+                    m_ = {s_: rmin + par_i[s_] + rng.uniform(0.0, shift) for s_ in "FBLR"}
+                    kids.append(([par_r[0] + m_["L"], par_r[1] + m_["F"], par_r[2] - m_["R"], par_r[3] - m_["B"]], (), par_p))
+            lp, lr, li, lk = [], [], [], []
+            for rect_, st, par_p in kids:
+                got = make_child(pick_kind(k), rect_, par_p, st)
+                if got is None:
+                    return None
+                poly_, in_, kd = got
+                lp.append(poly_), lr.append(bbox(poly_)), li.append(in_), lk.append(kd)
+            out_p.append(lp), out_r.append(lr), out_i.append(li), out_k.append(lk)
+        for top in out_p[-1]:
+            b_ = bbox(top)
+            cx_, cy_ = (b_[0] + b_[2]) / 2, (b_[1] + b_[3]) / 2
+            if not _tc_in_poly(top, cx_, cy_) or _tc_poly_dist(top, cx_, cy_)[0] < 17.0:
+                return None
+        return out_p, out_r, out_i, out_k
+
+    result = None
+    for attempt in range(12):
+        result = gen_tiers() if attempt < 11 else None
+        if result is None and attempt == 11:                  # fall back to plain rectangles, which always fit the size
+            p = {**p, "shapes": "rect"}
+            result = gen_tiers()
+        if result:
+            break
+    if result is None:
+        raise PlanError("terrace_city: no outline fits %d tiers in %.0f x %.0f m (too small)" % (tiers, W, D))
+    polys, rects, intrs, kinds = result
+    layout = {"y_front": y_front, "plaza": [y_front, y_ch0, hw_p], "channel": [y_ch0, y_ch1], "bridge": [0.0, 3.5],
+              "tiers": [{"z": k * rise, "polys": polys[k]} for k in range(tiers)], "flights": [], "decks": [], "circles": [], "rects": [], "segs": [],
+              "enter": [], "door_panels": [], "lights": [], "trees": 0, "fountains": 0, "step": [sr, TC_STEP_RUN], "start": [0.0, y_front + 4.0],
+              "reserved": [], "palace_fronts": [], "peaks": peaks, "shapes": kinds}
+    lights, circles = layout["lights"], layout["circles"]
+    layout["reserved"].append([-6.5, y_ch1 - 1.0, 6.5, y_ch1 + 14.0])        # the way from the bridge onto the first terrace stays free
+    # --- ground: plaza, basin, one slab per tier polygon
+    _tc_box(soup, 0.0, (y_front + y_ch0) / 2, TC_SKIRT, 2 * hw_p, 12.0, -TC_SKIRT, 0, TC_PAVING_SLOT)
+    _tc_box(soup, 0.0, (y_ch0 + y_ch1) / 2, TC_SKIRT, 2 * hw_p, 12.0, 0.5, 0)
+    for sx_ in (-1.0, 1.0):
+        _tc_box(soup, sx_ * (hw_p + 0.5), (y_ch0 + y_ch1) / 2, TC_SKIRT, 1.0, 12.0, -TC_SKIRT, 0)
+    _tc_quad(soup, [(-hw_p, y_ch0, -0.9), (hw_p, y_ch0, -0.9), (hw_p, y_ch1, -0.9), (-hw_p, y_ch1, -0.9)], (0, 0, 1), TC_WATER_SLOT)
+    for k in range(tiers):
+        for poly_ in polys[k]:
+            _tc_prism(soup, poly_, TC_SKIRT, k * rise, 0, TC_PAVING_SLOT)
+    # --- the bridge over the pool
+    slices, c_y, half = 24, (y_ch0 + y_ch1) / 2, 6.0
+    for i in range(slices):
+        y0 = y_ch0 + 12.0 * i / slices
+        um = ((y0 + 12.0 / slices / 2) - c_y) / half
+        zb = -0.55 - 1.5 * (1.0 - math.sqrt(max(0.0, 1.0 - um * um)))
+        _tc_box(soup, 0.0, y0 + 12.0 / slices / 2, zb, 7.0, 12.0 / slices + 0.01, -zb, 0)
+    for sx_ in (-1.0, 1.0):
+        _tc_box(soup, sx_ * 3.3, c_y, 0.0, 0.4, 12.0, 0.95, 1)
+        layout["rects"].append([sx_ * 3.3 - 0.2, y_ch0, sx_ * 3.3 + 0.2, y_ch1])
+        for yy in (y_ch0 + 0.3, c_y, y_ch1 - 0.3):
+            _tc_box(soup, sx_ * 3.3, yy, 0.0, 0.6, 0.6, 1.4, 1)
+            _cone(soup, sx_ * 3.3, yy, 1.4, 0.4, 0.5, 6, ROOF_SOURCE_SLOT)
+    # --- two peaks: where the viaduct crosses (where a line across both summits meets their outlines)
+    via = None
+    if peaks == 2:
+        pa_, pb_ = polys[split][0], polys[split][1]
+        ba, bb_ = bbox(pa_), bbox(pb_)
+        lo_y, hi_y = max(ba[1], bb_[1]) + 14.0, min(ba[3], bb_[3]) - 14.0
+        yv = lo_y + 0.62 * (hi_y - lo_y)
+
+        def x_at(P, y, pick):
+            xs_ = []
+            for i in range(len(P)):
+                a_, b2 = P[i], P[(i + 1) % len(P)]
+                if (a_[1] <= y < b2[1]) or (b2[1] <= y < a_[1]):
+                    xs_.append(a_[0] + (y - a_[1]) * (b2[0] - a_[0]) / (b2[1] - a_[1]))
+            return pick(xs_)
+
+        via = (x_at(pa_, yv, max), x_at(pb_, yv, min), yv)
+    # --- flights of steps: 1..3 to every upper polygon, on different edges and not in line
+    flight_meshes = {w_: _tc_flight(w_, n_steps, TC_STEP_RUN, sr) for w_ in (7.0, 5.2)}
+    gap_pts = {}                                           # (tier, polygon) -> [(x, y, half width)] openings in the parapet
+    fl_oriented = []                                       # (ox, oy, dx, dy, w) of every flight
+    used_sides = {}
+    for k in range(1, tiers):
+        used_sides[k] = set()
+        for ci, C in enumerate(polys[k]):
+            gp = gap_pts.setdefault((k, ci), [])
+            n_f = rng.randint(1, int(p["flights"]))
+            edges = []
+            m_ = len(C)
+            for i in range(m_):
+                a, b = C[i], C[(i + 1) % m_]
+                L = math.hypot(b[0] - a[0], b[1] - a[1])
+                if L < (21.0 if kinds[k][ci] == "rect" else 11.0):
+                    continue
+                ex_, ey_ = (b[0] - a[0]) / L, (b[1] - a[1]) / L
+                inward = (-ey_, ex_)                                 # the left of a counter-clockwise outline points inside
+                bucket = int(round(math.atan2(inward[1], inward[0]) / (math.pi / 4))) % 8             # which of eight compass sectors the flight faces
+                edges.append((i, a, b, L, inward, bucket))
+            rng.shuffle(edges)
+            edges.sort(key=lambda e_: e_[5] in used_sides.get(k - 1, ()))
+            if k == 1:
+                edges.sort(key=lambda e_: 0 if e_[5] == 2 else 1)                  # a flight facing the gate on the first level
+            made, taken = 0, set()
+            for i, a, b, L, inward, bucket in edges:
+                if made >= n_f:
+                    break
+                if bucket in taken and made >= 1:
+                    continue
+                mg = min(8.0, max(4.6, L / 2.0 - 1.0))
+                t = rng.uniform(mg, L - mg)
+                ex_, ey_ = a[0] + (b[0] - a[0]) * t / L, a[1] + (b[1] - a[1]) * t / L
+                if via and k == split and (math.hypot(ex_ - via[0], ey_ - via[2]) < 13.0 or math.hypot(ex_ - via[1], ey_ - via[2]) < 13.0):
+                    continue
+                dx, dy = inward
+                w_ = 7.0 if made == 0 else 5.2
+                rot = math.atan2(dy, dx) - math.pi / 2
+                soup.append(flight_meshes[w_], rot=rot, offset=(ex_, ey_, (k - 1) * rise))
+                ox, oy = ex_ - dx * run_total, ey_ - dy * run_total
+                layout["flights"].append({"o": [ox, oy], "d": [dx, dy], "w": w_, "n": n_steps, "z0": (k - 1) * rise, "tier": k, "rect": ci, "side": bucket})
+                fl_oriented.append((ox, oy, dx, dy, w_))
+                lx, ly = -dy, dx
+                for sg in (-1.0, 1.0):
+                    layout["segs"].append([ox + lx * sg * (w_ / 2 + 0.25), oy + ly * sg * (w_ / 2 + 0.25),
+                                           ex_ + lx * sg * (w_ / 2 + 0.25), ey_ + ly * sg * (w_ / 2 + 0.25), 0.3, (k - 1) * rise])
+                gp.append((ex_, ey_, w_ / 2 + 0.6))
+                used_sides[k].add(bucket)
+                taken.add(bucket)
+                made += 1
+    for k in range(1, tiers):                                        # a small round summit may have no edge long enough: give it a narrow flight on its longest
+        for ci, C in enumerate(polys[k]):
+            if any(f_["tier"] == k and f_["rect"] == ci for f_ in layout["flights"]):
+                continue
+            m_ = len(C)
+            i = max(range(m_), key=lambda q: math.hypot(C[(q + 1) % m_][0] - C[q][0], C[(q + 1) % m_][1] - C[q][1]))
+            a, b = C[i], C[(i + 1) % m_]
+            L = math.hypot(b[0] - a[0], b[1] - a[1])
+            ex_, ey_ = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
+            dx, dy = -(b[1] - a[1]) / L, (b[0] - a[0]) / L
+            w_ = min(5.2, max(3.0, L - 2.0))
+            if w_ not in flight_meshes:
+                flight_meshes[w_] = _tc_flight(w_, n_steps, TC_STEP_RUN, sr)
+            soup.append(flight_meshes[w_], rot=math.atan2(dy, dx) - math.pi / 2, offset=(ex_, ey_, (k - 1) * rise))
+            ox, oy = ex_ - dx * run_total, ey_ - dy * run_total
+            layout["flights"].append({"o": [ox, oy], "d": [dx, dy], "w": w_, "n": n_steps, "z0": (k - 1) * rise, "tier": k, "rect": ci,
+                                      "side": int(round(math.atan2(dy, dx) / (math.pi / 4))) % 8})
+            fl_oriented.append((ox, oy, dx, dy, w_))
+            lx, ly = -dy, dx
+            for sg in (-1.0, 1.0):
+                layout["segs"].append([ox + lx * sg * (w_ / 2 + 0.25), oy + ly * sg * (w_ / 2 + 0.25), ex_ + lx * sg * (w_ / 2 + 0.25), ey_ + ly * sg * (w_ / 2 + 0.25), 0.3, (k - 1) * rise])
+            gap_pts.setdefault((k, ci), []).append((ex_, ey_, w_ / 2 + 0.6))
+    if via:
+        for ci_, x_ in ((0, via[0]), (1, via[1])):
+            gap_pts[(split, ci_)].append((x_, via[2], 3.8))
+    gap_pts.setdefault((0, 0), []).append((0.0, y_ch1, 4.4))
+    # --- the viaduct between the two summits
+    if via:
+        zb = split * rise
+        xa, xb, by_ = via
+        span = xb - xa
+        arches = max(1, int(math.ceil(span / 13.0)))
+        sw = span / arches
+        for a in range(arches):
+            for i in range(14):
+                x0 = xa + a * sw + sw * i / 14
+                um = ((x0 + sw / 28) - (xa + a * sw + sw / 2)) / (sw / 2)
+                zl = zb - 0.7 - 3.2 * (1.0 - math.sqrt(max(0.0, 1.0 - um * um)))
+                _tc_box(soup, x0 + sw / 28, by_, zl, sw / 14 + 0.01, 6.0, zb - zl, 0)
+            if a < arches - 1:
+                _tc_box(soup, xa + (a + 1) * sw, by_, (split - 1) * rise, 2.4, 5.0, zb - 3.9 - (split - 1) * rise, 0)
+                layout["rects"].append([xa + (a + 1) * sw - 1.2, by_ - 2.5, xa + (a + 1) * sw + 1.2, by_ + 2.5, (split - 1) * rise])
+        for sg in (-1.0, 1.0):
+            _tc_box(soup, (xa + xb) / 2, by_ + sg * 2.8, zb, span, 0.4, 0.95, 1)
+        layout["decks"].append({"rect": [xa - 1.0, by_ - 3.0, xb + 1.0, by_ + 3.0], "z": zb})
+        layout["reserved"].append([xa - 8.0, by_ - 6.0, xb + 8.0, by_ + 6.0])
+    # --- the gate house at the front
+    turrets = []
+    gate_y = (y_ch1 + 1.6) if walls_on else (y_front + 1.6)               # with walls the gate stands in the wall, across the pool
+    _tc_gate(soup, gate_y, rng, turrets)
+    circles.extend([[x, y, r] for x, y, r in turrets])
+    layout["gate_passage"] = [-3.6, 3.6]
+    layout["gate_y"] = gate_y
+    # --- helpers for placing things on a terrace surface
+    placed_all = []                                     # (x, y, r) of everything solid
+    columns = []
+
+    def flight_clear(x, y, r, extra=2.0):
+        """True when (x, y) with radius r keeps clear of every flight's foot and the lane leading to it."""
+        for ox, oy, dx, dy, w_ in fl_oriented:
+            tt, vv = (x - ox) * dx + (y - oy) * dy, -(x - ox) * dy + (y - oy) * dx
+            if -(r + 3.5) <= tt <= run_total + r + extra and abs(vv) <= w_ / 2 + r + 1.8:
+                return False
+        return True
+
+    def surface_ok(k, x, y, r, clear_parent, clear_child):
+        """Inside some polygon of tier k with `clear_parent` metres to its outline, `clear_child` to every polygon of tier k + 1."""
+        host = None
+        for P in polys[k]:
+            if _tc_in_poly(P, x, y):
+                host = P
+                break
+        if host is None or _tc_poly_dist(host, x, y)[0] < r + clear_parent:
+            return False
+        if k + 1 < tiers:
+            for C in polys[k + 1]:
+                if _tc_in_poly(C, x, y) or _tc_poly_dist(C, x, y)[0] < r + clear_child:
+                    return False
+        return True
+
+    def free_of(x, y, r, gap=3.0):
+        if any(math.hypot(x - q[0], y - q[1]) < r + q[2] + gap for q in placed_all):
+            return False
+        if any(rz[0] - r <= x <= rz[2] + r and rz[1] - r <= y <= rz[3] + r for rz in layout["reserved"]):
+            return False
+        return flight_clear(x, y, r)
+
+    def outward(k, x, y):
+        """Angle from the nearest summit outline to (x, y): a door facing this way opens onto the open ring."""
+        if k + 1 >= tiers:
+            return -math.pi / 2
+        best = (1e18, x, y - 1.0)
+        for C in polys[k + 1]:
+            d = _tc_poly_dist(C, x, y)
+            if d[0] < best[0]:
+                best = d
+        return math.atan2(y - best[2], x - best[1])
+
+    # --- waterfalls: a spillway on a terrace edge, a sheet down the retaining wall and a pool on the terrace below
+    wf_total = 0
+    if p["waterfalls"] > 0:
+        want, tries = int(round(p["waterfalls"] * (tiers - 1) * 1.3)), 0
+        while wf_total < want and tries < want * 80:
+            tries += 1
+            k = rng.randint(1, tiers - 1)
+            ci = rng.randrange(len(polys[k]))
+            P = polys[k][ci]
+            i = rng.randrange(len(P))
+            a, b = P[i], P[(i + 1) % len(P)]
+            L = math.hypot(b[0] - a[0], b[1] - a[1])
+            if L < (24.0 if kinds[k][ci] == "rect" else 15.0):
+                continue
+            mg = min(11.0, L / 2.0 - 2.0)
+            t = rng.uniform(mg, L - mg)
+            ux, uy = (b[0] - a[0]) / L, (b[1] - a[1]) / L
+            ex_, ey_ = a[0] + ux * t, a[1] + uy * t
+            ix, iy = -uy, ux                                        # into the hill
+            pcx, pcy = ex_ - ix * 3.4, ey_ - iy * 3.4               # the pool below, outside the edge
+            ucx, ucy = ex_ + ix * 3.0, ey_ + iy * 3.0               # the spillway above, inside it
+            if via and k == split and (math.hypot(ex_ - via[0], ey_ - via[2]) < 14.0 or math.hypot(ex_ - via[1], ey_ - via[2]) < 14.0):
+                continue
+            if not surface_ok(k - 1, pcx, pcy, 3.0, 2.2, 0.0) or not surface_ok(k, ucx, ucy, 2.4, 0.2, 2.5):
+                continue
+            if not free_of(pcx, pcy, 3.0, 2.0) or not free_of(ucx, ucy, 2.4, 1.0):
+                continue
+            _tc_waterfall(soup, ex_, ey_, math.atan2(-iy, -ix), k * rise, (k - 1) * rise)
+            circles.append([pcx, pcy, 3.0])
+            circles.append([ucx, ucy, 2.6])
+            placed_all.append((pcx, pcy, 3.2))
+            placed_all.append((ucx, ucy, 2.8))
+            gap_pts.setdefault((k, ci), []).append((ex_, ey_, 3.8))
+            layout.setdefault("waterfall_pts", []).append([ex_, ey_, k * rise, math.atan2(-iy, -ix)])
+            wf_total += 1
+    layout["waterfalls"] = wf_total
+    # --- parapets and posts along every upper outline (open where a flight arrives)
+    def edge_gaps(k, ci, a, b, L):
+        out = []
+        ux, uy = (b[0] - a[0]) / L, (b[1] - a[1]) / L
+        for gx, gy, hw_ in gap_pts.get((k, ci), []):
+            dd, qx, qy = _tc_seg_dist(gx, gy, a[0], a[1], b[0], b[1])
+            if dd < 1.2:
+                t = (gx - a[0]) * ux + (gy - a[1]) * uy
+                out.append((t - hw_, t + hw_))
+        return sorted(out)
+
+    for k in range(tiers):
+        z = k * rise
+        if k == 0 and walls_on:
+            continue                                               # the base is walled instead
+        for ci, P in enumerate(polys[k]):
+            n_ = len(P)
+            for i in range(n_):
+                a, b = P[i], P[(i + 1) % n_]
+                L = math.hypot(b[0] - a[0], b[1] - a[1])
+                if L < 1.5:
+                    continue
+                ux, uy = (b[0] - a[0]) / L, (b[1] - a[1]) / L
+                nx_, ny_ = -uy, ux
+                pos = 0.3
+                for ga, gb in edge_gaps(k, ci, a, b, L) + [(L + 1.0, L + 2.0)]:
+                    a_, b_ = max(ga, 0.3), min(gb, L - 0.3)
+                    if a_ - pos > 0.6:
+                        mid = (pos + a_) / 2
+                        bx_, by_ = a[0] + ux * mid + nx_ * 0.2, a[1] + uy * mid + ny_ * 0.2
+                        _tc_box_rot(soup, bx_, by_, z, a_ - pos, 0.4, 0.95, math.atan2(uy, ux), 1)
+                        layout["segs"].append([a[0] + ux * pos + nx_ * 0.2, a[1] + uy * pos + ny_ * 0.2, a[0] + ux * a_ + nx_ * 0.2, a[1] + uy * a_ + ny_ * 0.2, 0.25, z])
+                        tp = pos
+                        while tp <= a_ + 0.01:
+                            _tc_box(soup, a[0] + ux * tp + nx_ * 0.2, a[1] + uy * tp + ny_ * 0.2, z, 0.5, 0.5, 1.35, 1)
+                            tp += 4.0
+                    pos = max(pos, b_)
+    if walls_on:                                                   # the curtain wall round the base, with towers at the corners and along long runs
+        P0 = polys[0][0]
+        n0 = len(P0)
+        b0 = bbox(P0)
+        cxb, cyb = (b0[0] + b0[2]) / 2, (b0[1] + b0[3]) / 2
+        for i in range(n0):
+            a, b = P0[i], P0[(i + 1) % n0]
+            L = math.hypot(b[0] - a[0], b[1] - a[1])
+            if L < 2.0:
+                continue
+            ux, uy = (b[0] - a[0]) / L, (b[1] - a[1]) / L
+            gaps_ = edge_gaps(0, 0, a, b, L)
+            pos = 0.0
+            for ga, gb in gaps_ + [(L + 1.0, L + 2.0)]:
+                a_, b_ = max(ga, 0.0), min(gb, L)
+                if a_ - pos > 1.0:
+                    _tc_wall_run(soup, layout, a, b, pos, a_, 0.0, 5.6, 1.4, rng)
+                pos = max(pos, b_)
+            nm = int(L / 45.0) if L > 55.0 else 0
+            for j in range(nm):
+                t = L * (j + 1) / (nm + 1)
+                if any(abs(t - (ga + gb) / 2) < 12.0 for ga, gb in gaps_):
+                    continue
+                tx, ty = a[0] + ux * t - uy * 1.8, a[1] + uy * t + ux * 1.8
+                _tc_wall_tower(soup, tx, ty, 0.0, rng)
+                circles.append([tx, ty, 3.6])
+                placed_all.append((tx, ty, 3.8))
+        for i in range(n0):
+            prev_, v, nxt_ = P0[i - 1], P0[i], P0[(i + 1) % n0]
+            if (v[0] - prev_[0]) * (nxt_[1] - v[1]) - (v[1] - prev_[1]) * (nxt_[0] - v[0]) > 1e-6:
+                d_ = math.hypot(cxb - v[0], cyb - v[1])
+                tx, ty = v[0] + (cxb - v[0]) / d_ * 1.8, v[1] + (cyb - v[1]) / d_ * 1.8
+                _tc_wall_tower(soup, tx, ty, 0.0, rng)
+                circles.append([tx, ty, 3.6])
+                placed_all.append((tx, ty, 3.8))
+    # --- the buildings in the ring round every summit: dome houses, pavilions, towers, ruins, houses / chapels / huts of the village generator,
+    #     arcades, belfries and summer-houses (never on a flight, a waterfall or a neighbour)
+    ring_cap = min(4.9, rmin / 2.0 - 2.4 + 0.4)
+    vil = p["village"]
+    btypes = ("ruin", "rotunda", "dome", "octagon", "tower", "village", "hut", "arcade", "belltower", "kiosk")
+    bweights = (6.0 * p["ruins"], 10.0, 14.0, 8.0, 8.0, 26.0 * vil, 8.0 * vil, 6.0, 3.0, 6.0)
+    for k in range(tiers - 1):
+        z0 = k * rise
+        ring_area = sum(abs(_tc_area(P)) for P in polys[k]) - sum(abs(_tc_area(C)) for C in polys[k + 1])
+        count = int(round(p["density"] * ring_area / 520.0))
+        clear_par = 4.0 if (k == 0 and walls_on) else 2.6
+        got = 0
+        tries = 0
+        bb = [min(P_[0] for P in polys[k] for P_ in P), min(P_[1] for P in polys[k] for P_ in P), max(P_[0] for P in polys[k] for P_ in P), max(P_[1] for P in polys[k] for P_ in P)]
+        while got < count and tries < count * 80:
+            tries += 1
+            bt = rng.choices(btypes, weights=bweights)[0]
+            extra = None
+            if bt in ("ruin", "rotunda", "dome", "octagon", "tower"):
+                r = rng.uniform(3.8, max(3.9, min(4.9, rmin / 2.0 - 2.4)))
+            elif bt == "village":
+                extra = ("house", rng.uniform(5.4, 7.2), rng.uniform(4.4, 5.6), rng.choice((1, 1, 2))) if rng.random() < 0.75 \
+                    else ("chapel", rng.uniform(4.6, 5.6), rng.uniform(7.0, 8.2), 1)
+                r = math.hypot(extra[1], extra[2]) / 2.0
+            elif bt == "hut":
+                form = rng.choice(("DOME", "SILO", "TUNNEL", "AFRAME", "BOX"))
+                wd = {"DOME": (5.2, 5.2), "SILO": (4.6, 4.6), "TUNNEL": (4.4, 6.0), "AFRAME": (4.2, 5.6), "BOX": (4.4, 5.6)}[form]
+                extra = (form, wd[0], wd[1])
+                r = math.hypot(*wd) / 2.0
+            elif bt == "arcade":
+                r = 4.5
+            elif bt == "belltower":
+                r = 3.4
+            else:
+                r = 2.8
+            if r > ring_cap:
+                continue
+            x, y = rng.uniform(bb[0], bb[2]), rng.uniform(bb[1], bb[3])
+            if not surface_ok(k, x, y, r, clear_par, 2.6) or not free_of(x, y, r):
+                continue
+            ang = outward(k, x, y)
+            n_soup, n_circ, n_col = len(soup.faces), len(circles), len(columns)
+            try:
+                if bt == "ruin":
+                    _tc_ruin(soup, layout, x, y, z0, r, ang, rng)
+                    circles.append([x, y, r])
+                elif bt == "rotunda":
+                    _tc_rotunda(soup, x, y, z0, r, rng, columns)
+                    layout.setdefault("rotundas", []).append([x, y, r])
+                elif bt in ("dome", "octagon", "tower"):
+                    furnished = rng.random() < p["interiors"]
+                    {"dome": _tc_domed_house, "octagon": _tc_octagon_house, "tower": _tc_tower_house}[bt](soup, layout, x, y, z0, r, ang, rng, furnished, lights)
+                    circles.append([x, y, r])
+                elif bt == "village":
+                    _tc_village_building(soup, x, y, z0, ang, rng, style, *extra)
+                    circles.append([x, y, r])
+                elif bt == "hut":
+                    _tc_hut_building(soup, x, y, z0, ang, rng, style, *extra)
+                    circles.append([x, y, r])
+                elif bt == "arcade":
+                    _tc_arcade(soup, x, y, z0, ang, columns, rng)
+                    layout.setdefault("rotundas", []).append([x, y, r])
+                elif bt == "belltower":
+                    _tc_belltower(soup, x, y, z0, rng)
+                    circles.append([x, y, r])
+                else:
+                    _tc_kiosk(soup, x, y, z0, columns, rng)
+                    layout.setdefault("rotundas", []).append([x, y, r])
+            except PlanError:                                     # a style pack that cannot make this size: leave the spot empty
+                del soup.faces[n_soup:], soup.uvs[n_soup:], soup.mats[n_soup:], soup.smooth[n_soup:]
+                del circles[n_circ:], columns[n_col:]
+                continue
+            placed_all.append((x, y, r))
+            layout.setdefault("buildings", {})[bt] = layout.get("buildings", {}).get(bt, 0) + 1
+            got += 1
+        # slim minarets just outside the four extreme corners of every summit outline
+        for C in polys[k + 1]:
+            b_ = bbox(C)
+            cx0, cy0 = (b_[0] + b_[2]) / 2, (b_[1] + b_[3]) / 2
+            for sx_, sy_ in ((1, 1), (-1, 1), (1, -1), (-1, -1)):
+                v = max(C, key=lambda q: (q[0] - cx0) * sx_ + (q[1] - cy0) * sy_)
+                d_ = math.hypot(v[0] - cx0, v[1] - cy0)
+                mx, my = v[0] + (v[0] - cx0) / d_ * 7.0, v[1] + (v[1] - cy0) / d_ * 7.0
+                if rng.random() < 0.7 and surface_ok(k, mx, my, 1.9, 2.2, 2.2) and free_of(mx, my, 1.9, 4.0):
+                    _tc_minaret(soup, mx, my, z0, rng)
+                    circles.append([mx, my, 1.9])
+                    placed_all.append((mx, my, 1.9))
+    # --- a palace on every summit (the second one a little smaller)
+    for ci, top in enumerate(polys[tiers - 1]):
+        tb = bbox(top)
+        tcx, tcy = (tb[0] + tb[2]) / 2, (tb[1] + tb[3]) / 2
+        reach = _tc_poly_dist(top, tcx, tcy)[0]
+        pr = min(15.0, reach - 7.0) * (1.0 if ci == 0 else 0.85)
+        pturrets = []
+        _tc_palace(soup, layout, tcx, tcy, (tiers - 1) * rise, pr, pturrets, lights, rng)
+        circles.append([tcx, tcy, pr])
+        circles.extend([[x, y, r] for x, y, r in pturrets])
+        placed_all.append((tcx, tcy, pr + 2.0))
+        layout["palace_fronts"].append([tcx, tcy - pr - 3.0])
+    # --- fountains: two on the plaza, one on most terraces
+    f_total = 0
+    if p["fountains"] > 0:
+        for sx_ in (-1.0, 1.0):
+            if rng.random() < 0.5 + 0.5 * p["fountains"]:
+                fx = sx_ * rng.uniform(14.0, min(40.0, hw_p - 8.0))
+                _tc_fountain(soup, fx, y_front + 6.5, 0.0, 3.2)
+                circles.append([fx, y_front + 6.5, 3.4])
+                placed_all.append((fx, y_front + 6.5, 3.4))
+                f_total += 1
+        for k in range(tiers):
+            if rng.random() > p["fountains"]:
+                continue
+            bb = [min(P_[0] for P in polys[k] for P_ in P), min(P_[1] for P in polys[k] for P_ in P), max(P_[0] for P in polys[k] for P_ in P), max(P_[1] for P in polys[k] for P_ in P)]
+            for _ in range(80):
+                x, y = rng.uniform(bb[0], bb[2]), rng.uniform(bb[1], bb[3])
+                if surface_ok(k, x, y, 3.3, 3.0, 3.0) and free_of(x, y, 3.3, 2.5) and not (k == tiers - 1 and any(math.hypot(x - q[0], y - q[1]) < 22.0 for q in layout["palace_fronts"])):
+                    _tc_fountain(soup, x, y, k * rise, 3.2)
+                    circles.append([x, y, 3.4])
+                    placed_all.append((x, y, 3.4))
+                    f_total += 1
+                    break
+    layout["fountains"] = f_total
+    # --- bushes along the terrace edges and trees on every terrace and the plaza
+    if p["bushes"] > 0:
+        for k in range(tiers):
+            for ci, P in enumerate(polys[k]):
+                n_ = len(P)
+                for i in range(n_):
+                    a, b = P[i], P[(i + 1) % n_]
+                    L = math.hypot(b[0] - a[0], b[1] - a[1])
+                    if L < 4.0:
+                        continue
+                    ux, uy = (b[0] - a[0]) / L, (b[1] - a[1]) / L
+                    nx_, ny_ = -uy, ux
+                    t = 1.5
+                    while t < L - 1.5:
+                        t += rng.uniform(2.8, 4.2)
+                        if t >= L - 1.5 or rng.random() > p["bushes"]:
+                            continue
+                        inset = rng.uniform(1.3, 2.4) + (1.7 if (k == 0 and walls_on) else 0.0)
+                        x, y = a[0] + ux * t + nx_ * inset, a[1] + uy * t + ny_ * inset
+                        rr = rng.uniform(1.1, 2.0)
+                        if not _tc_in_poly(P, x, y) or not flight_clear(x, y, rr, 1.0) or any(math.hypot(x - q[0], y - q[1]) < q[2] + 3.8 for q in placed_all):
+                            continue
+                        if k + 1 < tiers and any(_tc_in_poly(C, x, y) or _tc_poly_dist(C, x, y)[0] < rr + 1.0 for C in polys[k + 1]):
+                            continue
+                        if any(rz[0] - 1 <= x <= rz[2] + 1 and rz[1] - 1 <= y <= rz[3] + 1 for rz in layout["reserved"]):
+                            continue
+                        _tc_bush(soup, x, y, k * rise, rr, rng)
+                        circles.append([x, y, rr * 0.9])
+    if p["trees"] > 0:
+        tree_pts = []
+        areas = [(None, 0.0, -1)] + [(P, k * rise, k) for k in range(tiers) for P in polys[k]]
+        for P, z0, k in areas:
+            if P is None:
+                want = int(round(8 * p["trees"]))
+                bb = [-hw_p + 2.0, y_front + 2.0, hw_p - 2.0, y_ch0 - 1.5]
+            else:
+                kids = polys[k + 1] if k + 1 < tiers else []
+                area = abs(_tc_area(P)) - sum(abs(_tc_area(C)) for C in kids)
+                want = int(round(area / 500.0 * 2.5 * p["trees"]))
+                bb = [min(v[0] for v in P), min(v[1] for v in P), max(v[0] for v in P), max(v[1] for v in P)]
+            tries = got = 0
+            while got < want and tries < want * 40:
+                tries += 1
+                tx, ty = rng.uniform(bb[0], bb[2]), rng.uniform(bb[1], bb[3])
+                if P is None:
+                    if abs(tx) < 6.0:
+                        continue
+                else:
+                    if not _tc_in_poly(P, tx, ty) or _tc_poly_dist(P, tx, ty)[0] < (3.3 if (k == 0 and walls_on) else 1.6):
+                        continue
+                    if k + 1 < tiers and any(_tc_in_poly(C, tx, ty) or _tc_poly_dist(C, tx, ty)[0] < 1.6 for C in polys[k + 1]):
+                        continue
+                    if k == tiers - 1 and abs(tx - sum(v[0] for v in P) / len(P)) < 5.0 and ty < sum(v[1] for v in P) / len(P):
+                        continue
+                if not flight_clear(tx, ty, 0.5, 1.5) or any(rz[0] - 1 <= tx <= rz[2] + 1 and rz[1] - 1 <= ty <= rz[3] + 1 for rz in layout["reserved"]):
+                    continue
+                if any(math.hypot(tx - c[0], ty - c[1]) < c[2] + 2.6 for c in circles):
+                    continue
+                if any(math.hypot(tx - q[0], ty - q[1]) < q[2] + 2.6 for q in layout.get("rotundas", [])):
+                    continue
+                if any(math.hypot(tx - q[0], ty - q[1]) < 3.4 for q in tree_pts):
+                    continue
+                tree_pts.append((tx, ty, k))
+                got += 1
+                tp = {"height": rng.uniform(5.0, 8.5), "crown": 'ROUND' if rng.random() < 0.65 else 'CONE', "leaf": 'GREEN'}
+                soup.append(_build_tree_mesh(tp, rng.randint(1, 999999)), rot=rng.uniform(0, 6.28), offset=(tx, ty, z0))
+                circles.append([tx, ty, 0.55])
+        layout["trees"] = len(tree_pts)
+    layout["columns"] = [[x, y] for x, y in columns]
+    return soup, layout
+
+
+def terrace_city_heightmap(name="gla_city_heightmap", size=192, seed=7):
+    """A greyscale heightmap image (made in this file) for a terrain round a terrace city: a calm valley in the middle, hills that grow into
+    mountains at the sides and highest behind (top of the image = +y). Returns the image name for `params.heightmap = {"image": name}`."""
+    import numpy as np
+    img = bpy.data.images.get(name)
+    if img is not None and tuple(img.size) == (size, size):
+        return name
+    rs = np.random.RandomState(int(seed))
+
+    def up(grid):
+        n_ = grid.shape[0]
+        xs = np.linspace(0, n_ - 1, size)
+        i = np.floor(xs).astype(int).clip(0, n_ - 2)
+        f = xs - i
+        tmp = grid[i, :] * (1 - f)[:, None] + grid[i + 1, :] * f[:, None]
+        return tmp[:, i] * (1 - f)[None, :] + tmp[:, i + 1] * f[None, :]
+
+    noise = sum(up(rs.rand(4 * 2 ** o + 1, 4 * 2 ** o + 1)) * 0.55 ** o for o in range(5))
+    noise = (noise - noise.min()) / (noise.max() - noise.min())
+    u = np.linspace(-1.0, 1.0, size)
+    X, Y = np.meshgrid(u, u)
+    d = np.sqrt((X / 0.5) ** 2 + ((Y - 0.02) / 0.5) ** 2)
+    bowl = np.clip((d - 0.9) / 1.0, 0.0, 1.0)
+    bowl = bowl * bowl * (3.0 - 2.0 * bowl)
+    h = bowl * (0.4 + 0.6 * noise + 0.55 * np.clip((Y + 0.2) / 1.2, 0.0, 1.0)) + (1.0 - bowl) * 0.03 * noise
+    h = (h - h.min()) / (h.max() - h.min())
+    if img is not None:
+        bpy.data.images.remove(img)
+    img = bpy.data.images.new(name, size, size, alpha=False, float_buffer=False)
+    img.colorspace_settings.name = 'Non-Color'                      # (before the pixels: changing it afterwards blanks a generated image)
+    img.pixels.foreach_set(np.dstack([h, h, h, np.ones_like(h)]).astype(np.float32).ravel())
+    img.update()
+    img.use_fake_user = True
+    return name
+
+
+_TC_LAST = {}                                           # the grids of the last walk check, for debugging
+
+
+def terrace_city_walk_check(layout, cell=0.5, max_step=None):
+    """Walks a grid over the city layout from the gate: returns {'ok', 'top', 'rooms', 'reach', ...} -- whether every summit's palace front, every
+    furnished room and ruin, and (nearly) every free terrace cell, bridges and flights included, can be reached with steps of at most `max_step`."""
+    from collections import deque
+    allpts = [v for t in layout["tiers"] for P in t["polys"] for v in P]
+    hw_max = max([abs(v[0]) for v in allpts] + [layout["plaza"][2]]) + 1.0
+    y0 = layout["y_front"] - 1.0
+    y1 = max(v[1] for v in allpts) + 1.0
+    nx, ny = int(2 * hw_max / cell) + 1, int((y1 - y0) / cell) + 1
+    NONE = float("nan")
+    H = [[NONE] * nx for _ in range(ny)]
+    X = lambda i: -hw_max + i * cell
+    Y = lambda j: y0 + j * cell
+    ci = lambda x: int(round((x + hw_max) / cell))
+    cj = lambda y: int(round((y - y0) / cell))
+    sr, run = layout["step"]
+    if max_step is None:                                                 # a grid cell may span two risers
+        max_step = sr * math.ceil(cell / run) + 0.01
+
+    def cells(x0, ya, x1, yb):
+        for j in range(max(0, cj(ya)), min(ny, cj(yb) + 1)):
+            for i in range(max(0, ci(x0)), min(nx, ci(x1) + 1)):
+                if x0 <= X(i) <= x1 and ya <= Y(j) <= yb:
+                    yield j, i
+
+    pa, pb, phw = layout["plaza"]
+    for j, i in cells(-phw, pa, phw, pb - 1e-6):
+        H[j][i] = 0.0
+    for j, i in cells(-layout["bridge"][1], layout["channel"][0], layout["bridge"][1], layout["channel"][1] - 1e-6):
+        H[j][i] = 0.0
+    for t in layout["tiers"]:
+        for P in t["polys"]:
+            n_ = len(P)
+            for j in range(max(0, cj(min(v[1] for v in P))), min(ny, cj(max(v[1] for v in P)) + 1)):
+                y = Y(j)
+                xs = []
+                for e in range(n_):
+                    a, b = P[e], P[(e + 1) % n_]
+                    if (a[1] <= y < b[1]) or (b[1] <= y < a[1]):
+                        xs.append(a[0] + (y - a[1]) * (b[0] - a[0]) / (b[1] - a[1]))
+                xs.sort()
+                for m_ in range(0, len(xs) - 1, 2):
+                    for i in range(max(0, ci(xs[m_])), min(nx, ci(xs[m_ + 1]) + 1)):
+                        if xs[m_] <= X(i) < xs[m_ + 1]:
+                            H[j][i] = t["z"]
+    for f in layout["flights"]:
+        ox, oy, dx, dy, w_, n, z0 = f["o"][0], f["o"][1], f["d"][0], f["d"][1], f["w"], f["n"], f["z0"]
+        L = n * run
+        ex_, ey_ = ox + dx * L, oy + dy * L
+        rad = w_ / 2 * (abs(dx) + abs(dy)) + 0.01
+        for j, i in cells(min(ox, ex_) - rad, min(oy, ey_) - rad, max(ox, ex_) + rad, max(oy, ey_) + rad):
+            rx_, ry_ = X(i) - ox, Y(j) - oy
+            tt, vv = rx_ * dx + ry_ * dy, -rx_ * dy + ry_ * dx
+            if 0 <= tt < L and abs(vv) <= w_ / 2:
+                H[j][i] = z0 + (int(tt / run) + 1) * sr
+    for d in layout["decks"]:
+        for j, i in cells(*d["rect"]):
+            H[j][i] = d["z"]
+    blocked = [[False] * nx for _ in range(ny)]
+
+    def block_circle(cx, cy, r, value=True):
+        for j in range(max(0, cj(cy - r)), min(ny, cj(cy + r) + 2)):
+            for i in range(max(0, ci(cx - r)), min(nx, ci(cx + r) + 2)):
+                if math.hypot(X(i) - cx, Y(j) - cy) <= r:
+                    blocked[j][i] = value
+
+    for cx, cy, r in layout["circles"]:
+        block_circle(cx, cy, r)
+    for cx, cy in layout.get("columns", []):
+        block_circle(cx, cy, 0.4)
+    for e in layout.get("enter", []):                                    # open the room and the doorway through the wall ring
+        block_circle(e["x"], e["y"], e["Ri"] - 0.25, False)
+        dx, dy = math.cos(e["ang"]), math.sin(e["ang"])
+        t = e["Ri"] - 0.5
+        half = max(e["gap"] / 2.0, 0.9)                                  # every real doorway is at least 2 m wide
+        while t <= e["R"] + 0.6:
+            for off in (-(half - 0.45), 0.0, half - 0.45):
+                block_circle(e["x"] + t * dx - off * dy, e["y"] + t * dy + off * dx, 0.5, False)
+            t += 0.2
+        for fx, fy, fr in e["furniture"]:
+            block_circle(fx, fy, fr)
+    for r in layout["rects"]:
+        for j, i in cells(r[0], r[1], r[2], r[3]):
+            blocked[j][i] = True
+    for sx0, sy0, sx1, sy1, ht, z in layout.get("segs", []):             # thin walls on any angle: stamp discs along them
+        L = math.hypot(sx1 - sx0, sy1 - sy0)
+        steps = max(1, int(L / 0.3))
+        for q in range(steps + 1):
+            block_circle(sx0 + (sx1 - sx0) * q / steps, sy0 + (sy1 - sy0) * q / steps, ht + 0.15)
+    gy = layout.get("gate_y", layout["y_front"] + 1.6)
+    for j, i in cells(layout["gate_passage"][0], gy - 1.5, layout["gate_passage"][1], gy + 1.5):
+        blocked[j][i] = False                                            # the gate passage stays open
+    seen = [[False] * nx for _ in range(ny)]
+    s = (cj(layout["start"][1]), ci(layout["start"][0]))
+    dq = deque([s])
+    seen[s[0]][s[1]] = True
+    while dq:
+        j, i = dq.popleft()
+        for dj, di in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            b, a = j + dj, i + di
+            if 0 <= b < ny and 0 <= a < nx and not seen[b][a] and not blocked[b][a] and H[b][a] == H[b][a] and abs(H[b][a] - H[j][i]) <= max_step:
+                seen[b][a] = True
+                dq.append((b, a))
+    tops = [seen[cj(py)][ci(px_)] for px_, py in layout["palace_fronts"]]
+    bad, worst = [], 1.0
+    for e in layout.get("enter", []):
+        free = hit = 0
+        r = e["Ri"] - 0.25
+        for j in range(max(0, cj(e["y"] - r)), min(ny, cj(e["y"] + r) + 1)):
+            for i in range(max(0, ci(e["x"] - r)), min(nx, ci(e["x"] + r) + 1)):
+                if math.hypot(X(i) - e["x"], Y(j) - e["y"]) <= r and not blocked[j][i] and H[j][i] == H[j][i]:
+                    free += 1
+                    hit += seen[j][i]
+        frac = hit / max(1, free)
+        worst = min(worst, frac)
+        if frac < 0.85:
+            bad.append((round(e["x"], 1), round(e["y"], 1), round(frac, 2)))
+    free = reached = 0
+    per_tier = [[0, 0] for _ in layout["tiers"]]
+    for j in range(ny):
+        for i in range(nx):
+            if H[j][i] == H[j][i] and not blocked[j][i]:
+                free += 1
+                reached += seen[j][i]
+                for t, tt in enumerate(layout["tiers"]):
+                    if abs(H[j][i] - tt["z"]) < 1e-6:
+                        per_tier[t][0] += 1
+                        per_tier[t][1] += seen[j][i]
+    _TC_LAST.update(H=H, blocked=blocked, seen=seen, x0=-hw_max, y0=y0, cell=cell)
+    return {"ok": bool(tops and all(tops) and not bad and free and reached / free > 0.97), "top": bool(tops and all(tops)), "summits": len(tops),
+            "rooms": len(layout.get("enter", [])), "unreached_rooms": bad, "worst_room": worst, "reach": reached / max(1, free),
+            "tier_reach": [round(b / max(1, a), 2) for a, b in per_tier]}
+
+
+def _tc_door_mesh(width, height, thick=0.12):
+    """A door leaf in its own space: hinge edge at the origin, width along +x, thickness along y, planks and two iron straps."""
+    s = _TowerMesh()
+    _tc_box(s, width / 2, 0.0, 0.0, width, thick, height, 3)
+    for zz in (0.35, height - 0.55):
+        _tc_box(s, width / 2, 0.0, zz, width * 0.96, thick + 0.03, 0.12, 1)
+    _tc_box(s, width * 0.88, thick / 2 + 0.05, height * 0.48, 0.1, 0.1, 0.1, 1)
+    return s
+
+
+def _plan_build_terrace_city(context, node, world, seed, path):
+    where = "/".join(path)
+    try:
+        p = _plan_checked({**PLAN_TERRACE_DEFAULTS, **(node.get("params") or {})}, PLAN_TERRACE_RANGES,
+                          {"roof_color": (None, *ROOF_COLORS), "shapes": ("mixed", "rect", "round", "polygon")})
+        style = plan_style_name(node.get("style"))
+        soup, layout = _build_terrace_city({**p, "style": style}, seed)
+    except PlanError as exc:
+        raise PlanError("%s: %s" % (where, exc))
+    mesh = soup.to_mesh("TerraceCity_" + node["id"])
+    obj = bpy.data.objects.new(mesh.name, mesh)
+    context.scene.collection.objects.link(obj)
+    if style == 'medieval':
+        base = [get_style_material('FITTED'), get_style_material('AIRCRETE'), get_or_create_roof_material(p["roof_color"] or 'TERRACOTTA'), get_or_create_wood_material('DARK')]
+    else:
+        base = list(plan_material_slots(style, 'PLAIN', p["roof_color"], True))      # the pack's own wall, trim, roof and wood
+    mats = base + [get_or_create_leaf_material('GREEN'), _water_material(), get_style_material('FITTED')]
+    for mat_ in mats:
+        mesh.materials.append(mat_)
+    _add_viewport_color_attribute(mesh)
+    obj["gla_walk_layout"] = json.dumps(layout)
+    made = [obj]
+    for i, (hx, hy, hz, rot, w, h) in enumerate(layout["door_panels"]):
+        dm = _tc_door_mesh(w, h).to_mesh("TerraceDoor_%03d" % i)
+        dobj = bpy.data.objects.new("Door_Panel_%03d" % i, dm)
+        context.scene.collection.objects.link(dobj)
+        dobj.location = (hx, hy, hz)
+        dobj.rotation_euler = (0.0, 0.0, rot)
+        dm.materials.append(base[3])
+        dm.materials.append(base[1])
+        dm.materials.append(base[3])
+        dm.materials.append(base[3])
+        made.append(dobj)
+    if p["lights"]:
+        for i, (lx, ly, lz, energy) in enumerate(layout["lights"]):
+            ld = bpy.data.lights.new("TerraceLamp_%03d" % i, 'POINT')
+            ld.energy, ld.color, ld.shadow_soft_size = energy, (1.0, 0.72, 0.42), 0.25
+            lobj = bpy.data.objects.new("Lamp_%03d" % i, ld)
+            lobj.location = (lx, ly, lz)
+            context.scene.collection.objects.link(lobj)
+            made.append(lobj)
+    _plan_adopt_objects(context.scene, path, world, made)
+    return made
+
+
 PLAN_BUILDERS = {"tower": _plan_build_tower, "castle": _plan_build_castle,
                  "house": _plan_build_house, "chapel": _plan_build_house, "stable": _plan_build_house,
                  "barn": _plan_build_house, "well": _plan_build_well, "keep": _plan_build_keep,
                  "tree": _plan_build_prop, "barrel": _plan_build_prop, "crate": _plan_build_prop, "haystack": _plan_build_prop,
-                 "hut": _plan_build_hut}
+                 "hut": _plan_build_hut, "terrace_city": _plan_build_terrace_city}
 
 
 # ------------------------------------------------------------------------------
@@ -13503,6 +15165,15 @@ def plan_new_example(scene, kind, existing_ids):
         return plan_node(unique("land"), "terrain", "terrain", transform=transform,
                          params={"biome": scene.wfc_plan_biome, "width": 240.0, "depth": 240.0},
                          children=[hamlet, farm, watch, path_])
+    if kind == 'LAND':
+        city = plan_node("city", "building", "terrace_city", transform={"x": 0.0, "y": 0.0, "z": 0.0, "rot": 0.0}, params={})
+        return plan_node(unique("hill_land"), "terrain", "terrain", transform=transform,
+                         params={"biome": "mountain", "width": 800.0, "depth": 800.0, "resolution": 4.0, "pad_margin": 40.0, "pad_mode": "terrain",
+                                 "heightmap": {"image": terrace_city_heightmap(), "height": 130.0, "mix": 0.9}, "rivers": "none"},
+                         children=[city])
+    if kind in ('TERRACES', 'TWIN'):
+        return plan_node(unique("terraces" if kind == 'TERRACES' else "twin_peaks"), "building", "terrace_city", transform=transform,
+                         params={} if kind == 'TERRACES' else {"peaks": 2, "tiers": 4})
     if kind == 'CITY':
         shape = {"kind": "circle", "width": 250.0, "depth": 250.0, "seed": 5}
         n = len(plan_shape_polygon(shape))
@@ -13657,7 +15328,7 @@ class OBJECT_OT_PlanCreate(bpy.types.Operator):
                               ('HOUSE', "House", ""), ('CHAPEL', "Chapel", ""), ('STABLE', "Stable", ""),
                               ('FORTRESS', "Fortress", ""), ('FARM', "Farm", ""), ('HAMLET', "Hamlet", ""),
                               ('STREET', "Street", ""), ('BLOCK', "Block", ""),
-                              ('HUT', "Hut", ""), ('HUTS', "Hut cluster", ""), ('TERRAIN', "Terrain", ""), ('TOWN', "Walled town", ""), ('CITY', "City", "")])
+                              ('HUT', "Hut", ""), ('HUTS', "Hut cluster", ""), ('TERRAIN', "Terrain", ""), ('TOWN', "Walled town", ""), ('CITY', "City", ""), ('TERRACES', "Terrace city", ""), ('TWIN', "Twin peaks", ""), ('LAND', "City on land", "")])
 
     def execute(self, context):
         plan = plan_new_example(context.scene, self.kind, set(plan_list_ids()))
@@ -15062,7 +16733,7 @@ class VIEW3D_PT_GLAPlans(bpy.types.Panel):
         for kind, label in (('FARM', "Farm"), ('HAMLET', "Hamlet"), ('STREET', "Street"), ('BLOCK', "Block")):
             row.operator("object.gla_plan_create", text=label).kind = kind
         row = layout.row(align=True)
-        for kind, label in (('HUT', "Hut"), ('HUTS', "Huts"), ('TOWN', "Town"), ('CITY', "City"), ('TERRAIN', "Terrain")):
+        for kind, label in (('HUT', "Hut"), ('HUTS', "Huts"), ('TOWN', "Town"), ('CITY', "City"), ('TERRACES', "Terraces"), ('TWIN', "Twin"), ('LAND', "Land"), ('TERRAIN', "Terrain")):
             row.operator("object.gla_plan_create", text=label).kind = kind
         for plan_id in plan_list_ids():
             box = layout.box()
