@@ -33,7 +33,7 @@ from bpy_extras.io_utils import ExportHelper, ImportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 57, 0),
+    "version": (0, 59, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -12871,7 +12871,7 @@ def terrace_city_size(params=None):
 
 
 PLAN_TERRACE_DEFAULTS = dict(tiers=5, peaks=1, flights=3, irregular=0.7, shapes='mixed', width=0.0, depth=0.0, rise=4.0, density=0.7, bushes=0.7, trees=0.7, interiors=0.7,
-                             ruins=0.5, fountains=0.8, village=0.6, waterfalls=0.6, walls=True, lights=True, roof_color=None, brick_color='PLAIN')
+                             ruins=0.5, fountains=0.8, village=0.6, waterfalls=0.6, walls=True, palace='dome', lights=True, roof_color=None, brick_color='PLAIN')
 PLAN_TERRACE_RANGES = {"tiers": (2, 7), "peaks": (1, 2), "flights": (1, 3), "irregular": (0.0, 1.0), "width": (0.0, 500.0), "depth": (0.0, 500.0),
                        "rise": (2.0, 6.0), "density": (0.0, 1.0), "bushes": (0.0, 1.0), "trees": (0.0, 1.0), "interiors": (0.0, 1.0),
                        "ruins": (0.0, 1.0), "fountains": (0.0, 1.0), "village": (0.0, 1.0), "waterfalls": (0.0, 1.0)}
@@ -13216,7 +13216,7 @@ def _build_terrace_city(p, seed):
         for top in out_p[-1]:
             b_ = bbox(top)
             cx_, cy_ = (b_[0] + b_[2]) / 2, (b_[1] + b_[3]) / 2
-            if not _tc_in_poly(top, cx_, cy_) or _tc_poly_dist(top, cx_, cy_)[0] < 17.0:
+            if not _tc_in_poly(top, cx_, cy_) or _tc_poly_dist(top, cx_, cy_)[0] < (27.0 if (p["palace"] == "castle" and top is out_p[-1][0]) else 17.0):
                 return None
         return out_p, out_r, out_i, out_k
 
@@ -13620,14 +13620,30 @@ def _build_terrace_city(p, seed):
                     _tc_minaret(soup, mx, my, z0, rng)
                     circles.append([mx, my, 1.9])
                     placed_all.append((mx, my, 1.9))
-    # --- a palace on every summit (the second one a little smaller)
+    # --- a palace on every summit (the second one a little smaller); with palace = castle the first summit gets the Swan castle (the plugin's round tower,
+    #     wall runs and house roofs combined: a stair tower, halls on every floor, spires)
     for ci, top in enumerate(polys[tiers - 1]):
         tb = bbox(top)
         tcx, tcy = (tb[0] + tb[2]) / 2, (tb[1] + tb[3]) / 2
         reach = _tc_poly_dist(top, tcx, tcy)[0]
+        ztop = (tiers - 1) * rise
+        if ci == 0 and p["palace"] == "castle" and reach >= 27.0:
+            csoup, clay = _build_swan_castle({"floors": 7, "floor_h": 5.5, "width": 36.0, "depth": 26.0, "interiors": p["interiors"] > 0, "spires": True, "lights": p["lights"]},
+                                             rng.randint(1, 999999))
+            soup.append(csoup, offset=(tcx, tcy, ztop))
+            layout["rects"].append([tcx - clay["W"] / 2 - 0.3, tcy - clay["D"] / 2 - 0.3, tcx + clay["W"] / 2 + 0.3, tcy + clay["D"] / 2 + 0.3, ztop])
+            circles.extend([[tcx + sx * (clay["W"] / 2 - 0.3), tcy + sy * (clay["D"] / 2 - 0.3), 3.4] for sx in (-1, 1) for sy in (-1, 1)])
+            placed_all.append((tcx, tcy, clay["radius"]))
+            for hx, hy, hz, rot, w_, h_ in clay["door_panels"]:
+                layout["door_panels"].append([hx + tcx, hy + tcy, hz + ztop, rot, w_, h_])
+            for lx, ly, lz, en in clay["lights"]:
+                lights.append([lx + tcx, ly + tcy, lz + ztop, en])
+            layout["palace_fronts"].append([tcx, tcy - clay["D"] / 2 - 3.0])
+            layout.setdefault("castles", []).append({"origin": [tcx, tcy, ztop], "layout": clay})
+            continue
         pr = min(15.0, reach - 7.0) * (1.0 if ci == 0 else 0.85)
         pturrets = []
-        _tc_palace(soup, layout, tcx, tcy, (tiers - 1) * rise, pr, pturrets, lights, rng)
+        _tc_palace(soup, layout, tcx, tcy, ztop, pr, pturrets, lights, rng)
         circles.append([tcx, tcy, pr])
         circles.extend([[x, y, r] for x, y, r in pturrets])
         placed_all.append((tcx, tcy, pr + 2.0))
@@ -13914,7 +13930,7 @@ def _plan_build_terrace_city(context, node, world, seed, path):
     where = "/".join(path)
     try:
         p = _plan_checked({**PLAN_TERRACE_DEFAULTS, **(node.get("params") or {})}, PLAN_TERRACE_RANGES,
-                          {"roof_color": (None, *ROOF_COLORS), "shapes": ("mixed", "rect", "round", "polygon")})
+                          {"roof_color": (None, *ROOF_COLORS), "shapes": ("mixed", "rect", "round", "polygon"), "palace": ("dome", "castle")})
         style = plan_style_name(node.get("style"))
         soup, layout = _build_terrace_city({**p, "style": style}, seed)
     except PlanError as exc:
@@ -13926,7 +13942,7 @@ def _plan_build_terrace_city(context, node, world, seed, path):
         base = [get_style_material('FITTED'), get_style_material('AIRCRETE'), get_or_create_roof_material(p["roof_color"] or 'TERRACOTTA'), get_or_create_wood_material('DARK')]
     else:
         base = list(plan_material_slots(style, 'PLAIN', p["roof_color"], True))      # the pack's own wall, trim, roof and wood
-    mats = base + [get_or_create_leaf_material('GREEN'), _water_material(), get_style_material('FITTED')]
+    mats = base + [get_or_create_leaf_material('GREEN'), _water_material(), get_style_material('FITTED'), _gold_material()]
     for mat_ in mats:
         mesh.materials.append(mat_)
     _add_viewport_color_attribute(mesh)
@@ -13955,11 +13971,1120 @@ def _plan_build_terrace_city(context, node, world, seed, path):
     return made
 
 
+# ------------------------------------------------------------------------------
+# Swan castle: a tall castle block in the manner of the "Swan Lake" cutaway -- a round stair tower in the middle (the plugin's own round
+# tower builder: floors and a spiral stair per storey), a great hall on every floor to the left and right of it, a lobby at the front, tall
+# windows from the village generator's wall runs, gable roofs, a dome over the stair tower and corner turrets with spires (more of the plugin's
+# round towers). Every floor is furnished to a theme (banquet, ballroom, throne room, library, salon, gallery, bedrooms, treasury) and lit.
+# `swan_castle_walk_check` proves each hall can be walked from the stair tower and the lobby from the front door.
+# ------------------------------------------------------------------------------
+SW_CORE_R, SW_CORE_WALL, SW_STAIR_W, SW_T = 6.6, 0.7, 1.5, 0.9
+SW_GOLD_SLOT = 7
+PLAN_SWAN_DEFAULTS = dict(floors=8, floor_h=5.5, width=44.0, depth=30.0, interiors=True, spires=True, lights=True, roof_color=None, brick_color='PLAIN')
+PLAN_SWAN_RANGES = {"floors": (3, 10), "floor_h": (4.5, 6.5), "width": (36.0, 70.0), "depth": (24.0, 50.0)}
+PLAN_DEFAULT_FOOTPRINTS["swan_castle"] = lambda params: _footprint_rect({"width": float(params.get("width", 44.0)), "depth": float(params.get("depth", 30.0))})
+SW_THEMES_LEFT = ("banquet", "ballroom", "throne", "library", "bedroom", "bedroom", "bedroom", "bedroom", "bedroom", "bedroom")
+SW_THEMES_RIGHT = ("treasury", "salon", "gallery", "salon", "bedroom", "bedroom", "bedroom", "bedroom", "bedroom", "bedroom")
+
+
+def _gold_material():
+    mat = bpy.data.materials.get("LA_Gold")
+    if mat is None:
+        mat = bpy.data.materials.new("LA_Gold")
+        mat.use_nodes = True
+        bsdf = next(n for n in mat.node_tree.nodes if n.type == 'BSDF_PRINCIPLED')
+        _set_input(bsdf, "Base Color", (0.83, 0.62, 0.16, 1.0))
+        _set_input(bsdf, "Metallic", 0.9)
+        _set_input(bsdf, "Roughness", 0.32)
+        mat.diffuse_color = (0.83, 0.62, 0.16, 1.0)
+    return mat
+
+
+def _sw_chandelier(soup, x, y, zc):
+    """A ring of candles hanging on four chains from the ceiling height zc."""
+    z = zc - 1.6
+    _tc_drum(soup, x, y, z, 1.3, 0.15, 12, 0.0, 0, 0.0, 0.18, SW_GOLD_SLOT)
+    for q in range(8):
+        a = 2 * math.pi * q / 8
+        _tc_cyl(soup, x + 1.2 * math.cos(a), y + 1.2 * math.sin(a), z + 0.15, 0.05, 0.28, 6, 1)
+    for q in range(4):
+        a = math.pi / 2 * q + 0.4
+        _tc_box(soup, x + 0.8 * math.cos(a), y + 0.8 * math.sin(a), z + 0.15, 0.04, 0.04, 1.5, SW_GOLD_SLOT)
+
+
+def _sw_chair(soup, x, y, z, ang):
+    loc = _TowerMesh()
+    _tc_box(loc, 0.0, 0.0, 0.0, 0.45, 0.45, 0.45, 3)
+    _tc_box(loc, 0.0, -0.2, 0.45, 0.45, 0.06, 0.55, 3)
+    soup.append(loc, rot=ang, offset=(x, y, z))
+
+
+def _sw_bookcase(soup, x, y, z, ang, length=2.4):
+    loc = _TowerMesh()
+    _tc_box(loc, 0.0, 0.0, 0.0, length, 0.5, 2.6, 3)
+    for zz in (0.5, 1.0, 1.5, 2.0):
+        _tc_box(loc, 0.0, 0.02, zz, length - 0.06, 0.46, 0.04, 1)
+    for i in range(int(length / 0.35)):
+        _tc_box(loc, -length / 2 + 0.25 + i * 0.35, 0.02, 0.55 + 0.5 * (i % 4), 0.2, 0.3, 0.38, SW_GOLD_SLOT if i % 5 == 0 else 1)
+    soup.append(loc, rot=ang, offset=(x, y, z))
+
+
+def _sw_bed(soup, x, y, z, ang):
+    loc = _TowerMesh()
+    _tc_box(loc, 0.0, 0.0, 0.0, 2.0, 2.4, 0.45, 3)
+    _tc_box(loc, 0.0, 0.0, 0.45, 1.9, 2.3, 0.22, 1)
+    _tc_box(loc, 0.0, -0.9, 0.67, 1.2, 0.5, 0.14, 1)
+    for sx in (-0.95, 0.95):
+        for sy in (-1.15, 1.15):
+            _tc_cyl(loc, sx, sy, 0.0, 0.07, 2.2, 6, 3)
+    _tc_box(loc, 0.0, 0.0, 2.2, 2.0, 2.4, 0.06, 2)
+    soup.append(loc, rot=ang, offset=(x, y, z))
+
+
+def _sw_sofa(soup, x, y, z, ang):
+    loc = _TowerMesh()
+    _tc_box(loc, 0.0, 0.0, 0.0, 2.2, 0.9, 0.45, 3)
+    _tc_box(loc, 0.0, -0.4, 0.45, 2.2, 0.2, 0.55, 3)
+    _tc_box(loc, 0.0, 0.05, 0.45, 2.0, 0.7, 0.18, 2)
+    soup.append(loc, rot=ang, offset=(x, y, z))
+
+
+def _sw_frame(soup, x, y, z, ang, w=1.1, h=1.5):
+    loc = _TowerMesh()
+    _tc_box(loc, 0.0, 0.0, 0.0, w + 0.2, 0.08, h + 0.2, SW_GOLD_SLOT)
+    _tc_box(loc, 0.0, 0.05, 0.1, w, 0.05, h, TC_LEAF_SLOT)
+    soup.append(loc, rot=ang, offset=(x, y, z))
+
+
+def _sw_room(soup, rng, name, side, x0, x1, y0, y1, z, zc, lights):
+    """Furniture of one hall in a theme. Returns the obstacles [(x, y, r)] (the way from the stair tower, along y = 0, stays open)."""
+    fur = []
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    w, d = x1 - x0, y1 - y0
+    wallx = x1 - 0.5 if side > 0 else x0 + 0.5                          # the outer wall, the far side from the core
+    corex = x0 + 0.5 if side > 0 else x1 - 0.5
+    if name == "banquet":
+        for yy in (-5.5, 5.5):                                          # two long tables off the middle lane
+            _tc_box(soup, cx, yy, z + 0.75, w - 5.0, 1.3, 0.1, 3)
+            for lx in (-1, 1):
+                for ly in (-0.5, 0.5):
+                    _tc_box(soup, cx + lx * (w - 6.0) / 2, yy + ly, z, 0.12, 0.12, 0.75, 3)
+            for i in range(int((w - 5.0) / 1.2)):
+                xx = cx - (w - 5.6) / 2 + i * 1.2
+                _sw_chair(soup, xx, yy - 1.2, z, math.pi / 2)
+                _sw_chair(soup, xx, yy + 1.2, z, -math.pi / 2)
+            for q in range(int((w - 5.0) / 2.4) + 1):
+                fur.append((cx - (w - 5.0) / 2 + q * 2.4, yy, 1.35))
+        _sw_chandelier(soup, cx, -5.5, zc)
+        _sw_chandelier(soup, cx, 5.5, zc)
+    elif name == "ballroom":
+        for yy in (-d / 2 + 1.2, d / 2 - 1.2):
+            for q in range(4):
+                xx = x0 + 3.0 + q * (w - 6.0) / 3
+                _tc_cyl(soup, xx, yy, z, 0.45, zc - z - 0.4, 10, 1)
+                fur.append((xx, yy, 0.6))
+        _sw_chandelier(soup, cx, -3.0, zc)
+        _sw_chandelier(soup, cx, 3.0, zc)
+        _tc_box(soup, wallx - 0.2 * side, cy, z, 0.8, 7.0, 0.4, 1)         # a bandstand against the outer wall
+        fur.append((wallx - 0.2 * side, cy, 3.6))
+    elif name == "throne":
+        du = wallx - side * 3.2
+        _tc_cyl(soup, du, cy, z, 3.6, 0.18, 18, 1)
+        _tc_cyl(soup, du, cy, z + 0.18, 2.8, 0.18, 18, 1)
+        _tc_box(soup, du, cy, z + 0.36, 1.1, 1.0, 0.65, 3)
+        _tc_box(soup, du + 0.5 * side, cy, z + 0.36, 0.22, 1.1, 2.3, 3)
+        fur.append((du, cy, 3.7))
+        _tc_box(soup, (corex + du) / 2, cy, z + 0.03, abs(du - corex) - 3.0, 2.4, 0.04, 3)   # a runner from the door to the dais
+        for yy in (-d / 2 + 1.4, d / 2 - 1.4):
+            for q in range(3):
+                xx = x0 + 2.5 + q * (w - 5.0) / 2
+                _tc_cyl(soup, xx, yy, z, 0.4, zc - z - 0.4, 10, 1)
+                fur.append((xx, yy, 0.55))
+        _sw_chandelier(soup, cx, cy + 4.0, zc)
+        _sw_chandelier(soup, cx, cy - 4.0, zc)
+    elif name == "library":
+        for q in range(int((d - 2.0) / 2.6)):
+            yy = y0 + 1.6 + q * 2.6
+            if abs(yy) < 2.2:
+                continue
+            _sw_bookcase(soup, wallx - 0.3 * side, yy, z, math.pi / 2 if side > 0 else -math.pi / 2, 2.4)
+            fur.append((wallx - 0.3 * side, yy, 1.3))
+        for yy in (-5.0, 5.0):
+            _tc_cyl(soup, cx, yy, z, 0.12, 0.72, 8, 3)
+            _tc_cyl(soup, cx, yy, z + 0.72, 1.0, 0.08, 14, 3)
+            fur.append((cx, yy, 1.1))
+        _sw_chandelier(soup, cx, 0.0, zc)
+    elif name == "treasury":
+        for q in range(5):
+            xx = cx + rng.uniform(-w / 3, w / 3)
+            yy = rng.choice((-1, 1)) * rng.uniform(3.5, d / 2 - 1.8)
+            if any(math.hypot(xx - f[0], yy - f[1]) < 2.6 for f in fur):
+                continue
+            _tc_box(soup, xx, yy, z, 1.3, 0.8, 0.7, 3)
+            _tc_box(soup, xx, yy, z + 0.7, 1.34, 0.84, 0.12, SW_GOLD_SLOT)
+            _cone(soup, xx + 1.5, yy, z, 0.9, 0.6, 8, SW_GOLD_SLOT)
+            fur.append((xx, yy, 1.0))
+            fur.append((xx + 1.5, yy, 0.9))
+        for q in range(4):
+            bx, by = wallx - side * 1.4, y0 + 2.0 + q * (d - 4.0) / 3
+            if abs(by) < 2.2:
+                continue
+            soup.append(_build_prop_mesh('barrel', rng.randint(1, 99999)), offset=(bx, by, z))
+            fur.append((bx, by, 0.5))
+    elif name == "salon":
+        _sw_sofa(soup, cx, -4.8, z, 0.0)
+        _sw_sofa(soup, cx, 4.8, z, math.pi)
+        _tc_cyl(soup, cx, -2.6, z, 0.1, 0.5, 8, 3)
+        _tc_cyl(soup, cx, -2.6, z + 0.5, 0.6, 0.06, 12, 3)
+        fur += [(cx, -4.8, 1.3), (cx, 4.8, 1.3), (cx, -2.6, 0.7)]
+        _tc_box(soup, wallx - 0.5 * side, cy, z, 1.0, 3.4, 1.4, 1)         # a fireplace on the outer wall
+        _tc_box(soup, wallx - 0.2 * side, cy, z + 0.2, 0.2, 1.4, 0.9, 3)
+        fur.append((wallx - 0.5 * side, cy, 1.9))
+        _sw_chandelier(soup, cx, 0.0, zc)
+    elif name == "gallery":
+        for q in range(5):
+            yy = y0 + 2.2 + q * (d - 4.4) / 4
+            if abs(yy) < 1.8:
+                continue
+            _sw_frame(soup, wallx - 0.1 * side, yy, z + 1.4, math.pi / 2 if side > 0 else -math.pi / 2)
+        for q in range(4):                                              # busts on pedestals
+            xx, yy = cx + rng.uniform(-w / 4, w / 4), rng.choice((-1, 1)) * (3.5 + q * 1.4)
+            _tc_box(soup, xx, yy, z, 0.7, 0.7, 1.1, 1)
+            _tc_dome(soup, xx, yy, z + 1.1, 0.38, 0.5, n=8, rings=3, shell=0.1, mat=1)
+            fur.append((xx, yy, 0.65))
+        _sw_chandelier(soup, cx, 0.0, zc)
+    else:                                                               # bedroom
+        for yy in (-d / 2 + 1.9, d / 2 - 1.9):
+            _sw_bed(soup, wallx - side * 1.4, yy, z, math.pi / 2 if side > 0 else -math.pi / 2)
+            fur.append((wallx - side * 1.4, yy, 1.5))
+        _tc_box(soup, cx, -d / 2 + 0.6, z, 1.6, 0.6, 2.2, 3)            # wardrobes
+        _tc_box(soup, cx, d / 2 - 0.6, z, 1.6, 0.6, 2.2, 3)
+        fur += [(cx, -d / 2 + 0.7, 1.0), (cx, d / 2 - 0.7, 1.0)]
+        _tc_cyl(soup, cx - side * 1.0, 0.0, z, 2.0, 0.03, 16, 2)       # a rug
+        lights.append([cx, 0.0, z + 3.0, 160.0])
+    lights.append([cx, cy, zc - 1.2, 380.0])
+    return fur
+
+
+def _sw_wall(soup, rng, W, D, H, t, floors, fh, seed):
+    """The four outer walls: the plugin's wall-run builder with tall pointed windows on every floor and an arched door in the front."""
+    big = _TowerMesh()
+    corners = [(-W / 2, -D / 2), (W / 2, -D / 2), (W / 2, D / 2), (-W / 2, D / 2)]
+    dirs = [(1, 0, 0.0), (0, 1, math.pi / 2), (-1, 0, math.pi), (0, -1, 3 * math.pi / 2)]
+    spans = (W, D, W, D)
+    for i, ((cx, cy), (dx, dy, rot)) in enumerate(zip(corners, dirs)):
+        inset = t if i % 2 else 0.0
+        L = spans[i] + t - 2.0 * inset
+        wb = _WallRunBuilder(L, H, t, battlements=False, seed=seed + 11 * i, ruin=0.0, stones=int(L * H * 0.03))
+        n = max(2, int((spans[i] - 4.0) / 5.0))
+        for k in range(floors):
+            for j in range(n):
+                xc = (j + 0.5) * L / n
+                if i == 0 and k == 0 and abs(xc - L / 2) < 3.2:
+                    continue                                           # the front door takes the middle of the ground floor
+                if abs(xc - L / 2) < SW_CORE_R + 0.6 and i in (0, 2) and k >= 1:
+                    continue                                           # the piers in front of / behind the stair tower stay blank
+                wb.add_opening(xc, 1.3, k * fh + 1.4, 2.9, 'pointed')
+        if i == 0:
+            wb.add_opening(L / 2, 4.0, 0.0, 4.4, 'arch')
+        wb.geometry()
+        big.append(wb.mb, rot=rot, offset=(cx - dx * (t / 2.0 - inset), cy - dy * (t / 2.0 - inset), 0.0))
+    return big
+
+
+def _build_swan_castle(p, seed):
+    """Returns (soup, layout) in a local frame: centre at the origin, ground at z = 0, the front door on the -y side."""
+    rng = random.Random(int(seed) % 1_000_000)
+    soup = _TowerMesh()
+    floors, fh, W, D = int(p["floors"]), float(p["floor_h"]), float(p["width"]), float(p["depth"])
+    H = floors * fh
+    t, R = SW_T, SW_CORE_R
+    hall_x0, hall_x1 = R + 0.35, W / 2 - t / 2                          # a hall's x-range on the right; the left one mirrors it
+    if hall_x1 - hall_x0 < 8.0:
+        raise PlanError("swan_castle: width %.0f m leaves halls of only %.1f m (needs at least 8)" % (W, hall_x1 - hall_x0))
+    levels = [k * fh for k in range(floors + 1)]
+    layout = {"W": W, "D": D, "H": H, "R": R, "Ri": R - SW_CORE_WALL, "floors": [], "lobby": None, "levels": levels, "core_doors": {},
+              "door_panels": [], "lights": [], "entrance": [0.0, -D / 2], "style_slots": 8}
+    lights = layout["lights"]
+    # --- the round stair tower in the middle: the plugin's tower builder (floors and one turn of spiral stairs per storey), with a doorway
+    #     to each hall on every floor and, on the ground floor, one to the lobby
+    core = _TowerBuilder(R, H, SW_CORE_WALL, battlements=False, detail='MEDIUM', seed=int(seed) % 100000 + 3, interior=True, stair_width=SW_STAIR_W,
+                         stair_start_deg=-20.0, floor_levels=levels[1:], stair_rail=True, lanterns=bool(p["lights"]))
+    for k in range(floors):
+        for deg in (0.0, 180.0):
+            core.add_opening(deg, 2.4, levels[k], 2.9, 'arch')
+            layout["core_doors"].setdefault(k, []).append(deg)
+    core.add_opening(270.0, 2.4, 0.0, 2.9, 'arch')
+    core.geometry()
+    soup.append(core.mb)
+    layout["core_levels"] = list(core.levels)
+    for zl in core.lantern_points:
+        lights.append([0.0, 0.0, zl, 260.0])
+    # --- the outer walls (the plugin's wall runs), then a slab and furniture per floor and hall
+    soup.append(_sw_wall(soup, rng, W, D, H, t, floors, fh, int(seed) % 100000 + 7))
+    for side in (-1.0, 1.0):
+        for k in range(floors):
+            z = levels[k]
+            x0, x1 = (hall_x0, hall_x1) if side > 0 else (-hall_x1, -hall_x0)
+            y0, y1 = -D / 2 + t / 2, D / 2 - t / 2
+            _tc_box(soup, (x0 + x1) / 2, 0.0, z - 0.4, x1 - x0, y1 - y0, 0.4, 1, TC_PAVING_SLOT)
+    for k in range(floors):
+        z, zc = levels[k], levels[k + 1]
+        rooms = []
+        for side, themes in ((-1.0, SW_THEMES_LEFT), (1.0, SW_THEMES_RIGHT)):
+            x0, x1 = (hall_x0, hall_x1) if side > 0 else (-hall_x1, -hall_x0)
+            y0, y1 = -D / 2 + t / 2, D / 2 - t / 2
+            name = themes[k % len(themes)]
+            fur = _sw_room(soup, rng, name, side, x0, x1, y0, y1, z, zc - 0.4, lights) if p["interiors"] else []
+            rooms.append({"name": name, "side": side, "rect": [x0, y0, x1, y1], "furniture": [list(map(float, f)) for f in fur], "z": z})
+        layout["floors"].append({"z": z, "rooms": rooms})
+    # the lobby at the front (ground floor) and solid piers in front of and behind the stair tower above it
+    lx0, lx1, ly0, ly1 = -(R + 0.35), R + 0.35, -D / 2 + t / 2, -R + 0.2
+    _tc_box(soup, 0.0, (ly0 + ly1) / 2, -0.4, lx1 - lx0, ly1 - ly0, 0.4, 1, TC_PAVING_SLOT)
+    for sx in (-1.0, 1.0):
+        _tc_box(soup, sx * (R + 0.6), (ly0 + ly1) / 2, 0.0, 0.5, ly1 - ly0, fh, 0)
+    _tc_box(soup, 0.0, (ly0 + ly1) / 2, fh, lx1 - lx0 + 1.1, ly1 - ly0, H - fh, 0)
+    _tc_box(soup, 0.0, (D / 2 - t / 2 + R - 0.2) / 2, 0.0, lx1 - lx0 + 1.1, D / 2 - t / 2 - R + 0.2, H, 0)
+    for xx in (-4.5, 4.5):
+        _tc_cyl(soup, xx, -D / 2 + 3.0, 0.0, 0.4, fh - 0.4, 10, 1)
+    fy = (ly0 + ly1) / 2 - 0.3
+    _tc_cyl(soup, 0.0, fy, 0.0, 1.5, 0.25, 14, 1)                     # a small fountain bowl in the middle of the lobby, to walk round
+    _tc_quad(soup, [_tc_pt(0.0, fy, 0.2, 1.3, 2 * math.pi * i / 14) for i in range(14)], (0, 0, 1), TC_WATER_SLOT)
+    lights.append([0.0, (ly0 + ly1) / 2, fh - 1.2, 320.0])
+    layout["lobby"] = {"rect": [lx0, ly0, lx1, ly1], "furniture": [[0.0, fy, 1.7], [-4.5, -D / 2 + 3.0, 0.5], [4.5, -D / 2 + 3.0, 0.5]]}
+    layout["door_panels"] = [[-2.0, -D / 2, 0.0, 0.0, 1.95, 4.35], [2.0, -D / 2, 0.0, math.pi, 1.95, 4.35]]
+    # --- the roofs of the plugin's house builder over the two halls, flat roofs over the piers, a dome over the stair tower
+    pitch = 0.95
+    for side in (-1.0, 1.0):
+        hw_ = hall_x1 - hall_x0 + t
+        rm = _TowerMesh()
+        _house_roof(rm, hw_, D, H, t, pitch, 'GABLE', 0.5)
+        soup.append(rm, rot=math.pi / 2, offset=(side * (hall_x0 + hall_x1) / 2, 0.0, 0.0))
+    _tc_box(soup, 0.0, (ly0 + ly1) / 2, H, lx1 - lx0 + 1.1, ly1 - ly0, 0.45, 2)
+    _tc_box(soup, 0.0, (D / 2 - t / 2 + R - 0.2) / 2, H, lx1 - lx0 + 1.1, D / 2 - t / 2 - R + 0.2, 0.45, 2)
+    _tc_dome(soup, 0.0, 0.0, H + 0.1, R + 0.5, R * 1.15, n=28, rings=7, ribs=14)
+    _tc_drum(soup, 0.0, 0.0, H + R * 1.15 * 0.97, 1.8, 2.0, 12, 0.0, 0, 0.0, 0.5, 0, (1, 4, 7, 10), 0.5, 1.6)
+    _tc_dome(soup, 0.0, 0.0, H + R * 1.15 * 0.97 + 1.9, 2.1, 2.2, n=12, rings=4, ribs=6)
+    _cone(soup, 0.0, 0.0, H + R * 1.15 * 0.97 + 4.0, 0.4, 3.6, 6, ROOF_SOURCE_SLOT)
+    # --- corner turrets with spires: round towers of the plugin's tower builder
+    if p["spires"]:
+        for sx in (-1.0, 1.0):
+            for sy in (-1.0, 1.0):
+                tr, th = 2.9, H + 6.0
+                tw = _TowerBuilder(tr, th, 0.7, battlements=False, detail='LOW', seed=int(seed) % 1000 + int(sx * 7 + sy * 3), interior=False)
+                for k in range(1, floors):
+                    for a_ in (45.0, 135.0, 225.0, 315.0)[:2 + (k % 2) * 2]:
+                        tw.add_opening(a_, 0.5, k * fh + 1.6, 1.8, 'rect')
+                tw.geometry()
+                soup.append(tw.mb, offset=(sx * (W / 2 - 0.3), sy * (D / 2 - 0.3), 0.0))
+                _cone(soup, sx * (W / 2 - 0.3), sy * (D / 2 - 0.3), th, tr + 0.5, 9.0, 14, ROOF_SOURCE_SLOT)
+                _cone(soup, sx * (W / 2 - 0.3), sy * (D / 2 - 0.3), th + 8.8, 0.25, 2.4, 6, ROOF_SOURCE_SLOT)
+        for sx in (-1.0, 1.0):                                          # pinnacles on the gable ends
+            for sy in (-1.0, 1.0):
+                _cone(soup, sx * (hall_x0 + hall_x1) / 2, sy * (D / 2), H + pitch * ((hall_x1 - hall_x0 + t) / 2 + 0.5) + 0.2, 0.5, 3.6, 6, ROOF_SOURCE_SLOT)
+    layout["radius"] = math.hypot(W, D) / 2 + 3.0
+    return soup, layout
+
+
+def swan_castle_walk_check(layout, cell=0.4):
+    """Floor by floor: can every hall be walked from the doorway to the stair tower (95 %+ of its free floor), can the lobby be walked from the front door
+    to the doorway into the stair tower, and has the stair tower a storey and a doorway for every floor. Returns {'ok', 'halls', 'worst', 'lobby', ...}."""
+    from collections import deque
+
+    def flood(rect, furn, start):
+        x0, y0, x1, y1 = rect
+        nx, ny = int((x1 - x0) / cell) + 1, int((y1 - y0) / cell) + 1
+        blocked = [[False] * nx for _ in range(ny)]
+        for fx, fy, fr in furn:
+            for j in range(max(0, int((fy - fr - y0) / cell)), min(ny, int((fy + fr - y0) / cell) + 2)):
+                for i in range(max(0, int((fx - fr - x0) / cell)), min(nx, int((fx + fr - x0) / cell) + 2)):
+                    if math.hypot(x0 + i * cell - fx, y0 + j * cell - fy) <= fr:
+                        blocked[j][i] = True
+        s = (min(ny - 1, max(0, int(round((start[1] - y0) / cell)))), min(nx - 1, max(0, int(round((start[0] - x0) / cell)))))
+        seen = [[False] * nx for _ in range(ny)]
+        if blocked[s[0]][s[1]]:
+            return 0.0, False
+        dq = deque([s])
+        seen[s[0]][s[1]] = True
+        while dq:
+            j, i = dq.popleft()
+            for dj, di in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                b, a = j + dj, i + di
+                if 0 <= b < ny and 0 <= a < nx and not seen[b][a] and not blocked[b][a]:
+                    seen[b][a] = True
+                    dq.append((b, a))
+        free = sum(1 for j in range(ny) for i in range(nx) if not blocked[j][i])
+        hit = sum(1 for j in range(ny) for i in range(nx) if seen[j][i])
+        return hit / max(1, free), True
+
+    worst, bad = 1.0, []
+    for f in layout["floors"]:
+        for rm in f["rooms"]:
+            x0, y0, x1, y1 = rm["rect"]
+            door = (x0 + 0.6, 0.0) if rm["side"] > 0 else (x1 - 0.6, 0.0)
+            frac, ok = flood(rm["rect"], rm["furniture"], door)
+            worst = min(worst, frac)
+            if not ok or frac < 0.95:
+                bad.append((round(f["z"], 1), rm["name"], round(frac, 2)))
+    lb = layout["lobby"]
+    lfrac, lok = flood(lb["rect"], lb["furniture"], (0.0, lb["rect"][3] - 0.5))                # from the doorway into the stair tower
+    reach = lok
+    structure = len(layout["core_levels"]) == len(layout["levels"]) and all(len(layout["core_doors"].get(k, layout["core_doors"].get(str(k), []))) == 2 for k in range(len(layout["floors"])))
+    return {"ok": bool(not bad and lok and lfrac > 0.9 and reach and structure), "halls": sum(len(f["rooms"]) for f in layout["floors"]), "worst": worst,
+            "unreached": bad, "lobby": round(lfrac, 2), "structure": structure}
+
+
+def _plan_build_swan_castle(context, node, world, seed, path):
+    where = "/".join(path)
+    try:
+        p = _plan_checked({**PLAN_SWAN_DEFAULTS, **(node.get("params") or {})}, PLAN_SWAN_RANGES, {"roof_color": (None, *ROOF_COLORS)})
+        soup, layout = _build_swan_castle(p, seed)
+    except PlanError as exc:
+        raise PlanError("%s: %s" % (where, exc))
+    style = plan_style_name(node.get("style"))
+    mesh = soup.to_mesh("SwanCastle_" + node["id"])
+    obj = bpy.data.objects.new(mesh.name, mesh)
+    context.scene.collection.objects.link(obj)
+    if style == 'medieval':
+        base = [get_style_material('FITTED'), get_style_material('AIRCRETE'), get_or_create_roof_material(p["roof_color"] or 'SLATE'), get_or_create_wood_material('DARK')]
+    else:
+        base = list(plan_material_slots(style, 'PLAIN', p["roof_color"], True))
+    for mat_ in base + [get_or_create_leaf_material('GREEN'), _water_material(), get_style_material('FITTED'), _gold_material()]:
+        mesh.materials.append(mat_)
+    _add_viewport_color_attribute(mesh)
+    obj["gla_walk_layout"] = json.dumps(layout)
+    made = [obj]
+    for i, (hx, hy, hz, rot, w, h) in enumerate(layout["door_panels"]):
+        dm = _tc_door_mesh(w, h).to_mesh("SwanDoor_%03d" % i)
+        dobj = bpy.data.objects.new("Door_Panel_%03d" % i, dm)
+        context.scene.collection.objects.link(dobj)
+        dobj.location = (hx, hy, hz)
+        dobj.rotation_euler = (0.0, 0.0, rot)
+        for m_ in (base[3], base[1], base[3], base[3]):
+            dm.materials.append(m_)
+        made.append(dobj)
+    if p["lights"]:
+        for i, (lx, ly, lz, energy) in enumerate(layout["lights"]):
+            ld = bpy.data.lights.new("SwanLamp_%03d" % i, 'POINT')
+            ld.energy, ld.color, ld.shadow_soft_size = energy, (1.0, 0.74, 0.45), 0.3
+            lobj = bpy.data.objects.new("Lamp_%03d" % i, ld)
+            lobj.location = (lx, ly, lz)
+            context.scene.collection.objects.link(lobj)
+            made.append(lobj)
+    _plan_adopt_objects(context.scene, path, world, made)
+    return made
+
+
+# ------------------------------------------------------------------------------
+# Mansion: a big country house built from a floor plan given as data -- rooms (name, floor, rectangle) on up to three floors, the way
+# a plan like Bear Wood's is drawn. Walls (the village houses' wall-run builder, with pointed windows), doors that join each room to its
+# neighbours (found from the plan, with wide openings between halls), floors, ceilings, gable roofs (the house roof builder), round stair towers
+# (the round tower builder, a storey and a spiral stair per floor) linked to the rooms they serve, furniture by room kind, lamps and door leaves.
+# `mansion_walk_check` proves every room can be reached from the front door and every door of a room from every other.
+# The built-in plan "bearwood" follows the arrangement of the ground, first and second floors of Bear Wood (public rooms round a top-lit
+# picture gallery, a stair hall with a tower, a long servants' wing); `params.plan` also takes a dict with your own rooms.
+# ------------------------------------------------------------------------------
+MAN_KINDS = {"hall": "hall", "gallery": "gallery", "dining": "dining", "drawing": "drawing", "library": "library", "billiard": "billiard", "kitchen": "kitchen",
+             "servants": "servants", "bedroom": "bedroom", "nursery": "nursery", "bath": "bath", "storage": "storage", "corridor": "corridor", "pantry": "storage"}
+
+
+def _man_room(name, floor, rect, kind, **kw):
+    return dict(name=name, floor=floor, rect=[float(v) for v in rect], kind=kind, **kw)
+
+
+def _man_bearwood():
+    R = _man_room
+    rooms = [
+        # ground floor: the main block
+        R("entrance_hall", 0, (24, 0, 40, 14), "hall", circ=True), R("cloak_room", 0, (40, 0, 47, 14), "storage"),
+        R("dining_room", 0, (0, 0, 24, 14), "dining"), R("drawing_room", 0, (47, 0, 66, 20), "drawing"),
+        R("morning_room", 0, (47, 20, 66, 34), "drawing"), R("library", 0, (47, 34, 66, 46), "library"),
+        R("picture_gallery", 0, (20, 14, 47, 32), "gallery", circ=True, tall=True), R("stair_hall", 0, (20, 32, 34, 46), "hall", circ=True),
+        R("gentlemans_room", 0, (34, 32, 47, 46), "library"), R("billiard_room", 0, (0, 14, 20, 30), "billiard"), R("study", 0, (0, 30, 20, 46), "library"),
+        # ground floor: the servants' wing
+        R("mens_corridor", 0, (-52, 18, 0, 22), "corridor", circ=True), R("scullery", 0, (-52, 4, -44, 18), "kitchen"), R("kitchen", 0, (-44, 4, -28, 18), "kitchen"),
+        R("pantry_store", 0, (-28, 4, -20, 18), "storage"), R("servants_hall", 0, (-20, 4, -6, 18), "servants"), R("butlers_pantry", 0, (-6, 4, 0, 18), "storage"),
+        R("housekeepers_room", 0, (-52, 22, -40, 36), "servants"), R("still_room", 0, (-40, 22, -30, 36), "storage"), R("boot_room", 0, (-30, 22, -20, 36), "storage"),
+        R("gun_room", 0, (-20, 22, -10, 36), "storage"), R("lamp_room", 0, (-10, 22, 0, 36), "storage"),
+        # first floor
+        R("landing", 1, (20, 32, 34, 46), "hall", circ=True), R("boudoir", 1, (34, 32, 47, 46), "drawing"), R("bedroom_e1", 1, (47, 0, 66, 14), "bedroom"),
+        R("dressing_e1", 1, (47, 14, 66, 22), "bath"), R("bedroom_e2", 1, (47, 22, 66, 36), "bedroom"), R("dressing_e2", 1, (47, 36, 66, 46), "bath"),
+        R("family_bedroom", 1, (24, 0, 47, 14), "bedroom"), R("school_room", 1, (0, 0, 24, 14), "nursery"), R("first_corridor", 1, (0, 14, 20, 30), "corridor", circ=True),
+        R("day_nursery", 1, (0, 30, 20, 46), "nursery"), R("w_link", 1, (-6, 18, 0, 22), "corridor", circ=True), R("w_corridor", 1, (-52, 18, -6, 22), "corridor", circ=True),
+        R("maids_a", 1, (-52, 4, -40, 18), "bedroom"), R("maids_b", 1, (-40, 4, -28, 18), "bedroom"), R("cook_room", 1, (-28, 4, -16, 18), "bedroom"),
+        R("housekeeper_bed", 1, (-16, 4, -6, 18), "bedroom"), R("linen_store", 1, (-6, 4, 0, 18), "storage"), R("linen_room", 1, (-52, 22, -40, 36), "storage"),
+        R("workroom", 1, (-40, 22, -28, 36), "servants"), R("nursery_a", 1, (-28, 22, -16, 36), "nursery"), R("nursery_b", 1, (-16, 22, -6, 36), "nursery"),
+        R("wc_store", 1, (-6, 22, 0, 36), "storage"),
+        # second floor
+        R("landing2", 2, (20, 32, 34, 46), "hall", circ=True), R("bachelors_room", 2, (34, 32, 47, 46), "bedroom"), R("bedroom_n", 2, (47, 32, 66, 46), "bedroom"),
+        R("attic_room", 2, (0, 32, 20, 46), "nursery"),
+    ]
+    return dict(
+        name="bearwood", heights=[4.4, 3.8, 3.6], rooms=rooms,
+        towers=[dict(name="principal", x=27.0, y=50.5, R=5.0, links=[("stair_hall", 0, "N"), ("landing", 1, "N"), ("landing2", 2, "N")]),
+                dict(name="women", x=-56.0, y=20.0, R=3.4, links=[("mens_corridor", 0, "W"), ("w_corridor", 1, "W")])],
+        entrances=[dict(room="entrance_hall", side="S", t=0.5, w=2.6), dict(room="scullery", side="W", t=0.5, w=1.4), dict(room="drawing_room", side="E", t=0.5, w=2.0)],
+        extra_doors=[("drawing_room", "morning_room"), ("morning_room", "library"), ("library", "gentlemans_room"), ("gentlemans_room", "stair_hall"),
+                     ("drawing_room", "picture_gallery"), ("dining_room", "entrance_hall"), ("dining_room", "butlers_pantry"), ("servants_hall", "butlers_pantry")],
+        roofs=[dict(rect=(47, 0, 66, 32), top=1, kind="GABLE", pitch=1.05), dict(rect=(0, 0, 47, 14), top=1, kind="GABLE", pitch=1.05),
+               dict(rect=(20, 14, 47, 32), top=1, kind="HIP", pitch=0.75), dict(rect=(0, 14, 20, 30), top=1, kind="HIP", pitch=0.9),
+               dict(rect=(0, 30, 66, 46), top=2, kind="GABLE", pitch=1.1), dict(rect=(-52, 4, 0, 36), top=1, kind="GABLE", pitch=0.65)])
+
+
+PLAN_MANSION_DEFAULTS = dict(plan="bearwood", interiors=True, lights=True, facade=True, roof_color=None, brick_color='PLAIN')
+
+
+def _man_plan_of(params):
+    plan = (params or {}).get("plan", "bearwood")
+    if isinstance(plan, dict):
+        return plan
+    if plan == "bearwood":
+        return _man_bearwood()
+    raise PlanError("params.plan = %r is not a known plan (bearwood) or a dict of rooms" % (plan,))
+
+
+def mansion_size(params=None):
+    """(width, depth) of a mansion's footprint: the rooms and towers plus a margin."""
+    plan = _man_plan_of(params)
+    xs = [r["rect"][0] for r in plan["rooms"]] + [r["rect"][2] for r in plan["rooms"]] + [t["x"] - t["R"] for t in plan.get("towers", [])] + [t["x"] + t["R"] for t in plan.get("towers", [])]
+    ys = [r["rect"][1] for r in plan["rooms"]] + [r["rect"][3] for r in plan["rooms"]] + [t["y"] - t["R"] for t in plan.get("towers", [])] + [t["y"] + t["R"] for t in plan.get("towers", [])]
+    return (max(xs) - min(xs) + 6.0, max(ys) - min(ys) + 6.0)
+
+
+PLAN_DEFAULT_FOOTPRINTS["mansion"] = lambda params: _footprint_rect(dict(zip(("width", "depth"), mansion_size(params))))
+
+
+def _man_pieces(kind, w, d, rng):
+    """Furniture wanted in a room of this kind and size: (type, footprint radius). The placer tries them in order and keeps those that leave the room walkable."""
+    big = w * d > 150.0
+    if kind == "dining":
+        return [("dtable", 1.9)] + [("sideboard", 0.9)] * 2 + [("chandelier", 0.0)] * 2
+    if kind == "drawing":
+        return [("sofa", 1.2), ("sofa", 1.2), ("rug", 0.0), ("ctable", 0.7), ("piano", 1.1), ("frame", 0.0), ("frame", 0.0), ("chandelier", 0.0)]
+    if kind == "library":
+        return [("bookcase", 1.3)] * 4 + [("desk", 1.1), ("ctable", 0.7), ("chair", 0.4)]
+    if kind == "billiard":
+        return [("billiard", 2.0), ("bookcase", 1.3), ("sofa", 1.2), ("chandelier", 0.0)]
+    if kind == "kitchen":
+        return [("range", 1.2), ("dtable", 1.3), ("shelf", 1.0), ("shelf", 1.0), ("barrel", 0.5)]
+    if kind == "servants":
+        return [("dtable", 1.6), ("shelf", 1.0), ("chair", 0.4), ("chair", 0.4)]
+    if kind == "bedroom":
+        return [("bed", 1.6), ("wardrobe", 0.9), ("ctable", 0.7), ("rug", 0.0)] + ([("bed", 1.6)] if big else [])
+    if kind == "nursery":
+        return [("bed", 1.4), ("bed", 1.4), ("ctable", 0.7), ("rug", 0.0), ("chair", 0.4)]
+    if kind == "bath":
+        return [("bath", 1.1), ("wardrobe", 0.9)]
+    if kind == "storage":
+        return [("barrel", 0.5)] * 2 + [("shelf", 1.0), ("crate", 0.5)]
+    if kind == "gallery":
+        return [("frame", 0.0)] * 6 + [("bust", 0.6)] * 4 + [("bench", 1.0)] * 2 + [("chandelier", 0.0)] * 2
+    if kind == "hall":
+        return [("rug", 0.0), ("bust", 0.6), ("bust", 0.6), ("frame", 0.0), ("chandelier", 0.0)]
+    return []
+
+
+def _man_place_piece(soup, kind_, x, y, z, ang, rng, zc):
+    """One piece of furniture at (x, y), turned to `ang` (its front looks along that direction)."""
+    f = ang - math.pi / 2
+    if kind_ == "chair":
+        _sw_chair(soup, x, y, z, f)
+    elif kind_ == "bookcase":
+        _sw_bookcase(soup, x, y, z, f, 2.4)
+    elif kind_ == "bed":
+        _sw_bed(soup, x, y, z, f + math.pi / 2)
+    elif kind_ == "sofa":
+        _sw_sofa(soup, x, y, z, f)
+    elif kind_ == "frame":
+        _sw_frame(soup, x, y, z + 1.5, f)
+    elif kind_ == "chandelier":
+        _sw_chandelier(soup, x, y, zc)
+    elif kind_ == "rug":
+        _tc_cyl(soup, x, y, z, 1.6, 0.03, 16, 2)
+    elif kind_ == "ctable":
+        _tc_cyl(soup, x, y, z, 0.1, 0.55, 8, 3)
+        _tc_cyl(soup, x, y, z + 0.55, 0.55, 0.07, 12, 3)
+    elif kind_ == "dtable":
+        loc = _TowerMesh()
+        _tc_box(loc, 0.0, 0.0, 0.75, 3.4, 1.3, 0.1, 3)
+        for lx in (-1, 1):
+            for ly in (-1, 1):
+                _tc_box(loc, lx * 1.55, ly * 0.5, 0.0, 0.12, 0.12, 0.75, 3)
+        for i in range(3):
+            _sw_chair(loc, -1.2 + i * 1.2, -1.15, 0.0, math.pi / 2)
+            _sw_chair(loc, -1.2 + i * 1.2, 1.15, 0.0, -math.pi / 2)
+        soup.append(loc, rot=f, offset=(x, y, z))
+    elif kind_ == "sideboard":
+        loc = _TowerMesh()
+        _tc_box(loc, 0.0, 0.0, 0.0, 1.8, 0.55, 1.0, 3)
+        _tc_box(loc, 0.0, 0.0, 1.0, 1.9, 0.6, 0.06, SW_GOLD_SLOT)
+        soup.append(loc, rot=f, offset=(x, y, z))
+    elif kind_ == "piano":
+        loc = _TowerMesh()
+        _tc_box(loc, 0.0, 0.0, 0.0, 1.6, 0.7, 1.1, 3)
+        _tc_box(loc, 0.0, -0.45, 0.7, 1.5, 0.25, 0.05, 1)
+        soup.append(loc, rot=f, offset=(x, y, z))
+    elif kind_ == "desk":
+        loc = _TowerMesh()
+        _tc_box(loc, 0.0, 0.0, 0.7, 1.6, 0.8, 0.08, 3)
+        for lx in (-0.7, 0.7):
+            _tc_box(loc, lx, 0.0, 0.0, 0.1, 0.7, 0.7, 3)
+        _sw_chair(loc, 0.0, -0.9, 0.0, math.pi / 2)
+        soup.append(loc, rot=f, offset=(x, y, z))
+    elif kind_ == "billiard":
+        loc = _TowerMesh()
+        _tc_box(loc, 0.0, 0.0, 0.7, 3.2, 1.8, 0.2, 3)
+        _tc_box(loc, 0.0, 0.0, 0.9, 2.8, 1.4, 0.04, TC_LEAF_SLOT)
+        for lx in (-1.4, 1.4):
+            for ly in (-0.7, 0.7):
+                _tc_box(loc, lx, ly, 0.0, 0.25, 0.25, 0.7, 3)
+        soup.append(loc, rot=f, offset=(x, y, z))
+    elif kind_ == "range":
+        loc = _TowerMesh()
+        _tc_box(loc, 0.0, 0.0, 0.0, 2.2, 0.9, 0.9, 1)
+        _tc_box(loc, 0.0, 0.0, 0.9, 2.2, 0.9, 0.05, 3)
+        _tc_cyl(loc, 0.0, 0.2, 0.95, 0.25, 2.4, 8, 1)
+        soup.append(loc, rot=f, offset=(x, y, z))
+    elif kind_ == "shelf":
+        loc = _TowerMesh()
+        _tc_box(loc, 0.0, 0.0, 0.0, 1.8, 0.4, 2.0, 3)
+        for zz in (0.5, 1.0, 1.5):
+            _tc_box(loc, 0.0, 0.02, zz, 1.7, 0.36, 0.04, 1)
+        soup.append(loc, rot=f, offset=(x, y, z))
+    elif kind_ == "wardrobe":
+        loc = _TowerMesh()
+        _tc_box(loc, 0.0, 0.0, 0.0, 1.5, 0.6, 2.1, 3)
+        _tc_box(loc, 0.0, 0.33, 0.1, 0.03, 0.03, 1.8, SW_GOLD_SLOT)
+        soup.append(loc, rot=f, offset=(x, y, z))
+    elif kind_ == "bath":
+        loc = _TowerMesh()
+        _tc_box(loc, 0.0, 0.0, 0.0, 1.7, 0.8, 0.55, 1)
+        _tc_box(loc, 0.0, 0.0, 0.5, 1.5, 0.6, 0.04, TC_WATER_SLOT)
+        soup.append(loc, rot=f, offset=(x, y, z))
+    elif kind_ == "bust":
+        _tc_box(soup, x, y, z, 0.6, 0.6, 1.0, 1)
+        _tc_dome(soup, x, y, z + 1.0, 0.35, 0.45, n=8, rings=3, shell=0.1, mat=1)
+    elif kind_ == "bench":
+        loc = _TowerMesh()
+        _tc_box(loc, 0.0, 0.0, 0.0, 2.0, 0.6, 0.45, 3)
+        soup.append(loc, rot=f, offset=(x, y, z))
+    elif kind_ == "barrel":
+        soup.append(_build_prop_mesh('barrel', rng.randint(1, 99999)), offset=(x, y, z))
+    elif kind_ == "crate":
+        soup.append(_build_prop_mesh('crate', rng.randint(1, 99999)), rot=rng.uniform(0, 3), offset=(x, y, z))
+
+
+def _man_flood(rect, furn, starts, cell=0.4):
+    """Flood the free floor of a rectangle from one point; returns (reach fraction of free cells, True when every start point is reached)."""
+    from collections import deque
+    x0, y0, x1, y1 = rect
+    nx, ny = int((x1 - x0) / cell) + 1, int((y1 - y0) / cell) + 1
+    blocked = [[False] * nx for _ in range(ny)]
+    for fx, fy, fr in furn:
+        for j in range(max(0, int((fy - fr - y0) / cell)), min(ny, int((fy + fr - y0) / cell) + 2)):
+            for i in range(max(0, int((fx - fr - x0) / cell)), min(nx, int((fx + fr - x0) / cell) + 2)):
+                if math.hypot(x0 + i * cell - fx, y0 + j * cell - fy) <= fr:
+                    blocked[j][i] = True
+    cells = [(min(ny - 1, max(0, int(round((sy - y0) / cell)))), min(nx - 1, max(0, int(round((sx - x0) / cell))))) for sx, sy in starts]
+    seen = [[False] * nx for _ in range(ny)]
+    if not cells or any(blocked[j][i] for j, i in cells):
+        return 0.0, False
+    dq = deque([cells[0]])
+    seen[cells[0][0]][cells[0][1]] = True
+    while dq:
+        j, i = dq.popleft()
+        for dj, di in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            b, a = j + dj, i + di
+            if 0 <= b < ny and 0 <= a < nx and not seen[b][a] and not blocked[b][a]:
+                seen[b][a] = True
+                dq.append((b, a))
+    free = sum(1 for j in range(ny) for i in range(nx) if not blocked[j][i])
+    hit = sum(1 for j in range(ny) for i in range(nx) if seen[j][i])
+    return hit / max(1, free), all(seen[j][i] for j, i in cells)
+
+
+def _build_mansion(p, seed):
+    """Returns (soup, layout). Local frame: the middle of the plan at the origin, the ground floor at z = 0."""
+    rng = random.Random(int(seed) % 1_000_000)
+    plan = _man_plan_of(p)
+    soup = _TowerMesh()
+    hs = list(plan["heights"])
+    zs = [0.0]
+    for h in hs:
+        zs.append(zs[-1] + h)
+    n_floors = len(hs)
+    xs = [r["rect"][0] for r in plan["rooms"]] + [r["rect"][2] for r in plan["rooms"]]
+    ys = [r["rect"][1] for r in plan["rooms"]] + [r["rect"][3] for r in plan["rooms"]]
+    ox, oy = (min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0
+    sh = lambda rect: [rect[0] - ox, rect[1] - oy, rect[2] - ox, rect[3] - oy]
+    rooms = []
+    for r in plan["rooms"]:
+        q = dict(r)
+        q["rect"] = sh(r["rect"])
+        q["id"] = "%s@%d" % (r["name"], r["floor"])
+        q["h"] = hs[r["floor"]] + (hs[r["floor"] + 1] if r.get("tall") and r["floor"] + 1 < n_floors else 0.0)
+        rooms.append(q)
+    by_id = {q["id"]: q for q in rooms}
+    by_name = {}
+    for q in rooms:
+        by_name.setdefault(q["name"], []).append(q)
+    towers = [dict(t, x=t["x"] - ox, y=t["y"] - oy) for t in plan.get("towers", [])]
+    layout = {"name": plan.get("name", "custom"), "zs": zs, "rooms": [], "doors": [], "towers": [], "entrances": [], "lights": [], "door_panels": [], "roofs": [], "origin": [ox, oy]}
+    TO, TI = 0.7, 0.3
+    EPS = 1e-6
+
+    def shared(a, b):
+        """The shared wall of two rooms on the same floor: (axis 'v' or 'h', wall coordinate, from, to) or None."""
+        ax0, ay0, ax1, ay1 = a["rect"]
+        bx0, by0, bx1, by1 = b["rect"]
+        if abs(ax1 - bx0) < EPS or abs(bx1 - ax0) < EPS:
+            lo, hi = max(ay0, by0), min(ay1, by1)
+            if hi - lo > 1.6:
+                return ("v", ax1 if abs(ax1 - bx0) < EPS else ax0, lo, hi)
+        if abs(ay1 - by0) < EPS or abs(by1 - ay0) < EPS:
+            lo, hi = max(ax0, bx0), min(ax1, bx1)
+            if hi - lo > 1.6:
+                return ("h", ay1 if abs(ay1 - by0) < EPS else ay0, lo, hi)
+        return None
+
+    # --- doors: circulation rooms join each other, every other room joins its circulation neighbour or a room already joined; plus the plan's own extra doors
+    doors = []                                                          # dict(floor, a, b, axis, wall, pos, w)
+    pairs = []
+    for i, a in enumerate(rooms):
+        for b in rooms[i + 1:]:
+            if a["floor"] == b["floor"]:
+                s = shared(a, b)
+                if s:
+                    pairs.append((a, b, s))
+
+    def add_door(a, b, s, w=None):
+        axis, c, lo, hi = s
+        if any(d["a"] == a["id"] and d["b"] == b["id"] or d["a"] == b["id"] and d["b"] == a["id"] for d in doors):
+            return
+        wide = a.get("circ") and b.get("circ") or a["kind"] in ("gallery", "hall") and b["kind"] in ("gallery", "hall", "dining", "drawing")
+        dw = w or (2.2 if wide and hi - lo >= 4.0 else 1.2)
+        pos = (lo + hi) / 2.0 + (0.0 if hi - lo < 6.0 else rng.uniform(-(hi - lo) / 6, (hi - lo) / 6))
+        doors.append(dict(floor=a["floor"], a=a["id"], b=b["id"], axis=axis, wall=c, pos=pos, w=min(dw, hi - lo - 0.8)))
+
+    for a, b, s in pairs:
+        if a.get("circ") and b.get("circ"):
+            add_door(a, b, s)
+    for fl in range(n_floors):
+        fr = [q for q in rooms if q["floor"] == fl]
+        joined = {q["id"] for q in fr if q.get("circ")}
+        if not joined and fr:
+            joined = {fr[0]["id"]}
+        progress = True
+        while progress:
+            progress = False
+            for q in fr:
+                if q["id"] in joined:
+                    continue
+                cand = [(b if a is q else a, s) for a, b, s in pairs if (a is q or b is q)]
+                best = None
+                for o, s in sorted(cand, key=lambda t: (not t[0].get("circ"), -(t[1][3] - t[1][2]))):
+                    if o["id"] in joined:
+                        best = (o, s)
+                        break
+                if best:
+                    add_door(q, best[0], best[1])
+                    joined.add(q["id"])
+                    progress = True
+    for na, nb in plan.get("extra_doors", []):
+        for a in by_name.get(na, []):
+            for b in by_name.get(nb, []):
+                if a["floor"] == b["floor"]:
+                    s = shared(a, b)
+                    if s:
+                        add_door(a, b, s)
+    # --- the outside doors and the doors into the stair towers
+    outer = []                                                           # dict(room, side, pos, w, kind)
+    side_edge = {"S": lambda r: ("h", r[1], r[0], r[2]), "N": lambda r: ("h", r[3], r[0], r[2]), "W": lambda r: ("v", r[0], r[1], r[3]), "E": lambda r: ("v", r[2], r[1], r[3])}
+    for e in plan.get("entrances", []):
+        q = by_name[e["room"]][0]
+        axis, c, lo, hi = side_edge[e["side"]](q["rect"])
+        outer.append(dict(room=q["id"], floor=q["floor"], side=e["side"], axis=axis, wall=c, pos=lo + (hi - lo) * e["t"], w=e["w"], kind="entrance"))
+    for t in towers:
+        t["doors"] = []
+        for rname, fl, side in t["links"]:
+            q = by_id["%s@%d" % (rname, fl)]
+            axis, c, lo, hi = side_edge[side](q["rect"])
+            along = t["x"] if axis == "h" else t["y"]
+            outer.append(dict(room=q["id"], floor=fl, side=side, axis=axis, wall=c, pos=min(max(along, lo + 1.5), hi - 1.5), w=1.8, kind="tower", tower=t["name"]))
+    # --- walls: every edge of every room is a wall; shared edges once between two rooms (with their doors), the rest outer walls with windows
+    seen_pairs = set()
+    ext_runs = []
+    for q in rooms:
+        x0, y0, x1, y1 = q["rect"]
+        fl, z0, h = q["floor"], zs[q["floor"]], q["h"]
+        edges = [("S", "h", y0, x0, x1), ("N", "h", y1, x0, x1), ("W", "v", x0, y0, y1), ("E", "v", x1, y0, y1)]
+        for side, axis, c, lo, hi in edges:
+            covered = []
+            for a, b, s in pairs:
+                if q is a or q is b:
+                    o = b if q is a else a
+                    if s[0] == axis and abs(s[1] - c) < EPS and o["floor"] == fl:
+                        covered.append((s[2], s[3], o))
+            covered.sort(key=lambda t: t[0])
+            pos = lo
+            segs = []
+            for s0, s1, o in covered:
+                if s0 > pos + EPS:
+                    segs.append((pos, s0, None))
+                segs.append((max(s0, pos), s1, o))
+                pos = max(pos, s1)
+            if pos < hi - EPS:
+                segs.append((pos, hi, None))
+            for s0, s1, o in segs:
+                if o is None:
+                    ext_runs.append((q, side, axis, c, s0, s1))
+                else:
+                    key = tuple(sorted((q["id"], o["id"]))) + (round(s0, 3),)
+                    if key in seen_pairs:
+                        continue
+                    seen_pairs.add(key)
+                    ds = [d for d in doors if {d["a"], d["b"]} == {q["id"], o["id"]} and d["axis"] == axis and abs(d["wall"] - c) < 0.01]
+                    hh = min(q["h"], o["h"])                  # between rooms of different heights the wall is as high as the lower room (the taller room's upper walls come from the floor above)
+                    gaps = sorted([(d["pos"] - d["w"] / 2, d["pos"] + d["w"] / 2) for d in ds])
+                    cur = s0
+                    for ga, gb in gaps + [(s1 + 1, s1 + 2)]:
+                        ga, gb = max(ga, s0), min(gb, s1)
+                        if ga - cur > 0.05:
+                            L_ = ga - cur
+                            m = (cur + ga) / 2
+                            if axis == "h":
+                                _tc_box(soup, m, c, z0, L_ + TI, TI, hh, 0)
+                            else:
+                                _tc_box(soup, c, m, z0, TI, L_ + TI, hh, 0)
+                        cur = max(cur, gb)
+                    for d in ds:
+                        la, lb = d["pos"] - d["w"] / 2, d["pos"] + d["w"] / 2
+                        dh = 2.3 if d["w"] < 2.0 else 2.9
+                        if axis == "h":
+                            _tc_box(soup, (la + lb) / 2, c, z0 + dh, d["w"], TI, hh - dh, 0)
+                        else:
+                            _tc_box(soup, c, (la + lb) / 2, z0 + dh, TI, d["w"], hh - dh, 0)
+                        hinge = (la, c) if axis == "h" else (c, la)
+                        rot = 0.0 if axis == "h" else math.pi / 2
+                        layout["door_panels"].append([hinge[0], hinge[1], z0, rot, d["w"] - 0.06, dh - 0.05])
+                        layout["doors"].append(dict(floor=fl, a=d["a"], b=d["b"], x=(la + lb) / 2 if axis == "h" else c, y=c if axis == "h" else (la + lb) / 2, axis=axis, w=d["w"]))
+    # the outer walls: the wall-run builder, pointed windows every 3 m, doors from `outer`
+    for q, side, axis, c, s0, s1 in ext_runs:
+        fl, z0, h = q["floor"], zs[q["floor"]], q["h"]
+        L = s1 - s0
+        if L < 0.4:
+            continue
+        # a room's edge runs counter-clockwise with its inside on the left: S edge goes +x, E edge +y, N edge -x, W edge -y
+        if side == "S":
+            start, dirv = (s0, c), (1, 0)
+        elif side == "E":
+            start, dirv = (c, s0), (0, 1)
+        elif side == "N":
+            start, dirv = (s1, c), (-1, 0)
+        else:
+            start, dirv = (c, s1), (0, -1)
+        onorm = (dirv[1], -dirv[0])                                           # the outside is on the right of the run
+        wb = _WallRunBuilder(L + TO, h, TO, battlements=False, seed=int(seed) % 9999 + len(ext_runs) + int(c * 7), ruin=0.0, stones=0, plinth=(fl == 0))
+        mine = [o for o in outer if o["room"] == q["id"] and o["side"] == side and s0 - 0.01 <= o["pos"] <= s1 + 0.01]
+        along = lambda v: (v - s0) if side in ("S", "E") else (s1 - v)
+        for o in mine:
+            wb.add_opening(along(o["pos"]) + TO / 2, o["w"], 0.0, 3.0 if o["w"] < 2.0 else 3.6, 'arch')
+            if o["kind"] == "entrance":
+                hw = o["w"] / 2
+                layout["entrances"].append(dict(room=o["room"], x=(o["pos"] if side in ("S", "N") else c), y=(c if side in ("S", "N") else o["pos"]), side=side, w=o["w"]))
+        nw = max(1, int((L - 1.0) / 3.0))
+        if L > 2.0:
+            for j in range(nw):
+                xc = (j + 0.5) * L / nw
+                if any(abs(xc - along(o["pos"])) < o["w"] / 2 + 1.0 for o in mine):
+                    continue
+                wh = 2.6 if fl == 0 else 2.0
+                wb.add_opening(xc + TO / 2, 1.1, 1.0 if fl == 0 else 0.9, wh, 'pointed')
+                if p.get("facade", True):
+                    wz = z0 + (1.0 if fl == 0 else 0.9)
+                    wx, wy = start[0] + dirv[0] * xc + onorm[0] * (TO / 2 + 0.1), start[1] + dirv[1] * xc + onorm[1] * (TO / 2 + 0.1)
+                    sx_, sy_ = (1.9, 0.5) if axis == "h" else (0.5, 1.9)
+                    _tc_box(soup, wx, wy, wz - 0.18, sx_, sy_, 0.18, 1)                               # sill
+                    sx_, sy_ = (1.5, 0.3) if axis == "h" else (0.3, 1.5)
+                    _tc_box(soup, wx, wy, wz + wh + 0.05, sx_, sy_, 0.22, 1)                          # lintel
+                    for kx in (-1, 1):                                                                # jambs
+                        jx, jy = wx + dirv[0] * kx * 0.72, wy + dirv[1] * kx * 0.72
+                        _tc_box(soup, jx, jy, wz, 0.22 if axis == "h" else 0.3, 0.3 if axis == "h" else 0.22, wh, 1)
+        if p.get("facade", True):
+            # the cornice under the eaves (also the string course between the floors) and a pilaster at each end of a long run
+            cx_, cy_ = start[0] + dirv[0] * L / 2 + onorm[0] * 0.2, start[1] + dirv[1] * L / 2 + onorm[1] * 0.2
+            _tc_box(soup, cx_, cy_, z0 + h - 0.42, (L + 0.3) if axis == "h" else 1.2, 1.2 if axis == "h" else (L + 0.3), 0.3, 1)
+            if L > 6.0:
+                for e_ in (0.0, L):
+                    qx, qy = start[0] + dirv[0] * e_, start[1] + dirv[1] * e_
+                    _tc_box(soup, qx + onorm[0] * 0.1, qy + onorm[1] * 0.1, z0, 0.6 if axis == "h" else 0.9, 0.9 if axis == "h" else 0.6, h - 0.45, 1)
+        wb.geometry()
+        soup.append(wb.mb, rot=math.atan2(dirv[1], dirv[0]), offset=(start[0] - dirv[0] * TO / 2, start[1] - dirv[1] * TO / 2, z0))
+    # --- façade: blind bay windows on the garden rooms, dormers on the long roof slopes, a pediment on the porch
+    if p.get("facade", True):
+        bay_rects = []
+        def clear_of_rooms(bx0, by0, bx1, by1, floor):
+            return not any(o["floor"] == floor and o["rect"][0] < bx1 - 0.05 and o["rect"][2] > bx0 + 0.05 and o["rect"][1] < by1 - 0.05 and o["rect"][3] > by0 + 0.05 for o in rooms) \
+                and not any(math.hypot(min(max(t["x"], bx0), bx1) - t["x"], min(max(t["y"], by0), by1) - t["y"]) < t["R"] + 1.2 for t in towers) \
+                and not any(bx0 < r_[2] and bx1 > r_[0] and by0 < r_[3] and by1 > r_[1] for r_ in bay_rects)
+        for q, side, axis, c, s0, s1 in ext_runs:
+            if q["floor"] != 0 or q["kind"] not in ("drawing", "dining", "library", "billiard") or s1 - s0 < 6.0:
+                continue
+            if any(o["room"] == q["id"] and o["side"] == side for o in outer):
+                continue
+            m = (s0 + s1) / 2
+            out = {"S": (0, -1), "N": (0, 1), "W": (-1, 0), "E": (1, 0)}[side]
+            bw, bd = 3.8, 1.2
+            bx0, bx1 = (m - bw / 2, m + bw / 2) if axis == "h" else (c + min(0, out[0] * bd), c + max(0, out[0] * bd))
+            by0, by1 = (c + min(0, out[1] * bd), c + max(0, out[1] * bd)) if axis == "h" else (m - bw / 2, m + bw / 2)
+            if not clear_of_rooms(bx0, by0, bx1, by1, 0):
+                continue
+            bay_rects.append((bx0, by0, bx1, by1))
+            bh = q["h"] - 0.5
+            bcx, bcy = (bx0 + bx1) / 2, (by0 + by1) / 2
+            _tc_box(soup, bcx, bcy, 0.0, bx1 - bx0, by1 - by0, bh, 0)
+            _tc_box(soup, bcx + out[0] * 0.15, bcy + out[1] * 0.15, bh, bx1 - bx0 + 0.3, by1 - by0 + 0.3, 0.25, 1)
+            _tc_box(soup, bcx + out[0] * 0.2, bcy + out[1] * 0.2, bh + 0.25, bx1 - bx0 + 0.1, by1 - by0 + 0.1, 0.2, 2)
+            fx, fy = bcx + out[0] * (bd / 2 + 0.04), bcy + out[1] * (bd / 2 + 0.04)
+            for k in (-1, 0, 1):
+                kx, ky = fx + (k * 1.1 if axis == "h" else 0), fy + (k * 1.1 if axis == "v" else 0)
+                _tc_box(soup, kx, ky, 0.9, 0.8 if axis == "h" else 0.1, 0.1 if axis == "h" else 0.8, 2.3, 3)
+                _tc_box(soup, kx, ky, 0.8, 1.0 if axis == "h" else 0.2, 0.2 if axis == "h" else 1.0, 0.12, 1)
+        # dormers
+        if True:
+            for rf in plan.get("roofs", []):
+                x0, y0, x1, y1 = sh(rf["rect"])
+                W_, D_ = x1 - x0, y1 - y0
+                H_ = zs[rf["top"] + 1]
+                along_x = W_ >= D_
+                Lr, Sp = max(W_, D_), min(W_, D_)
+                if Sp < 8.0:
+                    continue
+                hs = Sp / 2 + 0.6
+                span = Lr - Sp if rf["kind"] == "HIP" else Lr - 3.0
+                nd = int(span / 6.5)
+                if nd < 1:
+                    continue
+                for j in range(nd):
+                    u = -span / 2 + (j + 0.5) * span / nd
+                    for sgn in (-1, 1):
+                        dd = hs * 0.5
+                        zb = H_ + rf["pitch"] * (hs - dd - 1.9) - 0.2
+                        hgt = 1.6 + rf["pitch"] * 2.0
+                        if along_x:
+                            px_, py_ = (x0 + x1) / 2 + u, (y0 + y1) / 2 + sgn * (dd + 0.9)
+                            rect_ = (px_ - 1.1, py_ - 1.0, px_ + 1.1, py_ + 1.0)
+                            outv = (0, sgn)
+                        else:
+                            px_, py_ = (x0 + x1) / 2 + sgn * (dd + 0.9), (y0 + y1) / 2 + u
+                            rect_ = (px_ - 1.0, py_ - 1.1, px_ + 1.0, py_ + 1.1)
+                            outv = (sgn, 0)
+                        if any(r2 is not rf and sh(r2["rect"])[0] + 0.3 < rect_[2] and sh(r2["rect"])[2] - 0.3 > rect_[0] and sh(r2["rect"])[1] + 0.3 < rect_[3] and sh(r2["rect"])[3] - 0.3 > rect_[1] for r2 in plan.get("roofs", [])):
+                            continue
+                        if any(math.hypot(min(max(t["x"], rect_[0]), rect_[2]) - t["x"], min(max(t["y"], rect_[1]), rect_[3]) - t["y"]) < t["R"] + 1.0 for t in towers):
+                            continue
+                        _tc_box(soup, px_, py_, zb, rect_[2] - rect_[0], rect_[3] - rect_[1], hgt, 0)
+                        rm2 = _TowerMesh()
+                        _house_roof(rm2, 2.0, 2.6, zb + hgt, 0.3, 1.0, 'GABLE', 0.25)
+                        soup.append(rm2, rot=math.pi / 2 if outv[0] == 0 else 0.0, offset=(px_, py_, 0.0))
+                        wx_, wy_ = px_ + outv[0] * 1.06, py_ + outv[1] * 1.06
+                        _tc_box(soup, wx_, wy_, zb + hgt - 1.9, 0.9 if outv[0] == 0 else 0.1, 0.1 if outv[0] == 0 else 0.9, 1.4, 3)
+                        _tc_box(soup, wx_ + outv[0] * 0.03, wy_ + outv[1] * 0.03, zb + hgt - 2.05, 1.2 if outv[0] == 0 else 0.2, 0.2 if outv[0] == 0 else 1.2, 0.15, 1)
+    # --- floors, ceilings, furniture and lamps per room
+    furniture_count = 0
+    for q in rooms:
+        x0, y0, x1, y1 = q["rect"]
+        fl, z0, h = q["floor"], zs[q["floor"]], q["h"]
+        cxm, cym = (x0 + x1) / 2, (y0 + y1) / 2
+        _tc_box(soup, cxm, cym, z0 - 0.4, x1 - x0, y1 - y0, 0.4, 1, TC_PAVING_SLOT if q["kind"] not in ("bedroom", "nursery", "drawing", "dining", "library") else 3)
+        above = any(o["floor"] == fl + 1 and o["rect"][0] < cxm < o["rect"][2] and o["rect"][1] < cym < o["rect"][3] for o in rooms) and not q.get("tall")
+        if not above:
+            _tc_box(soup, cxm, cym, z0 + h - 0.2, x1 - x0, y1 - y0, 0.2, 1)
+        my_doors = [d for d in layout["doors"] if q["id"] in (d["a"], d["b"])]
+        my_outer = [o for o in outer if o["room"] == q["id"]]
+        pts = [(d["x"], d["y"]) for d in my_doors] + [((o["pos"] if o["side"] in ("S", "N") else o["wall"]), (o["wall"] if o["side"] in ("S", "N") else o["pos"])) for o in my_outer]
+        inward = []
+        for px, py in pts:                                                # a point just inside the room in front of every door
+            ix = min(max(px, x0 + 0.7), x1 - 0.7)
+            iy = min(max(py, y0 + 0.7), y1 - 0.7)
+            inward.append((ix, iy))
+        specs, furn = [], []
+        if p["interiors"] and (x1 - x0) > 3.0 and (y1 - y0) > 3.0:
+            hall_like = q["kind"] in ("hall", "corridor")
+            for kind_, r_ in _man_pieces(q["kind"], x1 - x0, y1 - y0, rng):
+                if q["kind"] == "corridor":
+                    continue
+                for _ in range(14):
+                    if kind_ in ("chandelier", "rug", "dtable", "billiard", "ctable"):
+                        x, y = cxm + rng.uniform(-(x1 - x0) / 5, (x1 - x0) / 5), cym + rng.uniform(-(y1 - y0) / 5, (y1 - y0) / 5)
+                        ang = rng.choice((0.0, math.pi / 2))
+                    else:
+                        wall = rng.choice("SNWE")
+                        mar = max(0.5, r_) + 0.35
+                        if wall in "SN":
+                            x, y = rng.uniform(x0 + mar, x1 - mar), (y0 + mar if wall == "S" else y1 - mar)
+                            ang = math.pi / 2 if wall == "S" else -math.pi / 2
+                        else:
+                            x, y = (x0 + mar if wall == "W" else x1 - mar), rng.uniform(y0 + mar, y1 - mar)
+                            ang = 0.0 if wall == "W" else math.pi
+                    if r_ > 0 and (any(math.hypot(x - ix, y - iy) < r_ + 1.4 for ix, iy in inward) or any(math.hypot(x - f[0], y - f[1]) < r_ + f[2] + 0.2 for f in furn)):
+                        continue
+                    trial = furn + ([(x, y, r_)] if r_ > 0 else [])
+                    frac, ok = _man_flood(q["rect"], trial, inward or [(cxm, cym)])
+                    if ok and frac > 0.85:
+                        specs.append((kind_, x, y, ang))
+                        furn = trial
+                        break
+            for kind_, x, y, ang in specs:
+                _man_place_piece(soup, kind_, x, y, z0, ang, rng, z0 + h - 0.2)
+                furniture_count += 1
+        layout["lights"].append([cxm, cym, z0 + h - 0.9, 200.0 + 8.0 * math.sqrt(max(1.0, (x1 - x0) * (y1 - y0)))])
+        layout["rooms"].append(dict(id=q["id"], name=q["name"], floor=fl, kind=q["kind"], circ=bool(q.get("circ")), rect=q["rect"], furniture=[list(map(float, f)) for f in furn], inward=[list(i) for i in inward]))
+    layout["furniture"] = furniture_count
+    # --- stair towers: the plugin's round tower builder, a storey per floor, a doorway to every room it serves
+    for t in towers:
+        fls = sorted({fl for _, fl, _ in t["links"]})
+        top = max(fls) + 1
+        levels = zs[1:top + 1]
+        angs = []
+        for o in [o for o in outer if o.get("tower") == t["name"]]:
+            q = by_id[o["room"]]
+            angs.append(math.degrees(math.atan2((q["rect"][1] + q["rect"][3]) / 2 - t["y"], (q["rect"][0] + q["rect"][2]) / 2 - t["x"])))
+        a_door = angs[0] if angs else 0.0
+        tb = _TowerBuilder(t["R"], zs[top], 0.7, battlements=False, detail='MEDIUM', seed=int(seed) % 9999 + 5, interior=True, stair_width=1.4, stair_start_deg=a_door - 20.0,
+                           floor_levels=levels, stair_rail=True, lanterns=bool(p["lights"]))
+        for o in [o for o in outer if o.get("tower") == t["name"]]:
+            q = by_id[o["room"]]
+            ang = math.degrees(math.atan2((q["rect"][1] + q["rect"][3]) / 2 - t["y"], (q["rect"][0] + q["rect"][2]) / 2 - t["x"]))
+            tb.add_opening(ang, 1.8, zs[o["floor"]], 2.7, 'arch')
+        tb.geometry()
+        soup.append(tb.mb, offset=(t["x"], t["y"], 0.0))
+        _cone(soup, t["x"], t["y"], zs[top], t["R"] + 0.6, t["R"] * 2.8, 16, ROOF_SOURCE_SLOT)
+        _cone(soup, t["x"], t["y"], zs[top] + t["R"] * 2.8 - 0.2, 0.3, 2.4, 6, ROOF_SOURCE_SLOT)
+        for zl in tb.lantern_points:
+            layout["lights"].append([t["x"], t["y"], zl, 220.0])
+        layout["towers"].append(dict(name=t["name"], x=t["x"], y=t["y"], R=t["R"], levels=list(tb.levels), links=[[r, fl, s] for r, fl, s in t["links"]]))
+    # --- roofs: the house roof builder over each block, pinnacles on the gables and a few chimneys
+    for rf in plan.get("roofs", []):
+        x0, y0, x1, y1 = sh(rf["rect"])
+        W_, D_ = x1 - x0, y1 - y0
+        H_ = zs[rf["top"] + 1]
+        rm = _TowerMesh()
+        _house_roof(rm, W_ - 0.4, D_ - 0.4, H_, 0.4, rf["pitch"], 'GABLE', 0.6) if rf["kind"] == "GABLE" else _house_roof_hip(rm, W_ - 0.4, D_ - 0.4, H_, 0.4, rf["pitch"], 0.6)
+        soup.append(rm, rot=0.0 if W_ >= D_ else math.pi / 2.0, offset=((x0 + x1) / 2, (y0 + y1) / 2, 0.0))
+        rise = rf["pitch"] * (min(W_, D_) / 2.0 + 0.6)
+        for k in range(2 if W_ * D_ > 400 else 1):
+            ch = rng.uniform(-0.3, 0.3) * max(W_, D_)
+            cx_, cy_ = ((x0 + x1) / 2 + (ch if W_ >= D_ else 0.0), (y0 + y1) / 2 + (0.0 if W_ >= D_ else ch))
+            _tc_box(soup, cx_, cy_, H_ + rise * 0.5, 1.2, 1.2, rise * 0.9 + 1.8, 0)
+            _tc_box(soup, cx_, cy_, H_ + rise * 1.4 + 1.7, 1.5, 1.5, 0.25, 1)
+        layout["roofs"].append([x0, y0, x1, y1, H_])
+    # the porch in front of the main entrance
+    for e in layout["entrances"]:
+        if e["side"] == "S":
+            for sx in (-1, 1):
+                _tc_cyl(soup, e["x"] + sx * (e["w"] / 2 + 0.6), e["y"] - 2.6, 0.0, 0.3, 3.6, 8, 1)
+            _tc_box(soup, e["x"], e["y"] - 1.4, 3.6, e["w"] + 2.2, 3.4, 0.3, 1)
+            if p.get("facade", True):
+                hw_, y0_, y1_, zb_ = (e["w"] + 2.0) / 2, e["y"] - 3.0, e["y"] + 0.2, 3.9
+                ap = zb_ + hw_ * 0.6
+                for sg in (-1, 1):
+                    _tc_quad(soup, [(e["x"] + sg * hw_, y0_, zb_), (e["x"] + sg * hw_, y1_, zb_), (e["x"], y1_, ap), (e["x"], y0_, ap)], (-sg * 0.6, 0.0, 1.0), 2)
+                for yy, ny in ((y0_, -1.0), (y1_, 1.0)):
+                    _tc_quad(soup, [(e["x"] - hw_, yy, zb_), (e["x"] + hw_, yy, zb_), (e["x"], yy, ap)], (0.0, ny, 0.0), 1)
+            else:
+                _tc_box(soup, e["x"], e["y"] - 1.4, 3.9, e["w"] + 2.0, 3.2, 0.2, 2)
+            break
+    for e in layout["entrances"]:
+        hinge = (e["x"] - e["w"] / 2, e["y"]) if e["side"] in ("S", "N") else (e["x"], e["y"] - e["w"] / 2)
+        rot = 0.0 if e["side"] in ("S", "N") else math.pi / 2
+        layout["door_panels"].append([hinge[0], hinge[1], 0.0, rot, e["w"] - 0.08, 3.0 if e["w"] < 2.0 else 3.5])
+    layout["radius"] = math.hypot(*mansion_size(p)) / 2
+    return soup, layout
+
+
+def mansion_walk_check(layout):
+    """Every room walkable between its own doors (90 %+ of its free floor), every room reachable from the front door through the doors and stair towers.
+    Returns {'ok', 'rooms', 'unreached', 'blocked_rooms', ...}."""
+    from collections import deque
+    ids = [r["id"] for r in layout["rooms"]]
+    blocked_rooms = []
+    for r in layout["rooms"]:
+        pts = r["inward"]
+        if len(pts) >= 1:
+            frac, ok = _man_flood(r["rect"], r["furniture"], pts)
+            if not ok or frac < 0.9:
+                blocked_rooms.append((r["id"], round(frac, 2)))
+    adj = {i: set() for i in ids}
+    for d in layout["doors"]:
+        adj[d["a"]].add(d["b"])
+        adj[d["b"]].add(d["a"])
+    for t in layout["towers"]:
+        linked = ["%s@%d" % (rn, fl) for rn, fl, _ in t["links"]]
+        for a in linked:
+            for b in linked:
+                if a != b and a in adj and b in adj:
+                    adj[a].add(b)
+    start = [e["room"] for e in layout["entrances"]][:1]
+    seen, dq = set(start), deque(start)
+    while dq:
+        x = dq.popleft()
+        for y in adj.get(x, ()):
+            if y not in seen:
+                seen.add(y)
+                dq.append(y)
+    unreached = [i for i in ids if i not in seen]
+    levels_ok = all(len(t["levels"]) >= 2 for t in layout["towers"])
+    return {"ok": bool(start and not unreached and not blocked_rooms and levels_ok), "rooms": len(ids), "unreached": unreached, "blocked_rooms": blocked_rooms,
+            "doors": len(layout["doors"]), "towers": len(layout["towers"])}
+
+
+def _plan_build_mansion(context, node, world, seed, path):
+    where = "/".join(path)
+    try:
+        p = {**PLAN_MANSION_DEFAULTS, **(node.get("params") or {})}
+        soup, layout = _build_mansion(p, seed)
+    except PlanError as exc:
+        raise PlanError("%s: %s" % (where, exc))
+    style = plan_style_name(node.get("style"))
+    mesh = soup.to_mesh("Mansion_" + node["id"])
+    obj = bpy.data.objects.new(mesh.name, mesh)
+    context.scene.collection.objects.link(obj)
+    if style == 'medieval':
+        base = [get_style_material('FITTED'), get_style_material('AIRCRETE'), get_or_create_roof_material(p.get("roof_color") or 'SLATE'), get_or_create_wood_material('DARK')]
+    else:
+        base = list(plan_material_slots(style, 'PLAIN', p.get("roof_color"), True))
+    for mat_ in base + [get_or_create_leaf_material('GREEN'), _water_material(), get_style_material('FITTED'), _gold_material()]:
+        mesh.materials.append(mat_)
+    _add_viewport_color_attribute(mesh)
+    obj["gla_walk_layout"] = json.dumps(layout)
+    made = [obj]
+    for i, (hx, hy, hz, rot, w, h) in enumerate(layout["door_panels"]):
+        dm = _tc_door_mesh(w, h).to_mesh("ManDoor_%03d" % i)
+        dobj = bpy.data.objects.new("Door_Panel_%03d" % i, dm)
+        context.scene.collection.objects.link(dobj)
+        dobj.location = (hx, hy, hz)
+        dobj.rotation_euler = (0.0, 0.0, rot)
+        for m_ in (base[3], base[1], base[3], base[3]):
+            dm.materials.append(m_)
+        made.append(dobj)
+    if p["lights"]:
+        for i, (lx, ly, lz, energy) in enumerate(layout["lights"]):
+            ld = bpy.data.lights.new("ManLamp_%03d" % i, 'POINT')
+            ld.energy, ld.color, ld.shadow_soft_size = energy, (1.0, 0.76, 0.5), 0.3
+            lobj = bpy.data.objects.new("Lamp_%03d" % i, ld)
+            lobj.location = (lx, ly, lz)
+            context.scene.collection.objects.link(lobj)
+            made.append(lobj)
+    _plan_adopt_objects(context.scene, path, world, made)
+    return made
+
+
 PLAN_BUILDERS = {"tower": _plan_build_tower, "castle": _plan_build_castle,
                  "house": _plan_build_house, "chapel": _plan_build_house, "stable": _plan_build_house,
                  "barn": _plan_build_house, "well": _plan_build_well, "keep": _plan_build_keep,
                  "tree": _plan_build_prop, "barrel": _plan_build_prop, "crate": _plan_build_prop, "haystack": _plan_build_prop,
-                 "hut": _plan_build_hut, "terrace_city": _plan_build_terrace_city}
+                 "hut": _plan_build_hut, "terrace_city": _plan_build_terrace_city, "swan_castle": _plan_build_swan_castle, "mansion": _plan_build_mansion}
 
 
 # ------------------------------------------------------------------------------
@@ -15165,8 +16290,12 @@ def plan_new_example(scene, kind, existing_ids):
         return plan_node(unique("land"), "terrain", "terrain", transform=transform,
                          params={"biome": scene.wfc_plan_biome, "width": 240.0, "depth": 240.0},
                          children=[hamlet, farm, watch, path_])
+    if kind == 'MANSION':
+        return plan_node(unique("mansion"), "building", "mansion", transform=transform, params={})
+    if kind == 'SWAN':
+        return plan_node(unique("swan_castle"), "building", "swan_castle", transform=transform, params={})
     if kind == 'LAND':
-        city = plan_node("city", "building", "terrace_city", transform={"x": 0.0, "y": 0.0, "z": 0.0, "rot": 0.0}, params={})
+        city = plan_node("city", "building", "terrace_city", transform={"x": 0.0, "y": 0.0, "z": 0.0, "rot": 0.0}, params={"palace": "castle"})
         return plan_node(unique("hill_land"), "terrain", "terrain", transform=transform,
                          params={"biome": "mountain", "width": 800.0, "depth": 800.0, "resolution": 4.0, "pad_margin": 40.0, "pad_mode": "terrain",
                                  "heightmap": {"image": terrace_city_heightmap(), "height": 130.0, "mix": 0.9}, "rivers": "none"},
@@ -15328,7 +16457,7 @@ class OBJECT_OT_PlanCreate(bpy.types.Operator):
                               ('HOUSE', "House", ""), ('CHAPEL', "Chapel", ""), ('STABLE', "Stable", ""),
                               ('FORTRESS', "Fortress", ""), ('FARM', "Farm", ""), ('HAMLET', "Hamlet", ""),
                               ('STREET', "Street", ""), ('BLOCK', "Block", ""),
-                              ('HUT', "Hut", ""), ('HUTS', "Hut cluster", ""), ('TERRAIN', "Terrain", ""), ('TOWN', "Walled town", ""), ('CITY', "City", ""), ('TERRACES', "Terrace city", ""), ('TWIN', "Twin peaks", ""), ('LAND', "City on land", "")])
+                              ('HUT', "Hut", ""), ('HUTS', "Hut cluster", ""), ('TERRAIN', "Terrain", ""), ('TOWN', "Walled town", ""), ('CITY', "City", ""), ('TERRACES', "Terrace city", ""), ('TWIN', "Twin peaks", ""), ('LAND', "City on land", ""), ('SWAN', "Swan castle", ""), ('MANSION', "Mansion", "")])
 
     def execute(self, context):
         plan = plan_new_example(context.scene, self.kind, set(plan_list_ids()))
@@ -16733,7 +17862,7 @@ class VIEW3D_PT_GLAPlans(bpy.types.Panel):
         for kind, label in (('FARM', "Farm"), ('HAMLET', "Hamlet"), ('STREET', "Street"), ('BLOCK', "Block")):
             row.operator("object.gla_plan_create", text=label).kind = kind
         row = layout.row(align=True)
-        for kind, label in (('HUT', "Hut"), ('HUTS', "Huts"), ('TOWN', "Town"), ('CITY', "City"), ('TERRACES', "Terraces"), ('TWIN', "Twin"), ('LAND', "Land"), ('TERRAIN', "Terrain")):
+        for kind, label in (('HUT', "Hut"), ('HUTS', "Huts"), ('TOWN', "Town"), ('CITY', "City"), ('TERRACES', "Terraces"), ('TWIN', "Twin"), ('LAND', "Land"), ('SWAN', "Swan"), ('MANSION', "Mansion"), ('TERRAIN', "Terrain")):
             row.operator("object.gla_plan_create", text=label).kind = kind
         for plan_id in plan_list_ids():
             box = layout.box()

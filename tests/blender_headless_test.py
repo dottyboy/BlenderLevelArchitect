@@ -5365,7 +5365,7 @@ tw, td = addon.terrace_city_size(terr["params"])
 check("Terraces: the footprint is the smallest size that fits (auto width and depth)", abs((fp[2][0] - fp[0][0]) - tw) < 1e-6 and abs((fp[2][1] - fp[0][1]) - td) < 1e-6, "%s x %s" % (tw, td))
 res = addon.plan_build(bpy.context, terr)
 tobj = [o for o in bpy.data.objects if "TerraceCity" in o.name and o.type == 'MESH' and "Door" not in o.name]
-check("Terraces: it builds one mesh with seven materials (wall, trim, roof, wood, leaf, water, paving)", len(tobj) == 1 and len(tobj[0].data.materials) == 7, str(len(tobj)))
+check("Terraces: it builds one mesh with eight materials (wall, trim, roof, wood, leaf, water, paving, gold)", len(tobj) == 1 and len(tobj[0].data.materials) == 8, str(len(tobj)))
 check("Terraces: a detailed mesh (40000+ faces)", tobj and len(tobj[0].data.polygons) > 40000, str(tobj and len(tobj[0].data.polygons)))
 tlay = json.loads(tobj[0]["gla_walk_layout"])
 walk = addon.terrace_city_walk_check(tlay)
@@ -5486,6 +5486,100 @@ try:
     check("Terraces: too shallow for its tiers is refused", False)
 except addon.PlanError as exc:
     check("Terraces: too shallow for its tiers is refused", "too small" in str(exc), str(exc))
+
+# ==============================================================================
+print("\n--- Plans: the Swan castle ---")
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+swan = addon.plan_new_example(bpy.context.scene, 'SWAN', set())
+check("Swan castle: the example is a swan_castle building", swan["kind"] == "swan_castle" and swan["type"] == "building")
+sfp = addon.plan_footprint(swan)
+check("Swan castle: the footprint is its width x depth (44 x 30)", abs((sfp[2][0] - sfp[0][0]) - 44.0) < 1e-6 and abs((sfp[2][1] - sfp[0][1]) - 30.0) < 1e-6)
+addon.plan_build(bpy.context, swan)
+sobj = [o for o in bpy.data.objects if "SwanCastle" in o.name and o.type == 'MESH']
+check("Swan castle: it builds one big mesh (60000+ faces) with eight materials", len(sobj) == 1 and len(sobj[0].data.polygons) > 60000 and len(sobj[0].data.materials) == 8,
+      str(sobj and len(sobj[0].data.polygons)))
+slay = json.loads(sobj[0]["gla_walk_layout"])
+sw = addon.swan_castle_walk_check(slay)
+check("Swan castle: every one of the 16 halls is walkable from the stair tower, the lobby from the front door, the tower has a storey and doorways for every floor", sw["ok"] and sw["halls"] == 16, str(sw))
+check("Swan castle: the stair tower comes from the plugin's tower builder: one storey of 5.5 m per floor", slay["core_levels"] == [round(k * 5.5, 6) for k in range(9)] or all(abs(a_ - b_) < 1e-6 for a_, b_ in zip(slay["core_levels"], [k * 5.5 for k in range(9)])), str(slay["core_levels"]))
+check("Swan castle: the front door has two leaves with their origin on the hinge, every floor is lit", len([o for o in bpy.data.objects if "_Panel_" in o.name]) == 2 and len(slay["lights"]) >= 24)
+names = {rm["name"] for f_ in slay["floors"] for rm in f_["rooms"]}
+check("Swan castle: the floors are furnished in themes (banquet, ballroom, throne room, library, treasury, salon, gallery, bedrooms)", {"banquet", "ballroom", "throne", "library", "treasury", "salon", "gallery", "bedroom"} <= names, str(sorted(names)))
+for kw in ({"floors": 3}, {"floors": 10, "floor_h": 4.5}, {"width": 60.0, "depth": 40.0}, {"interiors": False}):
+    _, ly_ = addon._build_swan_castle({**addon.PLAN_SWAN_DEFAULTS, **kw}, 3)
+    check("Swan castle: %s is walkable too" % kw, addon.swan_castle_walk_check(ly_)["ok"])
+try:
+    addon.plan_build(bpy.context, addon.plan_node("narrow", "building", "swan_castle", params={"width": 30.0}))
+    check("Swan castle: a width outside 36..70 is refused", False)
+except addon.PlanError as exc:
+    check("Swan castle: a width outside 36..70 is refused", "width" in str(exc), str(exc))
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+egyc = addon.plan_node("egyc", "building", "swan_castle", params={}, style="egyptian")
+addon.plan_build(bpy.context, egyc)
+em2 = [o for o in bpy.data.objects if "SwanCastle" in o.name and o.type == 'MESH'][0]
+check("Swan castle: the Egyptian style gives it the pack's materials", em2.data.materials[0].name == addon.plan_material_slots("egyptian")[0].name)
+for sd_ in (1, 2, 3):
+    _, ctl = addon._build_terrace_city({**addon.PLAN_TERRACE_DEFAULTS, "palace": "castle"}, sd_)
+    cw = addon.terrace_city_walk_check(ctl)
+    check("Swan castle: palace = castle puts it on the summit of the terrace city (seed %d): the city is walkable to its door and the castle is walkable inside" % sd_,
+          cw["ok"] and len(ctl["castles"]) == 1 and addon.swan_castle_walk_check(ctl["castles"][0]["layout"])["ok"], str(cw))
+_, ctt = addon._build_terrace_city({**addon.PLAN_TERRACE_DEFAULTS, "palace": "castle", "peaks": 2, "tiers": 4}, 2)
+check("Swan castle: with two summits the first has the castle, the second the dome palace", len(ctt["castles"]) == 1 and addon.terrace_city_walk_check(ctt)["ok"] and len(ctt["palace_fronts"]) == 2)
+
+# ==============================================================================
+print("\n--- Plans: the mansion (a plan from data) ---")
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+mans = addon.plan_new_example(bpy.context.scene, 'MANSION', set())
+check("Mansion: the example is a mansion building with the Bear Wood plan", mans["kind"] == "mansion" and mans["params"].get("plan", "bearwood") == "bearwood")
+mw, md = addon.mansion_size(mans["params"])
+mfp = addon.plan_footprint(mans)
+check("Mansion: the footprint is the plan's extent plus a margin", abs((mfp[2][0] - mfp[0][0]) - mw) < 1e-6 and abs((mfp[2][1] - mfp[0][1]) - md) < 1e-6 and mw > 110, "%s x %s" % (mw, md))
+addon.plan_build(bpy.context, mans)
+mobj = [o for o in bpy.data.objects if "Mansion" in o.name and o.type == 'MESH' and "Door" not in o.name]
+check("Mansion: one big mesh (80000+ faces) with eight materials", len(mobj) == 1 and len(mobj[0].data.polygons) > 80000 and len(mobj[0].data.materials) == 8, str(mobj and len(mobj[0].data.polygons)))
+mlay = json.loads(mobj[0]["gla_walk_layout"])
+mw_ = addon.mansion_walk_check(mlay)
+check("Mansion: every one of the 48 rooms is reached from the front door through doors and stair towers, and every room can be walked between its doors", mw_["ok"] and mw_["rooms"] == 48, str(mw_))
+check("Mansion: three floors, public rooms round a top-lit gallery, a kitchen, bedrooms, nurseries, a library and a billiard room",
+      {r["floor"] for r in mlay["rooms"]} == {0, 1, 2} and {"gallery", "kitchen", "bedroom", "nursery", "library", "billiard", "dining", "servants"} <= {r["kind"] for r in mlay["rooms"]})
+check("Mansion: two round stair towers from the plugin's tower builder, serving three floors and two", sorted(len(t_["levels"]) for t_ in mlay["towers"]) == [3, 4], str([len(t_["levels"]) for t_ in mlay["towers"]]))
+check("Mansion: 40+ doors found from the plan, a door leaf object for each one and for the three entrances, and a lamp in every room",
+      len(mlay["doors"]) >= 40 and len(mlay["door_panels"]) == len(mlay["doors"]) + len(mlay["entrances"]) and len(mlay["lights"]) >= len(mlay["rooms"]),
+      "%d doors, %d panels, %d entrances" % (len(mlay["doors"]), len(mlay["door_panels"]), len(mlay["entrances"])))
+check("Mansion: the rooms are furnished (150+ pieces) and the door leaves are separate ..._Panel_NNN objects", mlay["furniture"] >= 150 and len([o for o in bpy.data.objects if "_Panel_" in o.name]) == len(mlay["door_panels"]))
+_fs_a, fl_a = addon._build_mansion(dict(addon.PLAN_MANSION_DEFAULTS, facade=False), 1)
+_fs_b, fl_b = addon._build_mansion(dict(addon.PLAN_MANSION_DEFAULTS), 1)
+check("Mansion: the façade (window frames, cornice, pilasters, bay windows, dormers, porch pediment) adds geometry and stays walkable; facade=False leaves it off",
+      len(_fs_b.faces) > len(_fs_a.faces) + 2000 and addon.mansion_walk_check(fl_b)["ok"] and addon.mansion_walk_check(fl_a)["ok"], "%d vs %d" % (len(_fs_b.faces), len(_fs_a.faces)))
+for sd_ in (2, 3, 4):
+    _, ml_ = addon._build_mansion(dict(addon.PLAN_MANSION_DEFAULTS), sd_)
+    check("Mansion: seed %d is walkable too" % sd_, addon.mansion_walk_check(ml_)["ok"])
+tiny = {"name": "tiny", "heights": [3.6, 3.2], "rooms": [
+    {"name": "hall", "floor": 0, "rect": [0, 0, 8, 8], "kind": "hall", "circ": True}, {"name": "salon", "floor": 0, "rect": [8, 0, 18, 8], "kind": "drawing"},
+    {"name": "landing", "floor": 1, "rect": [0, 0, 8, 8], "kind": "hall", "circ": True}, {"name": "bed", "floor": 1, "rect": [8, 0, 18, 8], "kind": "bedroom"}],
+    "towers": [{"name": "t", "x": -3.6, "y": 4.0, "R": 3.0, "links": [("hall", 0, "W"), ("landing", 1, "W")]}],
+    "entrances": [{"room": "hall", "side": "S", "t": 0.5, "w": 1.6}], "roofs": [{"rect": (0, 0, 18, 8), "top": 1, "kind": "GABLE", "pitch": 0.8}]}
+_, tl = addon._build_mansion({**addon.PLAN_MANSION_DEFAULTS, "plan": tiny}, 1)
+check("Mansion: your own plan (a dict of rooms) builds and is walkable: 4 rooms, 2 doors, 1 tower", addon.mansion_walk_check(tl)["ok"] and len(tl["rooms"]) == 4 and len(tl["doors"]) == 2 and len(tl["towers"]) == 1,
+      str(addon.mansion_walk_check(tl)))
+island = {**tiny, "rooms": tiny["rooms"] + [{"name": "island", "floor": 0, "rect": [30, 30, 38, 38], "kind": "storage"}]}
+_, il = addon._build_mansion({**addon.PLAN_MANSION_DEFAULTS, "plan": island}, 1)
+iw = addon.mansion_walk_check(il)
+check("Mansion: the walk check notices a room nobody can get to", not iw["ok"] and "island@0" in iw["unreached"], str(iw))
+try:
+    addon.plan_build(bpy.context, addon.plan_node("nope", "building", "mansion", params={"plan": "versailles"}))
+    check("Mansion: an unknown plan name is refused", False)
+except addon.PlanError as exc:
+    check("Mansion: an unknown plan name is refused", "versailles" in str(exc), str(exc))
 
 # ==============================================================================
 print()

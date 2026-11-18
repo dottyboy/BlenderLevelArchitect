@@ -271,6 +271,26 @@ The base is closed by a **crenellated wall** with towers and a gate across the p
 Parameters: `tiers` (2-7), `peaks` (1-2), `flights` (1-3 per terrace), `irregular`, `shapes`, `width` / `depth` (0 = the smallest that fits), `rise`, `density` (buildings), `bushes`, `trees`, `interiors` (share
 of houses with a room, 0..1), `ruins`, `fountains`, `village`, `waterfalls`, `walls`, `lights` (a warm point light in every room), `roof_color`. `terrace_city_size(params)` returns the width and depth that fit (more irregular = larger).
 
+### The Swan castle
+
+The **Swan** button builds a tall castle in the manner of a "Swan Lake" cutaway, put together from the plugin's own parts: a **round stair tower in the middle** (the round tower builder, with a floor and
+one turn of spiral stairs per storey and a lantern under every floor), **outer walls with tall pointed windows** and an arched front door (the wall-run builder of the village houses), **gable roofs** over the two halls (the house roof
+builder), a ribbed **dome over the stair tower** and **four corner turrets with spires** (more round towers). Behind the front door is a lobby with a fountain; on every floor there is a great hall on each side of the stair tower, joined to it
+by a doorway, furnished in a theme — banquet hall, ballroom, throne room, library, treasury, salon, gallery and then bedrooms — and lit. Parameters: `floors` (3-10), `floor_h` (4.5-6.5 m), `width` (36-70),
+`depth` (24-50), `interiors`, `spires`, `lights`, `roof_color`, and the node's `style`. The front door is two separate `..._Panel_NNN` leaves. `swan_castle_walk_check(layout)` walks every hall from the stair tower's doorway, the lobby from the front
+door, and checks the tower has a storey and a doorway for every floor. In a terrace city, `palace: "castle"` puts the Swan castle on the first summit instead of the dome palace (the **Land** example does).
+
+### The mansion — a house from a floor plan
+
+The **Mansion** button builds a big country house from a **floor plan given as data**, the way a plan like the Bear Wood one is drawn: rooms (a name, a floor, a rectangle in metres, a kind) on up to three floors.
+Walls come from the village houses' wall-run builder (pointed windows every 3 m, arched doors), floors and ceilings from the rooms' rectangles, gable and hip roofs from the house roof builders with chimneys, and the
+**doors are found from the plan**: circulation rooms (`circ: true`: halls, corridors, galleries) join each other, every other room joins the circulation room it touches (or a room already joined), wide archways open between halls,
+and the plan can ask for more (`extra_doors`). **Round stair towers** (the plugin's tower builder: a storey and a turn of spiral stairs per floor) are put where the plan says (`towers`, with the rooms and floors they serve),
+and the plan's `entrances` become doors to the outside with a porch on the south side. Rooms are furnished by `kind` (hall, gallery, dining, drawing, library, billiard, kitchen, servants, bedroom, nursery, bath, storage, corridor) —
+a piece stays only if the room remains walkable — and lit; every door leaf is a separate `..._Panel_NNN` object. `params.plan` is `"bearwood"` (the built-in plan: public rooms round a top-lit picture gallery, a stair hall with a tower,
+a long servants' wing, 48 rooms on three floors) or **your own dict** `{"heights": [4.4, 3.8], "rooms": [{"name", "floor", "rect": [x0, y0, x1, y1], "kind", "circ", "tall"}], "towers": [...], "entrances": [...], "extra_doors": [...], "roofs": [...]}`
+(`tall: true` makes a room two floors high, like the gallery). `mansion_walk_check(layout)` proves every room can be reached from the front door through doors and stair towers and every room can be walked between its doors.
+
 Doors are separate objects named `..._Panel_NNN` with their origin on the hinge, the convention game engines already swing. Everything is walkable by
 construction and `terrace_city_walk_check(layout)` proves it on a height grid (steps of at most two risers): from the gate to every palace door, over the viaduct, into every
 furnished room and over 97 % of the free terrace cells. The layout is stored on the mesh object as `gla_walk_layout` (JSON). Export as glTF and give the mesh a collision shape.

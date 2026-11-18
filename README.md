@@ -126,6 +126,25 @@ viaduct, **Land** puts the city in a heightmap terrain. A built-in height-grid w
 
 <p align="center"><img src="docs/img/terrace_twin.png" alt="Two summits in the Egyptian style joined by a viaduct" width="445"> <img src="docs/img/terrace_land.png" alt="The city in a heightmap valley with mountains behind" width="445"></p>
 
+### The Swan castle
+
+<p align="center"><img src="docs/img/swan_castle.png" alt="A tall castle with a round stair tower in the middle, pointed windows on every floor, an arched front door, gable roofs and four corner turrets with spires" width="430"> <img src="docs/img/swan_hall.png" alt="The banquet hall inside: long tables with chairs, gold chandeliers, pointed windows" width="640"></p>
+
+The **Swan** button builds a tall castle in the manner of a "Swan Lake" cutaway out of the plugin's own parts: a **round stair tower** in the middle (the round tower builder: a floor and a turn of spiral stairs per storey), **outer walls** with tall pointed
+windows from the village houses' wall-run builder, **gable roofs** from the house roof builder, a **dome** over the stair tower and four **corner turrets** with spires. Behind the arched front door is a lobby with a fountain, and every floor has
+a great hall on each side of the stair tower — banquet hall, ballroom, throne room, library, treasury, salon, gallery, then bedrooms — furnished and lit. A built-in walk check proves every hall can be reached from the stair tower. `palace: "castle"` puts it on
+the summit of a terrace city (the **Land** example does), which is how the picture above the Land section was made:
+
+<p align="center"><img src="docs/img/terrace_land.png" alt="A walled terraced city with the Swan castle on its summit, in a valley of forested hills with mountains behind" width="900"></p>
+
+### A mansion from a floor plan
+
+<p align="center"><img src="docs/img/mansion.png" alt="A long Victorian country house with two round stair towers, a servants' wing, pointed windows, gable roofs and chimneys" width="640"> <img src="docs/img/mansion_gallery.png" alt="The two-storey picture gallery inside: a ring of clerestory windows, chandeliers, busts and frames" width="400"></p>
+
+The **Mansion** button builds a country house from a **floor plan given as data** — rooms with a name, a floor, a rectangle and a kind — the way the plan of Bear Wood is drawn. The built-in plan `bearwood` follows its arrangement:
+public rooms round a two-storey picture gallery, a stair hall with a tower, bedrooms and nurseries upstairs, a long servants' wing, 48 rooms on three floors. Doors are found from the plan, the stair towers come from the plugin's round tower builder,
+rooms are furnished by kind and lit, and a built-in check proves every room can be reached from the front door. Pass your own plan (a dict of rooms) to build any other house.
+
 ### Seven style packs and a mix
 
 <p align="center"><img src="docs/img/styles_sheet.png" alt="The same village in Medieval, Egyptian, Mexican, Chinese, Inca, Futuristic and Alpine styles, and a mixed street" width="900"></p>

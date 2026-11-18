@@ -3,6 +3,24 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.59.0 — plans: the mansion (a house from a floor plan)
+
+- **`mansion` building** (**Mansion** button): a big country house built from a floor plan given as data — rooms with a name, floor, rectangle and kind on up to three floors. Walls and pointed windows from the wall-run builder,
+  gable / hip roofs and chimneys from the house roof builders, **doors found from the plan** (circulation rooms join each other, every other room joins the one it touches, wide archways between halls, extra doors from the plan),
+  **stair towers** from the round tower builder linked to the rooms and floors they serve, entrances with a porch, rooms furnished by kind (a piece stays only if the room remains walkable) and lit, door leaves as separate objects.
+- **The built-in plan `bearwood`** follows the arrangement of the Bear Wood plan: public rooms (drawing room, morning room, library, dining room, billiard room) round a two-storey picture gallery, a stair hall with a tower, bedrooms,
+  nurseries and dressing rooms above, and a long servants' wing (kitchens, servants' hall, pantries, maids' rooms) with its own stair tower — 48 rooms, 47 doors, 2 towers. `params.plan` also takes your own dict, so any plan can be typed in or traced.
+- **Façade** (`facade`, on by default): window sills, jambs and lintels, a cornice under the eaves, pilasters on long runs, blind bay windows on the garden rooms, gabled dormers on the long roof slopes (kept clear of other roofs and towers) and a pediment over the porch. Decoration only — walkability is unchanged.
+- **`mansion_walk_check`**: every room reached from the front door through doors and stair towers, every room walkable between its own doors; the tests run it for many seeds, a tiny custom plan and a plan with an unreachable room.
+
+## 0.58.0 — plans: the Swan castle
+
+- **`swan_castle` building** (**Swan** button, `palace: "castle"` in a terrace city): a tall castle combined from the plugin's own builders — the **round tower builder** as the central stair tower (a storey and a turn of
+  spiral stairs per floor, lanterns), the **wall-run builder** of the village houses for the outer walls (tall pointed windows, an arched door), the **house roof builder** for the gable roofs, more round towers as corner turrets with spires,
+  the terrace city's domes and furniture, the plugin's barrel props. A lobby with a fountain, a great hall on each side of the stair tower on every floor (banquet, ballroom, throne room, library, treasury, salon, gallery, bedrooms), all lit.
+- **`swan_castle_walk_check`**: every hall is walked from its doorway at the stair tower, the lobby from the front door, and the tower's storeys and doorways are checked against the floors; the tests run it for many sizes and inside the terrace city.
+- **Terrace city + castle**: `palace: "castle"` builds it on the first summit (the summit is drawn at least 27 m across); the **Land** example does. The city mesh has a gold material (slot 7).
+
 ## 0.57.0 — plans: the terraced hill city
 
 - **`terrace_city` building** (**Terraces** and **Twin** buttons): a stepped hill with terraces all round it — each a ring round the next — joined by one to three flights of real steps (`flights`) per terrace, on different
