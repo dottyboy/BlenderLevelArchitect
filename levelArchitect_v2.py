@@ -33,7 +33,7 @@ from bpy_extras.io_utils import ExportHelper, ImportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 61, 0),
+    "version": (0, 62, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -15280,6 +15280,8 @@ def _rock_material(kind):
     dim = lambda c, f: tuple(v * f for v in c)
     if part[0] == "CARVED":
         dark, mid, light, strata, grain, bump = dim(tone[1], 0.6), dim(tone[2], 0.75), dim(tone[2], 1.0), (0.5, 0.5, 2.0), 14.0, 0.12
+    elif part[0] == "GRASS":
+        dark, mid, light, strata, grain, bump = (0.05, 0.10, 0.03), (0.15, 0.26, 0.07), (0.30, 0.38, 0.13), (1.0, 1.0, 1.0), 7.0, 0.45
     elif part[0] == "GROUND":
         dark, mid, light, strata, grain, bump = (0.10, 0.08, 0.05), (0.26, 0.20, 0.12), (0.40, 0.32, 0.20), (1.0, 1.0, 1.0), 9.0, 0.35
     else:
@@ -15621,6 +15623,8 @@ def _rc_mountain(dm, seed):
         m = _rc_smooth(dist_city(x, y) / 10.0)
         amp = 1.5 + 0.1 * base
         n = (_rc_fbm(x * 0.035, y * 0.035, 3.7, seed, 4) - 0.5) * 2.0 * amp + (_rc_noise(x * 0.17, y * 0.17, 1.1, seed + 3) - 0.5) * 1.2
+        ridge = 1.0 - abs(2.0 * _rc_fbm(x * 0.06, y * 0.06, 9.1, seed + 9, 3) - 1.0)          # crags and ridges, stronger the higher it gets
+        n += (ridge - 0.5) * 7.0 * min(1.0, base / 25.0)
         return max(0.0, base + m * n * (1.0 if base > 0.4 else base / 0.4))
     N.boundary = lambda x, y: prof(y) * (1.0 - _rc_smooth((abs(x) - wc) / fl))
     N.x_extent = wc + fl
@@ -15652,7 +15656,7 @@ def _rc_natural_mesh(soup, N, dm, sd):
                     vx, vy, vz = pts[3][0] - pts[0][0], pts[3][1] - pts[0][1], pts[3][2] - pts[0][2]
                     nz = ux * vy - uy * vx
                     nl = math.sqrt((uy * vz - uz * vy) ** 2 + (uz * vx - ux * vz) ** 2 + nz * nz) or 1.0
-                    soup.poly('nat', pts, [(pt[0] / 6.0, pt[1] / 6.0) for pt in pts], (0.0, 0.0, 1.0), 2 if nz / nl > 0.82 else 0, smooth=True)
+                    soup.poly('nat', pts, [(pt[0] / 6.0, pt[1] / 6.0) for pt in pts], (0.0, 0.0, 1.0), (7 if nz / nl > 0.9 else 2) if nz / nl > 0.82 else 0, smooth=True)
     for k in range(dm["L"]):
         ya, yz = (y0 if k == 0 else yb[k - 1]), yb[k]
         ext = {-wl[j] for j in (k - 1, k, k + 1) if 0 <= j < dm["L"]} | {wr[j] for j in (k - 1, k, k + 1) if 0 <= j < dm["L"]}
@@ -15691,6 +15695,32 @@ def _rc_cave(soup, cx, yf, cyc, R, zk, rng, seed):
     for i in range(m):
         a, b = ring[i], ring[(i + 1) % m]
         soup.poly('cavef', [(a[0], a[1], zk), (b[0], b[1], zk), (cx, cyc, zk)], [(0, 0), (1, 0), (0.5, 1)], (0.0, 0.0, 1.0), 2)
+    # stalactites from the ceiling, stalagmites and a pool on the floor
+    obst = []
+    for i in range(8):
+        ang = rng.uniform(0, 6.28)
+        rr_ = rng.uniform(0.2, 0.75) * R
+        sx_, sy_ = cx + rr_ * math.cos(ang), cyc + rr_ * math.sin(ang)
+        zce = zc + (hc - zc) * (1.0 - min(1.0, rr_ / R))
+        rb, ln = rng.uniform(0.2, 0.4), rng.uniform(0.5, 1.2)
+        for q in range(6):
+            a0, a1 = 2 * math.pi * q / 6, 2 * math.pi * (q + 1) / 6
+            soup.poly('stal', [(sx_ + rb * math.cos(a0), sy_ + rb * math.sin(a0), zce), (sx_ + rb * math.cos(a1), sy_ + rb * math.sin(a1), zce), (sx_, sy_, zce - ln)],
+                      [(0, 0), (1, 0), (0.5, 1)], (math.cos((a0 + a1) / 2), math.sin((a0 + a1) / 2), -0.4), 0, smooth=True)
+    for i in range(3):
+        ang = rng.uniform(0, 6.28)
+        rr_ = rng.uniform(0.45, 0.8) * R
+        sx_, sy_ = cx + rr_ * math.cos(ang), cyc + rr_ * math.sin(ang)
+        if sy_ < cyc - 0.55 * R or (abs(sx_ - cx) < 0.7 * R + 0.5 and abs(sy_ - cyc) < 0.7 * R + 0.5 and R < 4.0):
+            continue
+        rb = rng.uniform(0.25, 0.45)
+        _cone(soup, sx_, sy_, zk, rb, rng.uniform(0.7, 1.5), 6, 0)
+        obst.append((sx_, sy_, rb + 0.1))
+    if R >= 4.0:
+        px_, py_ = cx + R * 0.15, cyc + R * 0.1
+        _tc_quad(soup, [_tc_pt(px_, py_, zk + 0.03, 1.1, 2 * math.pi * q / 10) for q in range(10)], (0, 0, 1), TC_WATER_SLOT)
+        obst.append((px_, py_, 1.2))
+    return obst
 
 
 def _build_rock_city(p, seed):
@@ -15785,7 +15815,7 @@ def _build_rock_city(p, seed):
                 fx += fw + rng.uniform(2.5, 6.0)
                 continue
             is_cave = rng.random() < 0.3 * float(p.get("caves", 0.5)) and k + 1 < L
-            kind = "cave" if is_cave else rng.choice(("temple", "house", "tomb", "tomb", "sealed"))
+            kind = "cave" if is_cave else rng.choice(("temple", "house", "tomb", "tomb", "portico", "sealed"))
             if is_cave:
                 fw = rng.uniform(9.0, 11.0)
                 if fx + fw > wr[k] - 4.0:
@@ -15793,7 +15823,7 @@ def _build_rock_city(p, seed):
                 if fx + fw + 1.0 > zone[0] and fx - 1.0 < zone[1]:
                     fx = zone[1] + 1.0
                     continue
-            fh = min(rk - 1.0, rk - 2.0 if kind == "temple" else rk - 1.0)
+            fh = min(rk - 1.0, rk - 2.0 if kind in ("temple", "portico") else rk - 1.0)
             fxm = fx + fw / 2 + rng.uniform(-0.6, 0.6)
             dw = rng.uniform(1.7, 2.3)
             dh = 3.0 if kind != "tomb" else 3.3
@@ -15804,7 +15834,7 @@ def _build_rock_city(p, seed):
             avail = rd
             rd = max(3.5, min(rd, rng.uniform(5.0, 9.0)))
             rx0, rx1 = fx + 0.9, fx + fw - 0.9
-            if kind == "temple":
+            if kind in ("temple", "portico"):
                 wins = [(fxm - fw * 0.3 - 0.5, fxm - fw * 0.3 + 0.5, 1.0, 2.4), (fxm + fw * 0.3 - 0.5, fxm + fw * 0.3 + 0.5, 1.0, 2.4)]
             elif kind == "house":
                 wins = [(fxm - fw * 0.3 - 0.5, fxm - fw * 0.3 + 0.5, 1.0, 2.4), (fxm + fw * 0.3 - 0.5, fxm + fw * 0.3 + 0.5, 1.0, 2.4),
@@ -15822,9 +15852,10 @@ def _build_rock_city(p, seed):
                     flats.append((fxm - 2.6, fxm + 2.6, zk, zk + 4.4, yf, 0))
                     holes.append((fxm - 1.5, fxm + 1.5, zk, zk + 3.4))
                     cyc = yf + 3.0 + 0.3 * cR + 0.7 * cR
-                    _rc_cave(soup, fxm, yf, cyc, cR, zk, rng, sd + int(fxm * 3) + k)
+                    cobst = _rc_cave(soup, fxm, yf, cyc, cR, zk, rng, sd + int(fxm * 3) + k)
                     layout["rooms"].append({"rect": [fxm - 1.5, yf, fxm + 1.5, cyc - 0.7 * cR], "z": zk, "door": [fxm - 1.5, fxm + 1.5], "wall": ybl, "furn": [], "kind": "cave"})
-                    layout["rooms"].append({"rect": [fxm - 0.7 * cR, cyc - 0.7 * cR, fxm + 0.7 * cR, cyc + 0.7 * cR], "z": zk, "door": [fxm - 1.5, fxm + 1.5], "wall": ybl, "furn": [], "kind": "cave"})
+                    layout["rooms"].append({"rect": [fxm - 0.7 * cR, cyc - 0.7 * cR, fxm + 0.7 * cR, cyc + 0.7 * cR], "z": zk, "door": [fxm - 1.5, fxm + 1.5], "wall": ybl,
+                                            "furn": [[ox_, oy_, 0.0, orr, orr] for ox_, oy_, orr in cobst if abs(ox_ - fxm) < 0.7 * cR and abs(oy_ - cyc) < 0.7 * cR], "kind": "cave"})
                     lights.append([fxm, cyc, zk + 3.0, 200.0])
                     layout["throats"].append([fxm - 1.5, ybl - 0.3, fxm + 1.5, yf + 0.3, zk])
                     layout["facades"] += 1
@@ -15839,8 +15870,24 @@ def _build_rock_city(p, seed):
                 _tc_box(soup, px, yf - 0.25, zk, 0.7, 0.5, fh - 1.2, 1)
             _tc_box(soup, fx + fw / 2, yf - 0.3, zk + fh - 1.2, fw + 0.2, 0.6, 0.7, 1)
             _tc_box(soup, fx + fw / 2, yf - 0.45, zk + fh - 0.5, fw + 0.7, 0.9, 0.5, 1)
-            if kind == "temple":
-                _rc_pediment(soup, fx + fw / 2, yf - 0.1, zk + fh, fw + 0.7, 1.3, 0.8)
+            if kind in ("temple", "portico"):
+                _rc_pediment(soup, fx + fw / 2, yf - (1.9 if kind == "portico" else 0.1), zk + fh, fw + 0.7, 1.3, 0.8 if kind == "temple" else 2.6)
+            if kind == "portico":                                                  # free-standing columns carrying the front
+                _tc_box(soup, fx + fw / 2, yf - 1.0, zk + fh - 1.2, fw + 0.2, 2.0, 0.7, 1)
+                for cxx in (fx + 0.9, fxm - dw / 2 - 1.2, fxm + dw / 2 + 1.2, fx + fw - 0.9):
+                    _tc_cyl(soup, cxx, yf - 1.7, zk, 0.38, fh - 1.2, 10, 1)
+                    circles.append([cxx, yf - 1.7, 0.5, zk])
+            if kind == "tomb" and not sealed:                                      # a pointed arch round the door
+                aa, rr_ = dw / 2 + 0.45, dh + 0.7
+                crv = [(fxm + u, zk + z) for u, z in _ac_curve(aa, rr_, 8)]
+                for pa, pb in zip(crv, crv[1:]):
+                    _ac_beam(soup, yf - 0.3, pa, pb, 0.3, 0.55, 1)
+            if not sealed:                                                         # a lantern on each side of the door
+                for sx_ in (-1.0, 1.0):
+                    lx_ = fxm + sx_ * (dw / 2 + 0.9)
+                    _tc_box(soup, lx_, yf - 0.3, zk + 2.2, 0.22, 0.22, 0.35, 1)
+                    _cone(soup, lx_, yf - 0.3, zk + 2.55, 0.18, 0.2, 6, ROOF_SOURCE_SLOT)
+                lights.append([fxm, yf - 0.8, zk + 2.4, 70.0])
             layout["facades"] += 1
             if sealed:
                 _tc_box(soup, fxm, yf - 0.15, zk, dw + 0.6, 0.3, dh + 0.3, 1)
@@ -15866,8 +15913,20 @@ def _build_rock_city(p, seed):
                 furn.append([(rx0 + rx1) / 2, ry1 - 0.5, 0.0, bw / 2, 0.45])
                 if rx1 - rx0 > 5.0 and rd > 5.5:
                     tx_, ty_ = (rx0 + rx1) / 2 + rng.uniform(-0.8, 0.8), yf + rd * 0.58
-                    _tc_box(soup, tx_, ty_, zk, 1.6, 0.9, 0.8, 3)
-                    furn.append([tx_, ty_, 0.0, 0.8, 0.45])
+                    if kind == "tomb":                                              # a sarcophagus with a lid
+                        _tc_box(soup, tx_, ty_, zk, 2.2, 0.95, 0.75, 1)
+                        _tc_box(soup, tx_, ty_, zk + 0.75, 2.4, 1.1, 0.2, 1)
+                        furn.append([tx_, ty_, 0.0, 1.2, 0.55])
+                    else:
+                        _tc_box(soup, tx_, ty_, zk, 1.6, 0.9, 0.8, 3)
+                        furn.append([tx_, ty_, 0.0, 0.8, 0.45])
+                if rx1 - rx0 > 6.5 and rd > 6.2 and kind != "tomb":                # shelves along the side walls
+                    for sxs in (rx0 + 0.3, rx1 - 0.3):
+                        _tc_box(soup, sxs, yf + rd * 0.5, zk, 0.5, rd * 0.4, 1.9, 3)
+                        furn.append([sxs, yf + rd * 0.5, 0.0, 0.3, rd * 0.2])
+                for bxx in ((rx0 + 0.6, rx1 - 0.6) if rd > 5.0 else ()):            # barrels in the back corners
+                    _tc_cyl(soup, bxx, ry1 - 1.6, zk, 0.4, 0.9, 10, 3)
+                    furn.append([bxx, ry1 - 1.6, 0.0, 0.45, 0.45])
             lights.append([(rx0 + rx1) / 2, yf + rd * 0.5, zc - 0.5, 160.0])
             layout["door_panels"].append([fxm - dw / 2, yf, zk, 0.0, dw - 0.05, dh - 0.05])
             layout["rooms"].append({"rect": [rx0, yf, rx1, ry1], "z": zk, "door": [fxm - dw / 2, fxm + dw / 2], "wall": ybl, "furn": furn, "kind": kind})
@@ -15945,6 +16004,37 @@ def _build_rock_city(p, seed):
             else:
                 _tc_bush(soup, tx_, ty_, zs[k], rng.uniform(0.7, 1.2), rng)
                 circles.append([tx_, ty_, 0.9, zs[k]])
+    # --- a fountain on most ledges, flags along the front lips
+    for k in range(L):
+        ya_k = (y0 if k == 0 else yb[k - 1])
+        for _ in range(8):
+            fxx = rng.uniform(-wl[k] * 0.6, wr[k] * 0.6)
+            fyy = (ya_k + yb[k]) / 2.0 + rng.uniform(-1.5, 1.5)
+            if k == 0 and pad and pad[0] - 6.0 < fxx < pad[2] + 6.0:
+                continue
+            if rng.random() > 0.8 or any(c[3] == zs[k] and math.hypot(fxx - c[0], fyy - c[1]) < c[2] + 3.2 for c in circles):
+                continue
+            _tc_fountain(soup, fxx, fyy, zs[k], 1.8)
+            circles.append([fxx, fyy, 2.1, zs[k]])
+            lights.append([fxx, fyy, zs[k] + 2.8, 120.0])
+            break
+        sagf_f = _rc_sag(cb[k - 1], -wl[k - 1], wr[k - 1]) if k > 0 else (lambda x: 0.0)
+        fgx = -wl[k] + 9.0
+        while fgx < wr[k] - 8.0:
+            gap_ = None
+            if k == 0 and pad:
+                gap_ = (pad[0] - 2.0, pad[2] + 2.0)
+            elif k == 0:
+                gap_ = (-4.5, 4.5)
+            elif k > 0:
+                st_ = layout["stairs"][k - 1]
+                gap_ = (st_["x0"] - 2.0, st_["x1"] + 2.0)
+            if not (gap_ and gap_[0] < fgx < gap_[1]):
+                fy_ = ya_k + sagf_f(fgx) + 1.6
+                _tc_cyl(soup, fgx, fy_, zs[k], 0.09, 3.4, 6, 3)
+                _tc_box(soup, fgx + 0.02, fy_ + 0.5, zs[k] + 1.9, 0.04, 1.0, 1.3, 1)
+                circles.append([fgx, fy_, 0.25, zs[k]])
+            fgx += rng.uniform(13.0, 19.0)
     # --- boulders and scrub on the mountain itself
     for _ in range(int(40 + 0.5 * dm["wmax"])):
         bx_, by_ = rng.uniform(-N.x_extent, N.x_extent), rng.uniform(y0 - 10.0, dm["y_back"] + dm["tail"] * 0.8)
@@ -15953,6 +16043,18 @@ def _build_rock_city(p, seed):
         bz = N(bx_, by_)
         if bz > 0.5:
             _rc_blob(soup, bx_, by_, bz - 0.4, rng.uniform(1.0, 3.2), rng.uniform(1.0, 3.0), rng.uniform(0.8, 2.4), sd + int(bx_ * 3), 0, 4, 8)
+    for _ in range(int(120 + 1.2 * dm["wmax"])):                                    # scrub and a few trees on the gentle slopes
+        bx_, by_ = rng.uniform(-N.x_extent, N.x_extent), rng.uniform(y0 + 2.0, dm["y_back"] + dm["tail"] * 0.7)
+        if any(-wl[k] - 4.0 < bx_ < wr[k] + 4.0 and (y0 if k == 0 else yb[k - 1]) - 4.0 < by_ < yb[k] + 4.0 for k in range(L)):
+            continue
+        bz = N(bx_, by_)
+        if bz < 0.6 or max(abs(N(bx_ + 2.0, by_) - bz), abs(N(bx_, by_ + 2.0) - bz)) / 2.0 > 0.55:
+            continue
+        if rng.random() < 0.3:
+            tp = {"height": rng.uniform(4.0, 7.5), "crown": 'ROUND' if rng.random() < 0.4 else 'CONE', "leaf": 'GREEN'}
+            soup.append(_build_tree_mesh(tp, rng.randint(1, 999999)), rot=rng.uniform(0, 6.28), offset=(bx_, by_, bz - 0.2))
+        else:
+            _tc_bush(soup, bx_, by_, bz - 0.2, rng.uniform(0.7, 1.5), rng)
     layout["radius"] = math.hypot(dm["width"], dm["depth"]) / 2
     return soup, layout
 
@@ -16095,7 +16197,7 @@ def _plan_build_rock_city(context, node, world, seed, path):
     context.scene.collection.objects.link(obj)
     tone = p["rock"]
     base = [_rock_material("CLIFF_" + tone), _rock_material("CARVED_" + tone), _rock_material("GROUND"), get_or_create_wood_material('DARK')]
-    for mat_ in base + [get_or_create_leaf_material('GREEN'), _water_material(), _rock_material("GROUND"), _gold_material()]:
+    for mat_ in base + [get_or_create_leaf_material('GREEN'), _water_material(), _rock_material("GROUND"), _rock_material("GRASS")]:
         mesh.materials.append(mat_)
     _add_viewport_color_attribute(mesh)
     layout["oy"] = yc
@@ -18885,32 +18987,45 @@ class VIEW3D_PT_GameLevelArchitect(bpy.types.Panel):
         collision_row.enabled = bpy.data.objects.get(BLUEPRINT_OBJECT_NAME) is not None
 
 
+PLAN_ADD_GROUPS = (
+    ("Buildings", (('TOWER', "Tower"), ('CASTLE', "Castle"), ('FORTRESS', "Fortress"), ('HOUSE', "House"), ('CHAPEL', "Chapel"), ('STABLE', "Stable"),
+                   ('HUT', "Hut"), ('MANSION', "Mansion (Bear Wood plan)"), ('VILLA', "Villa (random plan)"), ('SWAN', "Swan castle"))),
+    ("Places", (('GROUNDS', "Grounds"), ('FARM', "Farm"), ('HAMLET', "Hamlet"), ('STREET', "Street"), ('BLOCK', "Block"), ('HUTS', "Hut cluster"),
+                ('TOWN', "Walled town"), ('CITY', "City"))),
+    ("Cities on hills and in rock", (('TERRACES', "Terrace city"), ('TWIN', "Twin peaks"), ('LAND', "City on land"), ('ROCK', "Rock city"))),
+    ("Ground", (('TERRAIN', "Terrain"),)),
+)
+
+
+class VIEW3D_MT_GLAPlanAdd(bpy.types.Menu):
+    """One menu instead of a wall of buttons: every kind of plan, grouped."""
+    bl_idname = "VIEW3D_MT_gla_plan_add"
+    bl_label = "Add a plan"
+
+    def draw(self, context):
+        layout = self.layout
+        for title, items in PLAN_ADD_GROUPS:
+            layout.label(text=title)
+            for kind, label in items:
+                layout.operator("object.gla_plan_create", text=label).kind = kind
+            layout.separator()
+
+
 class VIEW3D_PT_GLAPlans(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'Level Architect'
-    bl_label = "Plans (experimental)"
+    bl_label = "Plans"
     bl_parent_id = "VIEW3D_PT_GameLevelArchitect"
-    bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
         layout = self.layout
-        layout.prop(context.scene, "wfc_plan_style", text="Style")
-        layout.prop(context.scene, "wfc_plan_shape", text="Shape")
-        layout.prop(context.scene, "wfc_plan_biome", text="Biome")
-        layout.label(text="New plan at the 3D cursor:")
-        row = layout.row(align=True)
-        for kind, label in (('TOWER', "Tower"), ('CASTLE', "Castle"), ('GROUNDS', "Grounds"), ('FORTRESS', "Fortress")):
-            row.operator("object.gla_plan_create", text=label).kind = kind
-        row = layout.row(align=True)
-        for kind, label in (('HOUSE', "House"), ('CHAPEL', "Chapel"), ('STABLE', "Stable")):
-            row.operator("object.gla_plan_create", text=label).kind = kind
-        row = layout.row(align=True)
-        for kind, label in (('FARM', "Farm"), ('HAMLET', "Hamlet"), ('STREET', "Street"), ('BLOCK', "Block")):
-            row.operator("object.gla_plan_create", text=label).kind = kind
-        row = layout.row(align=True)
-        for kind, label in (('HUT', "Hut"), ('HUTS', "Huts"), ('TOWN', "Town"), ('CITY', "City"), ('TERRACES', "Terraces"), ('TWIN', "Twin"), ('LAND', "Land"), ('SWAN', "Swan"), ('MANSION', "Mansion"), ('VILLA', "Villa"), ('ROCK', "Rock city"), ('TERRAIN', "Terrain")):
-            row.operator("object.gla_plan_create", text=label).kind = kind
+        box = layout.box()
+        col = box.column(align=True)
+        col.prop(context.scene, "wfc_plan_style", text="Style")
+        col.prop(context.scene, "wfc_plan_shape", text="Shape")
+        col.prop(context.scene, "wfc_plan_biome", text="Biome")
+        layout.menu("VIEW3D_MT_gla_plan_add", text="Add a plan at the 3D cursor", icon='ADD')
         for plan_id in plan_list_ids():
             box = layout.box()
             box.label(text=plan_id, icon='OUTLINER_COLLECTION')
@@ -18969,6 +19084,7 @@ classes = (
     OBJECT_OT_FloorProfileAdd,
     OBJECT_OT_FloorProfileRemove,
     VIEW3D_PT_GameLevelArchitect,
+    VIEW3D_MT_GLAPlanAdd,
     VIEW3D_PT_GLAPlans,
 )
 

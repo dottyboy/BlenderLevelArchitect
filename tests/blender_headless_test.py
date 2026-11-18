@@ -5520,6 +5520,8 @@ check("Rock city: curved terraces (every wall bows) and caves (a tunnel and an u
       sum(1 for q in rl3["rooms"] if q["kind"] == "cave") >= 4 and any(abs(l_["cb"]) > 1.0 for l_ in rl3["ledges"]) and addon.rock_city_walk_check(rl3)["ok"], str(addon.rock_city_walk_check(rl3)))
 _, rl4 = addon._build_rock_city({**addon.PLAN_ROCK_DEFAULTS, "caves": 0.0, "curve": 0.0}, 5)
 check("Rock city: caves=0 and curve=0 give straight walls and no caves", not any(q["kind"] == "cave" for q in rl4["rooms"]) and all(l_["cb"] == 0.0 for l_ in rl4["ledges"]))
+check("Plans panel: the grouped Add menu offers every kind of plan the create operator knows, each once",
+      sorted(k_ for g_ in addon.PLAN_ADD_GROUPS for k_, _ in g_[1]) == sorted(i_[0] for i_ in addon.OBJECT_OT_PlanCreate.__annotations__["kind"].keywords["items"]))
 try:
     addon.plan_build(bpy.context, addon.plan_node("badrock", "building", "rock_city", params={"levels": 20}))
     check("Rock city: a bad level count is refused", False)

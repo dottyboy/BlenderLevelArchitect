@@ -100,7 +100,7 @@ gone. Doorways stay passable. The result is seeded, so a ruin is reproducible.
 ## Plans: sites, villages, towns
 
 *Experimental.* A **plan** describes a whole site as nested data — a fortress with a keep and corner towers, a farm, a hamlet,
-a street, a district, a cluster of huts — and builds it for you. Open **Level Architect > Plans (experimental)** in the sidebar.
+a street, a district, a cluster of huts — and builds it for you. Open **Level Architect > Plans** in the sidebar and choose **Add a plan at the 3D cursor**; the kinds are grouped into buildings, places, cities on hills and in rock, and ground.
 
 1. Pick a **Style** (the look of the buildings), a **Shape** (regular, round or organic outlines and streets) and, for terrain, a **Biome**.
 2. Press one of the buttons — **Tower, Castle, Grounds, Fortress, Farm, Hamlet, Street, Block, House, Chapel, Stable, Hut, Huts, Town, Terrain**.

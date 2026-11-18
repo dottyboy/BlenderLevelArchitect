@@ -172,7 +172,7 @@ levels above a basement, on stilts, as dwelling or storage — and they can be *
   keep the way from the gate to the castle free and turn doors toward it.
 * **Blocks**: a road graph (hand-made or generated: grid, organic, ring) with kerbed stone roads and buildings along both sides; a block can
   also be a road between two anchors, e.g. farm gate to castle gate.
-* In Blender: sidebar **Level Architect > Plans (experimental)** — choose **Style**, **Shape** and **Biome**, pick a button, press **Build**.
+* In Blender: sidebar **Level Architect > Plans** — choose **Style**, **Shape** and **Biome**, open **Add a plan at the 3D cursor** (plans are grouped: buildings, places, cities on hills and in rock, ground), press **Build**.
   Full guide: [docs/USER_GUIDE.md](docs/USER_GUIDE.md#plans-sites-villages-towns); format: [docs/PLAN_FORMAT.md](docs/PLAN_FORMAT.md);
   roadmap towards bigger settlements, rivers and regions: [docs/WORLD_GENERATOR_PLAN.md](docs/WORLD_GENERATOR_PLAN.md).
 
