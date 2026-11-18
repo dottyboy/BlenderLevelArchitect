@@ -5488,6 +5488,45 @@ except addon.PlanError as exc:
     check("Terraces: too shallow for its tiers is refused", "too small" in str(exc), str(exc))
 
 # ==============================================================================
+print("\n--- Plans: the rock city (a city carved into a mountain) ---")
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+for c in list(bpy.data.collections):
+    bpy.data.collections.remove(c)
+rock = addon.plan_new_example(bpy.context.scene, 'ROCK', set())
+check("Rock city: the example is a rock_city building", rock["kind"] == "rock_city" and rock["type"] == "building")
+rw, rd_ = addon.rock_city_size(rock["params"])
+rfp = addon.plan_footprint(rock)
+check("Rock city: the footprint follows the ledges and the road", abs((rfp[2][0] - rfp[0][0]) - rw) < 1e-6 and abs((rfp[2][1] - rfp[0][1]) - rd_) < 1e-6 and rw > 100 and rd_ > 100)
+addon.plan_build(bpy.context, rock)
+robj = [o for o in bpy.data.objects if "RockCity" in o.name and o.type == 'MESH' and "Door" not in o.name]
+check("Rock city: one mesh with eight materials, organic rock (procedural, no image tiles)", len(robj) == 1 and len(robj[0].data.materials) == 8 and
+      all(m_ is not None and m_.use_nodes and any(n_.type == 'TEX_NOISE' for n_ in m_.node_tree.nodes) for m_ in list(robj[0].data.materials)[:3] + [robj[0].data.materials[6]]))
+rlay = json.loads(robj[0]["gla_walk_layout"])
+rwk = addon.rock_city_walk_check(rlay)
+check("Rock city: the road, every ledge up the stairs and every carved room through its door can be walked (%d rooms)" % rwk["rooms"], rwk["ok"] and rwk["rooms"] >= 12, str(rwk))
+check("Rock city: five ledges, a serpentine road, stairs between the ledges, a door leaf object per carved room, a lamp in every room",
+      len(rlay["ledges"]) == 5 and rlay["road"] and len(rlay["stairs"]) == 4 and len([o for o in bpy.data.objects if "_Panel_" in o.name]) == len([q for q in rlay["rooms"] if q["kind"] != "cave"]) and len(rlay["lights"]) >= len([q for q in rlay["rooms"] if q["kind"] != "cave"]))
+rr = rlay["road"]["pts"]
+check("Rock city: the road climbs from the ground to the first ledge, never steeper than 8 %",
+      abs(rr[0][2]) < 0.01 and abs(rr[-1][2] - rlay["zs"][0]) < 0.01 and max(abs(b[2] - a[2]) / max(1e-6, math.hypot(b[0] - a[0], b[1] - a[1])) for a, b in zip(rr, rr[1:])) < 0.08)
+for sd_ in (2, 3, 4):
+    _, rl_ = addon._build_rock_city({**addon.PLAN_ROCK_DEFAULTS, "levels": 3 + sd_ % 3, "density": 0.9, "width": 70.0 + 20 * sd_}, sd_)
+    check("Rock city: seed %d with %d levels is walkable" % (sd_, len(rl_["ledges"])), addon.rock_city_walk_check(rl_)["ok"])
+_, rl2 = addon._build_rock_city({**addon.PLAN_ROCK_DEFAULTS, "road": False, "levels": 3}, 5)
+check("Rock city: without the road a flight of steps leads up to the first ledge, also walkable", rl2["front_stair"] is not None and addon.rock_city_walk_check(rl2)["ok"])
+_, rl3 = addon._build_rock_city({**addon.PLAN_ROCK_DEFAULTS, "caves": 1.0, "curve": 1.0, "levels": 6, "width": 120.0}, 5)
+check("Rock city: curved terraces (every wall bows) and caves (a tunnel and an uneven chamber behind a doorway) in a six-level city are walkable, rooms under the ledges above included",
+      sum(1 for q in rl3["rooms"] if q["kind"] == "cave") >= 4 and any(abs(l_["cb"]) > 1.0 for l_ in rl3["ledges"]) and addon.rock_city_walk_check(rl3)["ok"], str(addon.rock_city_walk_check(rl3)))
+_, rl4 = addon._build_rock_city({**addon.PLAN_ROCK_DEFAULTS, "caves": 0.0, "curve": 0.0}, 5)
+check("Rock city: caves=0 and curve=0 give straight walls and no caves", not any(q["kind"] == "cave" for q in rl4["rooms"]) and all(l_["cb"] == 0.0 for l_ in rl4["ledges"]))
+try:
+    addon.plan_build(bpy.context, addon.plan_node("badrock", "building", "rock_city", params={"levels": 20}))
+    check("Rock city: a bad level count is refused", False)
+except addon.PlanError:
+    check("Rock city: a bad level count is refused", True)
+
+# ==============================================================================
 print("\n--- Plans: the Swan castle ---")
 for o in list(bpy.data.objects):
     bpy.data.objects.remove(o, do_unlink=True)

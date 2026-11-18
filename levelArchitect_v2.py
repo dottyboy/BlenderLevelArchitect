@@ -33,7 +33,7 @@ from bpy_extras.io_utils import ExportHelper, ImportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 60, 0),
+    "version": (0, 61, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -15226,11 +15226,907 @@ def _plan_build_mansion(context, node, world, seed, path):
     return made
 
 
+# ------------------------------------------------------------------------------
+# Rock city: a city carved into a mountain. Ledges one above the other, each with a cliff wall behind it that carries carved facades (pilasters, an
+# entablature, a pediment) with real rooms inside, stairs up the side of each cliff, boulders along the edges, a serpentine road up to the first
+# ledge, organic rock materials (procedural, no tiles). `rock_city_walk_check` proves the road, the ledges and the rooms can be walked.
+# ------------------------------------------------------------------------------
+PLAN_ROCK_DEFAULTS = dict(levels=5, width=96.0, rise=7.0, depth=16.0, density=0.8, trees=0.6, interiors=True, lights=True, road=True, curve=0.6, caves=0.5, rock='SAND')
+PLAN_ROCK_RANGES = {"levels": (2, 8), "width": (60.0, 220.0), "rise": (5.5, 8.0), "depth": (12.0, 30.0), "density": (0.0, 1.0), "trees": (0.0, 1.0), "curve": (0.0, 1.0), "caves": (0.0, 1.0)}
+RC_ROCKS = ("SAND", "GREY", "RED")
+RC_STEP, RC_RUN = 0.18, 0.32
+
+
+def _rc_hash(ix, iy, iz, seed):
+    h = (ix * 374761393 + iy * 668265263 + iz * 2147483629 + seed * 1274126177) & 0xFFFFFFFF
+    h = ((h ^ (h >> 13)) * 1274126177) & 0xFFFFFFFF
+    return ((h ^ (h >> 16)) & 0xFFFF) / 65535.0
+
+
+def _rc_noise(x, y, z, seed):
+    ix, iy, iz = math.floor(x), math.floor(y), math.floor(z)
+    fx, fy, fz = x - ix, y - iy, z - iz
+    u, v, w = fx * fx * (3 - 2 * fx), fy * fy * (3 - 2 * fy), fz * fz * (3 - 2 * fz)
+    c = [[[_rc_hash(ix + a, iy + b, iz + d, seed) for d in (0, 1)] for b in (0, 1)] for a in (0, 1)]
+    x00 = c[0][0][0] + (c[1][0][0] - c[0][0][0]) * u
+    x10 = c[0][1][0] + (c[1][1][0] - c[0][1][0]) * u
+    x01 = c[0][0][1] + (c[1][0][1] - c[0][0][1]) * u
+    x11 = c[0][1][1] + (c[1][1][1] - c[0][1][1]) * u
+    y0 = x00 + (x10 - x00) * v
+    y1 = x01 + (x11 - x01) * v
+    return y0 + (y1 - y0) * w
+
+
+def _rc_fbm(x, y, z, seed, octaves=4):
+    tot, amp, f, norm = 0.0, 1.0, 1.0, 0.0
+    for o in range(octaves):
+        tot += amp * _rc_noise(x * f, y * f, z * f, seed + o * 17)
+        norm += amp
+        amp *= 0.5
+        f *= 2.05
+    return tot / norm
+
+
+def _rock_material(kind):
+    """Organic rock: stretched noise bands (strata) and fine grain on object coordinates, no tiling. kinds: CLIFF_<tone>, CARVED_<tone>, GROUND."""
+    name = "LA_Rock_" + kind
+    mat = bpy.data.materials.get(name)
+    if mat is not None:
+        return mat
+    tones = {"SAND": ((0.30, 0.20, 0.12), (0.62, 0.45, 0.28), (0.78, 0.60, 0.40)), "GREY": ((0.17, 0.17, 0.18), (0.40, 0.39, 0.38), (0.58, 0.56, 0.52)),
+             "RED": ((0.28, 0.12, 0.08), (0.58, 0.28, 0.15), (0.74, 0.45, 0.28))}
+    part = kind.split("_")
+    tone = tones.get(part[-1], tones["SAND"])
+    dim = lambda c, f: tuple(v * f for v in c)
+    if part[0] == "CARVED":
+        dark, mid, light, strata, grain, bump = dim(tone[1], 0.6), dim(tone[2], 0.75), dim(tone[2], 1.0), (0.5, 0.5, 2.0), 14.0, 0.12
+    elif part[0] == "GROUND":
+        dark, mid, light, strata, grain, bump = (0.10, 0.08, 0.05), (0.26, 0.20, 0.12), (0.40, 0.32, 0.20), (1.0, 1.0, 1.0), 9.0, 0.35
+    else:
+        dark, mid, light, strata, grain, bump = dim(tone[0], 0.55), dim(tone[1], 0.6), dim(tone[2], 0.85), (0.3, 0.3, 2.4), 6.0, 0.8
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    nt = mat.node_tree
+    nodes, links = nt.nodes, nt.links
+    bsdf = next(n for n in nodes if n.type == 'BSDF_PRINCIPLED')
+    tc = nodes.new('ShaderNodeTexCoord')
+    mp1, mp2 = nodes.new('ShaderNodeMapping'), nodes.new('ShaderNodeMapping')
+    mp1.inputs['Scale'].default_value = strata
+    mp2.inputs['Scale'].default_value = (1.0, 1.0, 1.0)
+    big, fine = nodes.new('ShaderNodeTexNoise'), nodes.new('ShaderNodeTexNoise')
+    big.inputs['Scale'].default_value, big.inputs['Detail'].default_value, big.inputs['Roughness'].default_value = 1.6, 9.0, 0.62
+    fine.inputs['Scale'].default_value, fine.inputs['Detail'].default_value, fine.inputs['Roughness'].default_value = grain, 8.0, 0.6
+    mix = nodes.new('ShaderNodeMix')
+    mix.data_type = 'FLOAT'
+    mix.inputs['Factor'].default_value = 0.22
+    ramp = nodes.new('ShaderNodeValToRGB')
+    cr = ramp.color_ramp
+    cr.elements[0].position, cr.elements[0].color = 0.36, (*dark, 1.0)
+    cr.elements[1].position, cr.elements[1].color = 0.64, (*light, 1.0)
+    e_ = cr.elements.new(0.5)
+    e_.color = (*mid, 1.0)
+    bmp = nodes.new('ShaderNodeBump')
+    bmp.inputs['Strength'].default_value = bump
+    bmp.inputs['Distance'].default_value = 0.4
+    links.new(tc.outputs['Object'], mp1.inputs['Vector'])
+    links.new(tc.outputs['Object'], mp2.inputs['Vector'])
+    links.new(mp1.outputs['Vector'], big.inputs['Vector'])
+    links.new(mp2.outputs['Vector'], fine.inputs['Vector'])
+    links.new(big.outputs['Fac'], mix.inputs['A'])
+    links.new(fine.outputs['Fac'], mix.inputs['B'])
+    links.new(mix.outputs['Result'], ramp.inputs['Fac'])
+    links.new(ramp.outputs['Color'], bsdf.inputs['Base Color'])
+    links.new(mix.outputs['Result'], bmp.inputs['Height'])
+    links.new(bmp.outputs['Normal'], bsdf.inputs['Normal'])
+    _set_input(bsdf, "Roughness", 0.93)
+    mat.diffuse_color = (*mid, 1.0)
+    return mat
+
+
+def _rc_smooth(t):
+    t = max(0.0, min(1.0, t))
+    return t * t * (3 - 2 * t)
+
+
+def _rc_sag(c, xl, xr):
+    """How far a curved wall bows forward (towards -y) at x: a parabola, zero at both ends of the ledge and `c` metres in the middle."""
+    xm, wh = (xl + xr) / 2.0, max(1e-6, (xr - xl) / 2.0)
+    return lambda x: -c * (1.0 - ((min(max(x, xl), xr) - xm) / wh) ** 2)
+
+
+def _rc_relief(soup, u0, u1, z0, z1, base, n, axis, seed, amp=0.9, flats=(), holes=(), cell=0.75, mat=0, mat_flat=1, ztop=None):
+    """A rock wall facing the unit vector n=(nx, ny): the plane through `base` (a number, or a function of u for a curved wall; y for axis 'x', x for
+    axis 'y'; u runs along the other axis), grown from a noisy grid. Its surface recedes into the rock. `flats` = (ua, ub, za, zb, face[, material])
+    are smooth carved faces lying at the absolute coordinate `face`, `holes` = (ua, ub, za, zb) cut right through (doors, windows). Grid lines pass
+    through every rectangle edge so the cuts are clean. `ztop(u)` makes the top edge follow a surface, and the wall comes flush with it there."""
+    bf = base if callable(base) else (lambda u, _b=base: _b)
+    us = {round(u0, 4), round(u1, 4)}
+    zs_ = {round(z0, 4), round(z1, 4)}
+    k = u0
+    while k < u1:
+        us.add(round(k, 4))
+        k += cell
+    k = z0
+    while k < z1:
+        zs_.add(round(k, 4))
+        k += cell
+    for r in tuple(holes) + tuple((f[0], f[1], f[2], f[3]) for f in flats):
+        for v in (r[0], r[1]):
+            if u0 <= v <= u1:
+                us.add(round(v, 4))
+        for v in (r[2], r[3]):
+            if z0 <= v <= z1:
+                zs_.add(round(v, 4))
+    us, zs_ = sorted(us), sorted(zs_)
+    us = [v for i, v in enumerate(us) if i == 0 or v - us[i - 1] > 1e-3]
+    zs_ = [v for i, v in enumerate(zs_) if i == 0 or v - zs_[i - 1] > 1e-3]
+    sgn = -(n[0] + n[1])
+
+    def depth(u, z):
+        d = amp * (0.15 + 0.85 * _rc_fbm(u * 0.21, z * 0.33, bf(u) * 0.17, seed, 4))
+        d += amp * 0.35 * (_rc_noise(u * 1.3, z * 1.7, bf(u) * 0.9, seed + 5) - 0.5)
+        d = max(0.0, d)
+        if ztop is not None:
+            d *= _rc_smooth((ztop(u) - z) / 1.5)
+        for f in flats:
+            ua, ub, za, zb, face = f[:5]
+            dist = math.hypot(max(ua - u, 0.0, u - ub), max(za - z, 0.0, z - zb))
+            m = 1.0 - _rc_smooth(dist / 0.9)
+            if m > 0:
+                d = d * (1.0 - m) + ((face - bf(u)) / sgn) * m
+        return d
+
+    def P(u, z):
+        d = depth(u, z)
+        c = bf(u) + sgn * d
+        if ztop is not None:
+            z = z0 + (z - z0) / max(1e-6, z1 - z0) * max(0.0, ztop(u) - z0)
+        return (u, c, z) if axis == 'x' else (c, u, z)
+    cache = {}
+
+    def V(i, j):
+        key = (i, j)
+        if key not in cache:
+            cache[key] = P(us[i], zs_[j])
+        return cache[key]
+    tow = (n[0], n[1], 0.0)
+    for i in range(len(us) - 1):
+        for j in range(len(zs_) - 1):
+            uc, zc = (us[i] + us[i + 1]) / 2, (zs_[j] + zs_[j + 1]) / 2
+            if any(h[0] < uc < h[1] and h[2] < zc < h[3] for h in holes):
+                continue
+            pts = [V(i, j), V(i + 1, j), V(i + 1, j + 1), V(i, j + 1)]
+            if ztop is not None and pts[3][2] - pts[0][2] < 0.02 and pts[2][2] - pts[1][2] < 0.02:
+                continue
+            m_ = mat
+            for f in flats:
+                if f[0] <= uc <= f[1] and f[2] <= zc <= f[3]:
+                    m_ = f[5] if len(f) > 5 else mat_flat
+                    break
+            uvs = [((p_[0] + p_[1]) / 6.0, p_[2] / 6.0) for p_ in pts]
+            soup.poly('rc', pts, uvs, tow, m_, smooth=True)
+
+
+def _rc_blob(soup, cx, cy, cz, rx, ry, rz, seed, mat=0, rings=5, segs=9):
+    """A lumpy boulder (the upper two thirds of a noisy ellipsoid)."""
+    pts = []
+    for a in range(rings + 1):
+        la = -0.25 + (math.pi / 2 + 0.25) * a / rings
+        row = []
+        for b in range(segs):
+            lo = 2 * math.pi * b / segs
+            dx, dy, dz = math.cos(la) * math.cos(lo), math.cos(la) * math.sin(lo), math.sin(la)
+            f = 0.72 + 0.5 * _rc_fbm(cx + dx * 1.7, cy + dy * 1.7, cz + dz * 1.7, seed, 3)
+            row.append((cx + rx * f * dx, cy + ry * f * dy, cz + rz * f * dz))
+        pts.append(row)
+    for a in range(rings):
+        for b in range(segs):
+            b2 = (b + 1) % segs
+            quad = [pts[a][b], pts[a][b2], pts[a + 1][b2], pts[a + 1][b]]
+            mx = sum(q[0] for q in quad) / 4 - cx
+            my = sum(q[1] for q in quad) / 4 - cy
+            mz = sum(q[2] for q in quad) / 4 - cz
+            soup.poly('blob%d' % seed, quad if a < rings - 1 else [pts[a][b], pts[a][b2], pts[a + 1][b]], [(q[0] / 6.0, q[2] / 6.0) for q in (quad if a < rings - 1 else [pts[a][b], pts[a][b2], pts[a + 1][b]])],
+                      (mx, my, mz), mat, smooth=True)
+    top = pts[rings][0]
+    return top
+
+
+def _rc_flat(soup, x0, y0, x1, y1, z, mat, up=True):
+    _tc_quad(soup, [(x0, y0, z), (x1, y0, z), (x1, y1, z), (x0, y1, z)], (0.0, 0.0, 1.0 if up else -1.0), mat)
+
+
+def _ac_beam(soup, ya, p0, p1, t, w, mat=1, plane="y"):
+    """A straight beam in a vertical plane (y = ya for plane "y", u = x; x = ya for plane "x", u = y): from p0 to p1 (u, z), thickness t across the beam,
+    width w across the plane. Overlaps its neighbours a little."""
+    dx, dz = p1[0] - p0[0], p1[1] - p0[1]
+    ln = math.hypot(dx, dz)
+    if ln < 1e-6:
+        return
+    ux, uz = dx / ln, dz / ln
+    nx, nz = -uz, ux
+    q0 = (p0[0] - ux * 0.12, p0[1] - uz * 0.12)
+    q1 = (p1[0] - ux * 0.0 + ux * 0.12, p1[1] + uz * 0.12)
+    wa, wb = ya - w / 2, ya + w / 2
+    M = (lambda u, v, z: (u, v, z)) if plane == "y" else (lambda u, v, z: (v, u, z))
+    N = (lambda a, b, c: (a, b, c)) if plane == "y" else (lambda a, b, c: (b, a, c))
+    for sg in (1.0, -1.0):
+        a0 = (q0[0] + sg * nx * t / 2, q0[1] + sg * nz * t / 2)
+        a1 = (q1[0] + sg * nx * t / 2, q1[1] + sg * nz * t / 2)
+        _tc_quad(soup, [M(a0[0], wa, a0[1]), M(a1[0], wa, a1[1]), M(a1[0], wb, a1[1]), M(a0[0], wb, a0[1])], N(sg * nx, 0.0, sg * nz), mat)
+    for v, ny in ((wa, -1.0), (wb, 1.0)):
+        pts = [M(q0[0] + nx * t / 2, v, q0[1] + nz * t / 2), M(q1[0] + nx * t / 2, v, q1[1] + nz * t / 2),
+               M(q1[0] - nx * t / 2, v, q1[1] - nz * t / 2), M(q0[0] - nx * t / 2, v, q0[1] - nz * t / 2)]
+        _tc_quad(soup, pts, N(0.0, ny, 0.0), mat)
+
+
+def _ac_curve(a, r, n=14, z0=0.0):
+    """A pointed (two-centred) arch from the foot (-a, z0) over the apex (0, z0 + r) to the foot (a, z0): a list of (x, z)."""
+    rho = (a * a + r * r) / (2.0 * a)
+    cx = a - rho
+    th = math.atan2(r, -cx)
+    right = [(cx + rho * math.cos(th * (1.0 - i / n)), z0 + rho * math.sin(th * (1.0 - i / n))) for i in range(n + 1)]
+    right[-1] = (a, z0)
+    right[0] = (0.0, z0 + r)
+    return [(-x, z) for x, z in reversed(right)] + right[1:]
+
+
+def _ac_arch_height(a, r, x):
+    """Height of the pointed arch's centre line above its feet at distance x from the axis (None outside)."""
+    ax = abs(x)
+    if ax > a:
+        return None
+    rho = (a * a + r * r) / (2.0 * a)
+    cx = a - rho
+    d = rho * rho - (ax - cx) ** 2
+    return math.sqrt(d) if d > 0 else None
+
+
+def _ac_ramp(soup, pts, w=5.0, posts=True):
+    """A walkable road along a 3D polyline [(x, y, z)]: a slab with parapets, and a post to the ground every few metres."""
+    n = len(pts)
+    hw = w / 2.0
+    side = []
+    for i, (x, y, z) in enumerate(pts):
+        a = pts[max(0, i - 1)]
+        b = pts[min(n - 1, i + 1)]
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        ln = math.hypot(dx, dy) or 1.0
+        nx, ny = -dy / ln, dx / ln
+        side.append((nx, ny))
+    for i in range(n - 1):
+        p0, p1 = pts[i], pts[i + 1]
+        (n0x, n0y), (n1x, n1y) = side[i], side[i + 1]
+        L0, L1 = (p0[0] + n0x * hw, p0[1] + n0y * hw, p0[2]), (p1[0] + n1x * hw, p1[1] + n1y * hw, p1[2])
+        R0, R1 = (p0[0] - n0x * hw, p0[1] - n0y * hw, p0[2]), (p1[0] - n1x * hw, p1[1] - n1y * hw, p1[2])
+        _tc_quad(soup, [L0, L1, R1, R0], (0.0, 0.0, 1.0), TC_PAVING_SLOT)
+        d = lambda q: (q[0], q[1], q[2] - 0.5)
+        _tc_quad(soup, [d(R0), d(R1), d(L1), d(L0)], (0.0, 0.0, -1.0), 0)
+        for sg, (a0, a1) in ((1.0, (L0, L1)), (-1.0, (R0, R1))):
+            nxm, nym = sg * (n0x + n1x) / 2.0, sg * (n0y + n1y) / 2.0
+            _tc_quad(soup, [d(a0), d(a1), a1, a0], (nxm, nym, 0.0), 0)
+            up = lambda q: (q[0], q[1], q[2] + 1.0)
+            ia0 = (a0[0] - sg * n0x * 0.35, a0[1] - sg * n0y * 0.35, a0[2])
+            ia1 = (a1[0] - sg * n1x * 0.35, a1[1] - sg * n1y * 0.35, a1[2])
+            _tc_quad(soup, [a0, a1, up(a1), up(a0)], (nxm, nym, 0.0), 1)
+            _tc_quad(soup, [ia1, ia0, up(ia0), up(ia1)], (-nxm, -nym, 0.0), 1)
+            _tc_quad(soup, [up(a0), up(a1), up(ia1), up(ia0)], (0.0, 0.0, 1.0), 1)
+    if posts:
+        acc = 0.0
+        for i in range(1, n):
+            acc += math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1])
+            if acc >= 7.0 and pts[i][2] > 1.5:
+                acc = 0.0
+                _tc_cyl(soup, pts[i][0], pts[i][1], TC_SKIRT, 0.5, pts[i][2] - 0.5 - TC_SKIRT, 8, 1)
+
+
+def _ac_spiral(c, rs, alpha0, omega, z_from, z_to, psi_from, psi_to, step=1.0):
+    """Points of a spiral road round c (radius rs): the angle is alpha0 + omega * psi, psi from psi_from to psi_to, the height going from z_from to z_to."""
+    n = max(2, int(math.ceil(abs(psi_to - psi_from) * rs / step)))
+    out = []
+    for i in range(n + 1):
+        f = i / n
+        psi = psi_from + (psi_to - psi_from) * f
+        th = alpha0 + omega * psi
+        out.append((c[0] + rs * math.cos(th), c[1] + rs * math.sin(th), z_from + (z_to - z_from) * f))
+    return out
+
+
+
+
+def _rc_dims(p, seed=None):
+    """The numbers the whole city hangs on. With a seed the ledges are a little uneven (rise, depth, left and right width all vary and the ledges taper
+    towards the summit); without one, the average city (used for the footprint)."""
+    rr = random.Random(int(seed) * 7 + 3) if seed is not None else None
+    var = (lambda lo, hi: rr.uniform(lo, hi)) if rr else (lambda lo, hi: (lo + hi) / 2.0)
+    L, rise, d, w = int(p["levels"]), float(p["rise"]), float(p["depth"]), float(p["width"]) / 2.0
+    rises = [rise * var(0.9, 1.1) for _ in range(L + 1)]
+    zs, z = [], 0.0
+    for k in range(L):
+        z += rises[k]
+        zs.append(z)
+    wl = [max(26.0, w * (1.0 - 0.055 * k) * var(0.88, 1.1)) for k in range(L)]
+    wr = [max(26.0, w * (1.0 - 0.055 * k) * var(0.88, 1.1)) for k in range(L)]
+    xr = min(wl[0], wr[0]) - 10.0
+    leg = 2.0 * xr
+    hair = math.pi * 3.5
+    if p.get("road", True):
+        n_legs = max(1, int(math.ceil((rises[0] / 0.07 + hair) / (leg + hair))))
+        total = n_legs * leg + (n_legs - 1) * hair
+        y0 = 4.0 + 7.0 * (n_legs - 1) + 3.5
+    else:
+        n_legs, total, y0 = 0, 0.0, 14.0
+    cb = [float(p.get('curve', 0.6)) * d * var(-0.25, 0.3) for _ in range(L)]
+    yb, y = [], y0
+    for k in range(L):
+        y += d * var(0.8, 1.25)
+        yb.append(y)
+    zL = zs[-1] + rises[L]
+    return dict(L=L, rise=rise, rises=rises, cb=cb, d=d, w=w, wl=wl, wr=wr, xr=xr, leg=leg, hair=hair, n_legs=n_legs, total=total,
+                slope=(rises[0] / total if total else 0.0), y0=y0, yb=yb, zs=zs, zL=zL, peak=zL + 26.0, y_back=yb[-1], tail=64.0,
+                wmax=max(wl + wr), depth=yb[-1] + 64.0, width=2.0 * (max(wl + wr) + 50.0))
+
+
+def rock_city_size(params=None):
+    p = {**PLAN_ROCK_DEFAULTS, **(params or {})}
+    dm = _rc_dims(p)
+    return (dm["width"], dm["depth"])
+
+
+PLAN_DEFAULT_FOOTPRINTS["rock_city"] = lambda params: _footprint_rect(dict(zip(("width", "depth"), rock_city_size(params))))
+
+
+def _rc_pediment(soup, xm, yf, zb, w, h, depth):
+    """A triangular pediment in front of the face at y = yf."""
+    y_a, y_b = yf - depth, yf
+    A, B, C = (xm - w / 2, zb), (xm + w / 2, zb), (xm, zb + h)
+    _tc_quad(soup, [(A[0], y_a, A[1]), (B[0], y_a, B[1]), (C[0], y_a, C[1])], (0.0, -1.0, 0.0), 1)
+    _tc_quad(soup, [(A[0], y_b, A[1]), (B[0], y_b, B[1]), (C[0], y_b, C[1])], (0.0, 1.0, 0.0), 1)
+    _tc_quad(soup, [(A[0], y_a, A[1]), (A[0], y_b, A[1]), (C[0], y_b, C[1]), (C[0], y_a, C[1])], (-h, 0.0, w / 2), 1)
+    _tc_quad(soup, [(B[0], y_a, B[1]), (B[0], y_b, B[1]), (C[0], y_b, C[1]), (C[0], y_a, C[1])], (h, 0.0, w / 2), 1)
+    _tc_quad(soup, [(A[0], y_a, A[1]), (B[0], y_a, B[1]), (B[0], y_b, B[1]), (A[0], y_b, A[1])], (0.0, 0.0, -1.0), 1)
+
+
+def _rc_mountain(dm, seed):
+    """The mountain first: its height at (x, y) as a function. A ridge whose height follows the stepped profile of the city (it is exactly the
+    envelope of the ledges where the city sits) and climbs on to a summit behind it, with noise growing with distance from the city. Zero in front."""
+    L, y0, yb, zs, wl, wr = dm["L"], dm["y0"], dm["yb"], dm["zs"], dm["wl"], dm["wr"]
+    zL, peak, y_back, tail = dm["zL"], dm["peak"], dm["y_back"], dm["tail"]
+    wc, fl = dm["wmax"] + 4.0, 40.0
+    pts = [(y0, 0.0)]
+    for k in range(L):
+        pts.append((yb[k], zs[k + 1] if k + 1 < L else zL))
+    boxes = [(-wl[k], (y0 if k == 0 else yb[k - 1]), wr[k], yb[k]) for k in range(L)]
+
+    def prof(y):
+        if y <= y0:
+            return 0.0
+        for (ya, za), (yz, zz) in zip(pts, pts[1:]):
+            if y <= yz:
+                return za + (zz - za) * (y - ya) / (yz - ya)
+        t = (y - y_back) / tail
+        if t < 0.4:
+            return zL + (peak - zL) * _rc_smooth(t / 0.4)
+        return peak * (1.0 - _rc_smooth((t - 0.4) / 0.6))
+
+    def dist_city(x, y):
+        best = 1e9
+        for bx0, by0, bx1, by1 in boxes:
+            best = min(best, math.hypot(max(bx0 - x, 0.0, x - bx1), max(by0 - y, 0.0, y - by1)))
+        return best
+
+    def N(x, y):
+        c = 1.0 - _rc_smooth((abs(x) - wc) / fl)
+        base = prof(y) * c
+        m = _rc_smooth(dist_city(x, y) / 10.0)
+        amp = 1.5 + 0.1 * base
+        n = (_rc_fbm(x * 0.035, y * 0.035, 3.7, seed, 4) - 0.5) * 2.0 * amp + (_rc_noise(x * 0.17, y * 0.17, 1.1, seed + 3) - 0.5) * 1.2
+        return max(0.0, base + m * n * (1.0 if base > 0.4 else base / 0.4))
+    N.boundary = lambda x, y: prof(y) * (1.0 - _rc_smooth((abs(x) - wc) / fl))
+    N.x_extent = wc + fl
+    return N
+
+
+def _rc_natural_mesh(soup, N, dm, sd):
+    """The mountain as a grid of cells round the city's ledges (the ledges are cut out of it), rock on steep cells, earth on gentle ones."""
+    L, y0, yb, wl, wr, y_back = dm["L"], dm["y0"], dm["yb"], dm["wl"], dm["wr"], dm["y_back"]
+    Wm = N.x_extent
+
+    def lines(lo, hi, step, extra=()):
+        n = max(1, int(math.ceil((hi - lo) / step)))
+        xs = {round(lo + (hi - lo) * i / n, 3) for i in range(n + 1)}
+        xs.update(round(e, 3) for e in extra if lo < e < hi)
+        return sorted(xs)
+
+    def strip(ya, yz, segs, extra_x):
+        ysl = lines(ya, yz, 3.0)
+        for lo, hi in segs:
+            xsl = lines(lo, hi, 3.2, extra_x)
+            for j in range(len(ysl) - 1):
+                for i in range(len(xsl) - 1):
+                    q = [(xsl[i], ysl[j]), (xsl[i + 1], ysl[j]), (xsl[i + 1], ysl[j + 1]), (xsl[i], ysl[j + 1])]
+                    pts = [(x, y, N(x, y)) for x, y in q]
+                    if max(pt[2] for pt in pts) < 0.02:
+                        continue
+                    ux, uy, uz = pts[1][0] - pts[0][0], pts[1][1] - pts[0][1], pts[1][2] - pts[0][2]
+                    vx, vy, vz = pts[3][0] - pts[0][0], pts[3][1] - pts[0][1], pts[3][2] - pts[0][2]
+                    nz = ux * vy - uy * vx
+                    nl = math.sqrt((uy * vz - uz * vy) ** 2 + (uz * vx - ux * vz) ** 2 + nz * nz) or 1.0
+                    soup.poly('nat', pts, [(pt[0] / 6.0, pt[1] / 6.0) for pt in pts], (0.0, 0.0, 1.0), 2 if nz / nl > 0.82 else 0, smooth=True)
+    for k in range(dm["L"]):
+        ya, yz = (y0 if k == 0 else yb[k - 1]), yb[k]
+        ext = {-wl[j] for j in (k - 1, k, k + 1) if 0 <= j < dm["L"]} | {wr[j] for j in (k - 1, k, k + 1) if 0 <= j < dm["L"]}
+        strip(ya, yz, [(-Wm, -wl[k]), (wr[k], Wm)], ext)
+    strip(y_back, y_back + dm["tail"], [(-Wm, Wm)], {-wl[-1], wr[-1]})
+
+
+def _rc_cave(soup, cx, yf, cyc, R, zk, rng, seed):
+    """A cave behind a doorway: a short tunnel and an uneven chamber (a lumpy ring of rock walls round (cx, cyc), a domed ceiling, an earth floor)."""
+    hw = 1.5
+    ym = cyc - 0.9 * R
+    zc = zk + 3.4
+    for sx_ in (-1.0, 1.0):
+        _tc_quad(soup, [(cx + sx_ * hw, yf, zk), (cx + sx_ * hw, ym, zk), (cx + sx_ * hw, ym, zc), (cx + sx_ * hw, yf, zc)], (-sx_, 0.0, 0.0), 0)
+    _rc_flat(soup, cx - hw, yf, cx + hw, ym, zk, 2)
+    _rc_flat(soup, cx - hw, yf, cx + hw, ym, zc, 0, up=False)
+    n = 12
+    ring = []
+    for i in range(n):
+        a = 2 * math.pi * i / n
+        if i == 9:                                                                 # the south point is the mouth of the tunnel
+            ring.append((cx - hw, ym))
+            ring.append((cx + hw, ym))
+            continue
+        r = R * (0.85 + 0.3 * _rc_noise(math.cos(a) * 2.0 + seed, math.sin(a) * 2.0, 0.5, seed))
+        ring.append((cx + r * math.cos(a), cyc + r * math.sin(a)))
+    hc = zk + 3.6 + 0.4 * R
+    m = len(ring)
+    for i in range(m):
+        a, b = ring[i], ring[(i + 1) % m]
+        if abs(a[1] - ym) < 1e-6 and abs(b[1] - ym) < 1e-6 and abs(a[0] - b[0]) < 2 * hw + 1e-6:
+            continue                                                                # the opening itself
+        mx, my = (a[0] + b[0]) / 2 - cx, (a[1] + b[1]) / 2 - cyc
+        soup.poly('cave', [(a[0], a[1], zk), (b[0], b[1], zk), (b[0], b[1], zc), (a[0], a[1], zc)], [(0, 0), (1, 0), (1, 1), (0, 1)], (-mx, -my, 0.0), 0, smooth=True)
+        soup.poly('cave', [(a[0], a[1], zc), (b[0], b[1], zc), (cx, cyc, hc)], [(0, 0), (1, 0), (0.5, 1)], (0.0, 0.0, -1.0), 0, smooth=True)
+    for i in range(m):
+        a, b = ring[i], ring[(i + 1) % m]
+        soup.poly('cavef', [(a[0], a[1], zk), (b[0], b[1], zk), (cx, cyc, zk)], [(0, 0), (1, 0), (0.5, 1)], (0.0, 0.0, 1.0), 2)
+
+
+def _build_rock_city(p, seed):
+    """Returns (soup, layout) in a natural frame: x across, y from the road at the front (0) back into the mountain, ground at z = 0. The mountain is made
+    first (`_rc_mountain`), the ledges, cliff walls, facades and rooms are cut into it."""
+    rng = random.Random(int(seed) % 1_000_000)
+    sd = int(seed) % 9973
+    soup = _TowerMesh()
+    dm = _rc_dims(p, seed)
+    N = _rc_mountain(dm, sd)
+    L, rises, d, y0, yb, zs, wl, wr, cb = dm["L"], dm["rises"], dm["d"], dm["y0"], dm["yb"], dm["zs"], dm["wl"], dm["wr"], dm["cb"]
+    layout = {"w": dm["wmax"], "y0": y0, "yb": yb, "zs": zs, "rise": dm["rise"], "ledges": [], "rooms": [], "stairs": [], "throats": [], "circles": [], "rects": [],
+              "road": None, "front_stair": None, "door_panels": [], "lights": [], "step": [RC_STEP, RC_RUN], "start": [0.0, 1.0], "trees": 0, "facades": 0,
+              "tail": dm["tail"], "y_back": dm["y_back"]}
+    circles, lights = layout["circles"], layout["lights"]
+    density = float(p["density"])
+    # --- the mountain, then the ground in front and beside it
+    _rc_natural_mesh(soup, N, dm, sd)
+    _rc_flat(soup, -dm["wmax"] - 60.0, -40.0, dm["wmax"] + 60.0, y0 + 1.6, 0.0, 2)
+    for sx_ in (-1.0, 1.0):
+        _rc_flat(soup, min(sx_ * N.x_extent, sx_ * (dm["wmax"] + 60.0)), y0, max(sx_ * N.x_extent, sx_ * (dm["wmax"] + 60.0)), y0 + dm["y_back"] + dm["tail"], 0.0, 2)
+    # --- the serpentine road (or a straight flight) up to the first ledge
+    pad = None
+    z0r = zs[0]
+    if p.get("road", True):
+        xr, leg, hair, slope = dm["xr"], dm["leg"], dm["hair"], dm["slope"]
+        xy = []
+        dirv, x_cur = 1.0, -xr
+        for i in range(dm["n_legs"]):
+            y = 4.0 + 7.0 * i
+            nseg = max(2, int(leg / 1.0))
+            for j in range(nseg + 1):
+                xy.append((x_cur + dirv * leg * j / nseg, y))
+            x_cur += dirv * leg
+            if i < dm["n_legs"] - 1:
+                m = max(6, int(hair / 1.0))
+                for j in range(1, m + 1):
+                    th = -math.pi / 2 + math.pi * j / m
+                    xy.append((x_cur + dirv * 3.5 * math.cos(th), y + 3.5 + 3.5 * math.sin(th)))
+                dirv = -dirv
+        pts, s_acc = [], 0.0
+        for i, (x, y) in enumerate(xy):
+            if i:
+                s_acc += math.hypot(x - xy[i - 1][0], y - xy[i - 1][1])
+            pts.append((x, y, min(z0r, slope * s_acc)))
+        pts[-1] = (pts[-1][0], pts[-1][1], z0r)
+        _ac_ramp(soup, pts, 5.0, True)
+        y_last = pts[-1][1]
+        px0, px1 = (pts[-1][0], pts[-1][0] + dirv * 7.0) if dirv > 0 else (pts[-1][0] - 7.0, pts[-1][0])
+        pad = [min(px0, px1), y_last - 2.5, max(px0, px1), y0, z0r]
+        _tc_box(soup, (pad[0] + pad[2]) / 2, (pad[1] + pad[3]) / 2, 0.0, pad[2] - pad[0], pad[3] - pad[1], z0r, 0)
+        _tc_box(soup, (pad[0] + pad[2]) / 2, (pad[1] + pad[3]) / 2, z0r, pad[2] - pad[0], pad[3] - pad[1], 0.0, 0, TC_PAVING_SLOT)
+        _tc_box(soup, pts[0][0], pts[0][1] - 1.0, 0.0, 9.0, 8.0, 0.12, 0, TC_PAVING_SLOT)
+        layout["road"] = {"pts": [[round(v, 3) for v in q] for q in pts], "w": 5.0, "pad": pad}
+        layout["start"] = [pts[0][0], 1.0]
+    else:
+        n0 = int(math.ceil(z0r / RC_STEP - 1e-9))
+        sr0 = z0r / n0
+        ys = y0 - n0 * RC_RUN
+        for i in range(n0):
+            _tc_box(soup, 0.0, ys + (i + 0.5) * RC_RUN, 0.0, 5.0, RC_RUN, (i + 1) * sr0, 1)
+        layout["front_stair"] = {"x0": -2.5, "x1": 2.5, "y0": ys, "n": n0, "sr": sr0, "run": RC_RUN}
+        layout["start"] = [0.0, ys - 2.0]
+    _rc_relief(soup, -wl[0], wr[0], 0.0, z0r, y0, (0.0, -1.0), 'x', sd, 0.7)
+    # --- every ledge: its floor, the cliff wall behind it with carved facades and rooms, cut walls at its sides, the stairs up to the next one
+    stair_side = {k: (1.0 if k % 2 == 0 else -1.0) for k in range(L)}
+    for k in range(L):
+        zk, ybk = zs[k], yb[k]
+        rk = rises[k + 1]
+        zt = zk + rk
+        ya = y0 if k == 0 else yb[k - 1]
+        sagb = _rc_sag(cb[k], -wl[k], wr[k])
+        sagf = _rc_sag(cb[k - 1], -wl[k - 1], wr[k - 1]) if k > 0 else (lambda x: 0.0)
+        s_ = stair_side[k]
+        wk = lambda s_x: (wr[k] if s_x > 0 else wl[k])
+        wnext = (wr[k + 1] if s_ > 0 else wl[k + 1]) if k < L - 1 else 1e9
+        xe = s_ * (min(wk(s_), wnext) - 1.8)
+        n_st = int(math.ceil(rk / RC_STEP - 1e-9))
+        sr = rk / n_st
+        st_len = n_st * RC_RUN
+        zone = (min(xe, xe - s_ * st_len) - 1.5, max(xe, xe - s_ * st_len) + 1.5) if k < L - 1 else (1e9, 1e9)
+        flats, holes = [], []
+        fx = -wl[k] + rng.uniform(3.0, 6.0)
+        while fx < wr[k] - 11.0:
+            fw = rng.uniform(8.5, 13.0)
+            if fx + fw > wr[k] - 4.0:
+                break
+            if fx + fw + 1.0 > zone[0] and fx - 1.0 < zone[1]:
+                fx = zone[1] + 1.0
+                continue
+            if rng.random() > density:
+                fx += fw + rng.uniform(2.5, 6.0)
+                continue
+            is_cave = rng.random() < 0.3 * float(p.get("caves", 0.5)) and k + 1 < L
+            kind = "cave" if is_cave else rng.choice(("temple", "house", "tomb", "tomb", "sealed"))
+            if is_cave:
+                fw = rng.uniform(9.0, 11.0)
+                if fx + fw > wr[k] - 4.0:
+                    break
+                if fx + fw + 1.0 > zone[0] and fx - 1.0 < zone[1]:
+                    fx = zone[1] + 1.0
+                    continue
+            fh = min(rk - 1.0, rk - 2.0 if kind == "temple" else rk - 1.0)
+            fxm = fx + fw / 2 + rng.uniform(-0.6, 0.6)
+            dw = rng.uniform(1.7, 2.3)
+            dh = 3.0 if kind != "tomb" else 3.3
+            recess = rng.uniform(0.5, 1.1)
+            ybl = ybk + sagb(fxm)
+            yf = ybl + recess
+            rd = (yb[k + 1] - ybk if k + 1 < L else d) - 2.5 - abs(cb[k]) - (abs(cb[k + 1]) if k + 1 < L else 0.0)
+            avail = rd
+            rd = max(3.5, min(rd, rng.uniform(5.0, 9.0)))
+            rx0, rx1 = fx + 0.9, fx + fw - 0.9
+            if kind == "temple":
+                wins = [(fxm - fw * 0.3 - 0.5, fxm - fw * 0.3 + 0.5, 1.0, 2.4), (fxm + fw * 0.3 - 0.5, fxm + fw * 0.3 + 0.5, 1.0, 2.4)]
+            elif kind == "house":
+                wins = [(fxm - fw * 0.3 - 0.5, fxm - fw * 0.3 + 0.5, 1.0, 2.4), (fxm + fw * 0.3 - 0.5, fxm + fw * 0.3 + 0.5, 1.0, 2.4),
+                        (fxm - 2.0, fxm - 0.9, 3.3, 4.2), (fxm + 0.9, fxm + 2.0, 3.3, 4.2)]
+            else:
+                wins = [(fxm - 0.55, fxm + 0.55, 3.8, 4.5)]
+            wins = [wn for wn in wins if wn[0] > rx0 + 0.3 and wn[1] < rx1 - 0.3 and not (wn[0] < fxm + dw / 2 + 0.3 and wn[1] > fxm - dw / 2 - 0.3 and wn[2] < dh + 0.3)]
+            sealed = kind == "sealed"
+            if is_cave:
+                if avail < 9.0:                                                   # not deep enough for a cave: a tomb instead
+                    kind, is_cave, fw, wins = "tomb", False, min(fw, 10.0), [(fxm - 0.55, fxm + 0.55, 3.8, 4.5)]
+                else:
+                    cR = min(4.5, (avail - 3.0) / 2.0)
+                    cx0 = fxm
+                    flats.append((fxm - 2.6, fxm + 2.6, zk, zk + 4.4, yf, 0))
+                    holes.append((fxm - 1.5, fxm + 1.5, zk, zk + 3.4))
+                    cyc = yf + 3.0 + 0.3 * cR + 0.7 * cR
+                    _rc_cave(soup, fxm, yf, cyc, cR, zk, rng, sd + int(fxm * 3) + k)
+                    layout["rooms"].append({"rect": [fxm - 1.5, yf, fxm + 1.5, cyc - 0.7 * cR], "z": zk, "door": [fxm - 1.5, fxm + 1.5], "wall": ybl, "furn": [], "kind": "cave"})
+                    layout["rooms"].append({"rect": [fxm - 0.7 * cR, cyc - 0.7 * cR, fxm + 0.7 * cR, cyc + 0.7 * cR], "z": zk, "door": [fxm - 1.5, fxm + 1.5], "wall": ybl, "furn": [], "kind": "cave"})
+                    lights.append([fxm, cyc, zk + 3.0, 200.0])
+                    layout["throats"].append([fxm - 1.5, ybl - 0.3, fxm + 1.5, yf + 0.3, zk])
+                    layout["facades"] += 1
+                    fx += fw + rng.uniform(2.5, 5.5)
+                    continue
+            flats.append((fx - 0.3, fx + fw + 0.3, zk, zk + fh + 0.5, yf))
+            if not sealed:
+                holes.append((fxm - dw / 2, fxm + dw / 2, zk, zk + dh))
+                for wx0, wx1, wz0, wz1 in wins:
+                    holes.append((wx0, wx1, zk + wz0, zk + wz1))
+            for px in (fx + 0.35, fx + fw - 0.35):
+                _tc_box(soup, px, yf - 0.25, zk, 0.7, 0.5, fh - 1.2, 1)
+            _tc_box(soup, fx + fw / 2, yf - 0.3, zk + fh - 1.2, fw + 0.2, 0.6, 0.7, 1)
+            _tc_box(soup, fx + fw / 2, yf - 0.45, zk + fh - 0.5, fw + 0.7, 0.9, 0.5, 1)
+            if kind == "temple":
+                _rc_pediment(soup, fx + fw / 2, yf - 0.1, zk + fh, fw + 0.7, 1.3, 0.8)
+            layout["facades"] += 1
+            if sealed:
+                _tc_box(soup, fxm, yf - 0.15, zk, dw + 0.6, 0.3, dh + 0.3, 1)
+                fx += fw + rng.uniform(2.5, 5.5)
+                continue
+            for sx_ in (-1.0, 1.0):
+                _tc_box(soup, fxm + sx_ * (dw / 2 + 0.15), yf - 0.15, zk, 0.3, 0.3, dh + 0.1, 1)
+            _tc_box(soup, fxm, yf - 0.2, zk + dh, dw + 0.9, 0.4, 0.35, 1)
+            for wx0, wx1, wz0, wz1 in wins:
+                _tc_box(soup, (wx0 + wx1) / 2, yf - 0.15, zk + wz0 - 0.2, wx1 - wx0 + 0.5, 0.35, 0.2, 1)
+                _tc_box(soup, (wx0 + wx1) / 2, yf - 0.13, zk + wz1, wx1 - wx0 + 0.4, 0.3, 0.2, 1)
+            ry1 = yf + rd
+            zc = zk + 4.8
+            _rc_flat(soup, rx0, yf, rx1, ry1, zk, TC_PAVING_SLOT)
+            _rc_flat(soup, rx0, yf, rx1, ry1, zc, 0, up=False)
+            _tc_quad(soup, [(rx0, ry1, zk), (rx1, ry1, zk), (rx1, ry1, zc), (rx0, ry1, zc)], (0.0, -1.0, 0.0), 0)
+            _tc_quad(soup, [(rx0, yf, zk), (rx0, ry1, zk), (rx0, ry1, zc), (rx0, yf, zc)], (1.0, 0.0, 0.0), 0)
+            _tc_quad(soup, [(rx1, yf, zk), (rx1, ry1, zk), (rx1, ry1, zc), (rx1, yf, zc)], (-1.0, 0.0, 0.0), 0)
+            furn = []
+            if p["interiors"]:
+                bw = rx1 - rx0 - 1.4
+                _tc_box(soup, (rx0 + rx1) / 2, ry1 - 0.5, zk, bw, 0.8, 0.5, 3)
+                furn.append([(rx0 + rx1) / 2, ry1 - 0.5, 0.0, bw / 2, 0.45])
+                if rx1 - rx0 > 5.0 and rd > 5.5:
+                    tx_, ty_ = (rx0 + rx1) / 2 + rng.uniform(-0.8, 0.8), yf + rd * 0.58
+                    _tc_box(soup, tx_, ty_, zk, 1.6, 0.9, 0.8, 3)
+                    furn.append([tx_, ty_, 0.0, 0.8, 0.45])
+            lights.append([(rx0 + rx1) / 2, yf + rd * 0.5, zc - 0.5, 160.0])
+            layout["door_panels"].append([fxm - dw / 2, yf, zk, 0.0, dw - 0.05, dh - 0.05])
+            layout["rooms"].append({"rect": [rx0, yf, rx1, ry1], "z": zk, "door": [fxm - dw / 2, fxm + dw / 2], "wall": ybl, "furn": furn, "kind": kind})
+            layout["throats"].append([fxm - dw / 2, ybl - 0.3, fxm + dw / 2, yf + 0.3, zk])
+            if rng.random() < 0.15:                                             # a fallen boulder in front of some doors, off to one side
+                bx_ = fxm + rng.choice((-1, 1)) * rng.uniform(2.6, 3.6)
+                _rc_blob(soup, bx_, ybk + sagb(bx_) - 2.0, zk - 0.2, 1.1, 1.0, 0.9, sd + int(bx_ * 5), 0, 4, 8)
+                circles.append([bx_, ybk + sagb(bx_) - 2.0, 1.0, zk])
+            fx += fw + rng.uniform(2.5, 5.5)
+        _rc_relief(soup, -wl[k], wr[k], zk, zt, (lambda u, yb_=ybk, sg=sagb: yb_ + sg(u)), (0.0, -1.0), 'x', sd + 11 * k, 0.9, flats, holes)
+        layout["ledges"].append({"z": zk, "y0": ya, "y1": ybk, "xl": -wl[k], "xr": wr[k], "cf": (cb[k - 1] if k > 0 else 0.0), "cb": cb[k],
+                                 "fl": ([-wl[k - 1], wr[k - 1]] if k > 0 else [-wl[k], wr[k]])})
+        nsl = max(2, int((wl[k] + wr[k] + 3.6) / 2.0))
+        for i in range(nsl):                                                       # the floor in slices, so it follows the curved walls; it runs on under the rock
+            xa = -wl[k] - 1.8 + (wl[k] + wr[k] + 3.6) * i / nsl
+            xb_ = -wl[k] - 1.8 + (wl[k] + wr[k] + 3.6) * (i + 1) / nsl
+            fa, fb_ = ya + sagf(xa), ya + sagf(xb_)
+            ba, bb_ = ybk + sagb(xa) + 1.6, ybk + sagb(xb_) + 1.6
+            _tc_quad(soup, [(xa, fa, zk), (xb_, fb_, zk), (xb_, bb_, zk), (xa, ba, zk)], (0.0, 0.0, 1.0), TC_PAVING_SLOT)
+        for sx_ in (-1.0, 1.0):                                                  # the cut at each side of the ledge, up to the mountain's own surface
+            xb = sx_ * wk(sx_)
+            top_fn = lambda u, xb=xb: max(zk + 0.5, N.boundary(xb, u))
+            _rc_relief(soup, ya, ybk, zk, zk + rk + 30.0, xb, (-sx_, 0.0), 'y', sd + 31 * k + (5 if sx_ > 0 else 0), 1.2, ztop=top_fn)
+        if k < L - 1:
+            x_s = xe - s_ * st_len
+            ysx = ybk + sagb(xe)
+            for i in range(n_st):
+                _tc_box(soup, x_s + s_ * (i + 0.5) * RC_RUN, ysx - 1.2, zk, RC_RUN, 4.0, (i + 1) * sr, 1)
+            _tc_box(soup, xe + s_ * 0.8, ysx - 1.2, zk, 1.6, 4.0, rk, 1)                # a landing at the top of the flight
+            xe2 = xe + s_ * 1.6
+            layout["stairs"].append({"x0": min(xe2, x_s), "x1": max(xe2, x_s), "y0": ysx - 3.2, "y1": ysx, "z0": zk, "n": n_st, "sr": sr, "run": RC_RUN, "s": s_, "xs": x_s})
+    # --- boulders along the front lip of each ledge, trees and bushes on the ledges
+    for k in range(L):
+        sagf_ = _rc_sag(cb[k - 1], -wl[k - 1], wr[k - 1]) if k > 0 else (lambda x: 0.0)
+        sagb_ = _rc_sag(cb[k], -wl[k], wr[k])
+        gap = None
+        if k == 0 and pad:
+            gap = (pad[0] - 0.8, pad[2] + 0.8)
+        elif k == 0:
+            gap = (-3.6, 3.6)                                                  # where the front flight arrives
+        elif k > 0:
+            st = layout["stairs"][k - 1]
+            gap = (st["x1"] - 4.5, st["x1"] + 1.0) if st["s"] > 0 else (st["x0"] - 1.0, st["x0"] + 4.5)
+        x = -wl[k] + 1.0
+        while x < wr[k] - 0.5:
+            r = rng.uniform(0.7, 1.5)
+            if gap and gap[0] - r < x < gap[1] + r:
+                x += 1.5
+                continue
+            ly = (y0 if k == 0 else yb[k - 1]) + sagf_(x) + 0.5
+            _rc_blob(soup, x, ly + rng.uniform(-0.2, 0.3), zs[k] - 0.3, r, r * 0.9, rng.uniform(0.6, 1.2), sd + int(x * 7) + k, 0, 4, 8)
+            circles.append([x, ly, r * 0.85, zs[k]])
+            x += 2 * r + rng.uniform(0.0, 0.9)
+        n_trees = int(float(p["trees"]) * (wl[k] + wr[k]) / 7.0)
+        a_y0, a_y1 = (y0 if k == 0 else yb[k - 1]) + 3.0, yb[k] - 6.0
+        placed = []
+        for _ in range(n_trees * 3):
+            if len(placed) >= n_trees or a_y1 <= a_y0:
+                break
+            tx_, ty_ = rng.uniform(-wl[k] + 4.0, wr[k] - 4.0), rng.uniform(a_y0 - 4.0, a_y1 + 4.0)
+            if not ((y0 if k == 0 else yb[k - 1]) + sagf_(tx_) + 3.0 < ty_ < yb[k] + sagb_(tx_) - 6.0):
+                continue
+            if any(math.hypot(tx_ - qx, ty_ - qy) < 4.0 for qx, qy in placed) or (k == 0 and pad and pad[0] - 3.0 < tx_ < pad[2] + 3.0 and ty_ < y0 + 6.0):
+                continue
+            if k > 0:
+                st = layout["stairs"][k - 1]
+                if st["x0"] - 3.0 < tx_ < st["x1"] + 3.0 and ty_ < yb[k - 1] + 7.0:
+                    continue
+            placed.append((tx_, ty_))
+            if rng.random() < 0.75:
+                tp = {"height": rng.uniform(4.5, 8.0), "crown": 'ROUND' if rng.random() < 0.6 else 'CONE', "leaf": 'GREEN'}
+                soup.append(_build_tree_mesh(tp, rng.randint(1, 999999)), rot=rng.uniform(0, 6.28), offset=(tx_, ty_, zs[k]))
+                circles.append([tx_, ty_, 0.55, zs[k]])
+                layout["trees"] += 1
+            else:
+                _tc_bush(soup, tx_, ty_, zs[k], rng.uniform(0.7, 1.2), rng)
+                circles.append([tx_, ty_, 0.9, zs[k]])
+    # --- boulders and scrub on the mountain itself
+    for _ in range(int(40 + 0.5 * dm["wmax"])):
+        bx_, by_ = rng.uniform(-N.x_extent, N.x_extent), rng.uniform(y0 - 10.0, dm["y_back"] + dm["tail"] * 0.8)
+        if any(-wl[k] - 3.0 < bx_ < wr[k] + 3.0 and (y0 if k == 0 else yb[k - 1]) - 3.0 < by_ < yb[k] + 3.0 for k in range(L)) or by_ < y0:
+            continue
+        bz = N(bx_, by_)
+        if bz > 0.5:
+            _rc_blob(soup, bx_, by_, bz - 0.4, rng.uniform(1.0, 3.2), rng.uniform(1.0, 3.0), rng.uniform(0.8, 2.4), sd + int(bx_ * 3), 0, 4, 8)
+    layout["radius"] = math.hypot(dm["width"], dm["depth"]) / 2
+    return soup, layout
+
+
+def rock_city_walk_check(layout, cell=0.5):
+    """A grid walk from the foot of the road: the road, the first ledge, every ledge up the stairs, and every carved room through its door. Returns
+    {'ok', 'top', 'rooms', 'ledge_reach', ...}."""
+    from collections import deque
+    w = layout["w"]
+    ys_all = [l["y1"] for l in layout["ledges"]]
+    x0g, y0g = -w - 1.0, -2.0
+    nx, ny = int((2 * w + 2) / cell) + 1, int((max(ys_all) + 8.0 - y0g) / cell) + 1
+    NONE = float("nan")
+    H = [[NONE] * nx for _ in range(ny)]
+    blocked = [[False] * nx for _ in range(ny)]
+    X = lambda i: x0g + i * cell
+    Y = lambda j: y0g + j * cell
+    ci = lambda x: int(round((x - x0g) / cell))
+    cj = lambda y: int(round((y - y0g) / cell))
+
+    def cells(xa, ya, xb, yb):
+        for j in range(max(0, cj(ya)), min(ny, cj(yb) + 1)):
+            for i in range(max(0, ci(xa)), min(nx, ci(xb) + 1)):
+                if xa <= X(i) <= xb and ya <= Y(j) <= yb:
+                    yield j, i
+    for j, i in cells(-w, -2.0, w, layout["y0"] - 1e-6):
+        H[j][i] = 0.0
+    def ledge_cells(lg):
+        """Cells of a ledge: between its curved front edge and its curved back wall."""
+        sf, sb = _rc_sag(lg.get("cf", 0.0), *lg.get("fl", [lg["xl"], lg["xr"]])), _rc_sag(lg.get("cb", 0.0), lg["xl"], lg["xr"])
+        for i in range(max(0, ci(lg["xl"])), min(nx, ci(lg["xr"]) + 1)):
+            x = X(i)
+            if not lg["xl"] <= x <= lg["xr"]:
+                continue
+            for j in range(max(0, cj(lg["y0"] + sf(x))), min(ny, cj(lg["y1"] + sb(x)) + 1)):
+                if lg["y0"] + sf(x) <= Y(j) < lg["y1"] + sb(x) - 1e-6:
+                    yield j, i
+    for lg in layout["ledges"]:
+        for j, i in ledge_cells(lg):
+            H[j][i] = lg["z"]
+    sr, run = layout["step"]
+    max_step = sr * math.ceil(cell / run) + 0.01
+    for st in layout["stairs"]:
+        for j, i in cells(st["x0"], st["y0"], st["x1"], st["y1"] - 1e-6):
+            t = (X(i) - st["xs"]) * st["s"]
+            if 0 <= t:
+                H[j][i] = st["z0"] + (min(int(t / run), st["n"] - 1) + 1) * st["sr"]
+    fs = layout.get("front_stair")
+    if fs:
+        for j, i in cells(fs["x0"], fs["y0"], fs["x1"], layout["y0"] - 1e-6):
+            H[j][i] = (min(int((Y(j) - fs["y0"]) / fs["run"]), fs["n"] - 1) + 1) * fs["sr"]
+    rd = layout.get("road")
+    if rd:
+        pts, hw = rd["pts"], rd["w"] / 2 - 0.15
+        for a, b in zip(pts, pts[1:]):
+            n_ = max(1, int(math.hypot(b[0] - a[0], b[1] - a[1]) / 0.25))
+            for q in range(n_ + 1):
+                px, py, pz = a[0] + (b[0] - a[0]) * q / n_, a[1] + (b[1] - a[1]) * q / n_, a[2] + (b[2] - a[2]) * q / n_
+                for j, i in cells(px - hw, py - hw, px + hw, py + hw):
+                    if math.hypot(X(i) - px, Y(j) - py) <= hw:
+                        H[j][i] = pz
+        pd = rd["pad"]
+        for j, i in cells(pd[0], pd[1], pd[2], pd[3] - 1e-6):
+            H[j][i] = pd[4]
+    H2 = [[NONE] * nx for _ in range(ny)]                                 # the second layer: the inside of the rooms and caves, which lie under the ledges above
+    T = [[False] * nx for _ in range(ny)]                                 # doorway cells: the only places where the two layers meet
+    for xa, ya, xb, yb_, z in layout["throats"]:
+        for j, i in cells(xa, ya, xb, yb_):
+            H[j][i] = z
+            H2[j][i] = z
+            T[j][i] = True
+    for rm in layout["rooms"]:
+        for j, i in cells(*rm["rect"]):
+            H2[j][i] = rm["z"]
+    for cx, cy, r, cz in layout["circles"]:                                # an obstacle only blocks the cells at its own height
+        for j, i in cells(cx - r, cy - r, cx + r, cy + r):
+            if math.hypot(X(i) - cx, Y(j) - cy) <= r and abs(H[j][i] - cz) < 0.6:
+                blocked[j][i] = True
+    blocked2 = [[False] * nx for _ in range(ny)]
+    for rm in layout["rooms"]:
+        for f in rm["furn"]:
+            for j, i in cells(f[0] - f[3], f[1] - f[4], f[0] + f[3], f[1] + f[4]):
+                blocked2[j][i] = True
+    seen = [[[False] * nx for _ in range(ny)] for _ in range(2)]
+    Hs, Bs = (H, H2), (blocked, blocked2)
+    s = (cj(layout["start"][1]), ci(layout["start"][0]))
+    dq = deque([(0, s[0], s[1])])
+    seen[0][s[0]][s[1]] = True
+    while dq:
+        l_, j, i = dq.popleft()
+        for dj, di in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            b, a = j + dj, i + di
+            if 0 <= b < ny and 0 <= a < nx and not seen[l_][b][a] and not Bs[l_][b][a] and Hs[l_][b][a] == Hs[l_][b][a] and abs(Hs[l_][b][a] - Hs[l_][j][i]) <= max_step:
+                seen[l_][b][a] = True
+                dq.append((l_, b, a))
+        if T[j][i] and not seen[1 - l_][j][i] and not Bs[1 - l_][j][i]:
+            seen[1 - l_][j][i] = True
+            dq.append((1 - l_, j, i))
+    reach = []
+    for lg in layout["ledges"]:
+        free = hit = 0
+        for j, i in ledge_cells(lg):
+            if abs(H[j][i] - lg["z"]) < 1e-6 and not blocked[j][i]:
+                free += 1
+                hit += seen[0][j][i]
+        reach.append(hit / max(1, free))
+    bad, worst = [], 1.0
+    for rm in layout["rooms"]:
+        free = hit = 0
+        for j, i in cells(*rm["rect"]):
+            if not blocked2[j][i]:
+                free += 1
+                hit += seen[1][j][i]
+        fr = hit / max(1, free)
+        worst = min(worst, fr)
+        if fr < 0.9:
+            bad.append((round(rm["rect"][0], 1), round(rm["rect"][1], 1), round(fr, 2)))
+    return {"ok": bool(reach[-1] > 0.9 and not bad and min(reach) > 0.97), "top": bool(reach[-1] > 0.9), "rooms": len(layout["rooms"]),
+            "unreached_rooms": bad, "worst_room": worst, "ledge_reach": [round(r, 2) for r in reach]}
+
+
+def _plan_build_rock_city(context, node, world, seed, path):
+    where = "/".join(path)
+    try:
+        p = {**PLAN_ROCK_DEFAULTS, **(node.get("params") or {})}
+        for key, (lo, hi) in PLAN_ROCK_RANGES.items():
+            v = p[key]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or v < lo or v > hi:
+                raise PlanError("params.%s = %r is outside %s..%s" % (key, v, lo, hi))
+        if p["rock"] not in RC_ROCKS:
+            raise PlanError("params.rock = %r is not one of %s" % (p["rock"], ", ".join(RC_ROCKS)))
+        soup, layout = _build_rock_city(p, seed)
+    except PlanError as exc:
+        raise PlanError("%s: %s" % (where, exc))
+    dm = _rc_dims(p, seed)
+    yc = (dm["y_back"] + dm["tail"]) / 2.0
+    soup.verts = [(x, y - yc, z) for x, y, z in soup.verts]
+    mesh = soup.to_mesh("RockCity_" + node["id"])
+    obj = bpy.data.objects.new(mesh.name, mesh)
+    context.scene.collection.objects.link(obj)
+    tone = p["rock"]
+    base = [_rock_material("CLIFF_" + tone), _rock_material("CARVED_" + tone), _rock_material("GROUND"), get_or_create_wood_material('DARK')]
+    for mat_ in base + [get_or_create_leaf_material('GREEN'), _water_material(), _rock_material("GROUND"), _gold_material()]:
+        mesh.materials.append(mat_)
+    _add_viewport_color_attribute(mesh)
+    layout["oy"] = yc
+    obj["gla_walk_layout"] = json.dumps(layout)
+    made = [obj]
+    for i, (hx, hy, hz, rot, w_, h_) in enumerate(layout["door_panels"]):
+        dm_ = _tc_door_mesh(w_, h_).to_mesh("RockDoor_%03d" % i)
+        dobj = bpy.data.objects.new("Door_Panel_%03d" % i, dm_)
+        context.scene.collection.objects.link(dobj)
+        dobj.location = (hx, hy - yc, hz)
+        dobj.rotation_euler = (0.0, 0.0, rot)
+        for m_ in (base[3], base[1], base[3], base[3]):
+            dm_.materials.append(m_)
+        made.append(dobj)
+    if p["lights"]:
+        for i, (lx, ly, lz, energy) in enumerate(layout["lights"]):
+            ld = bpy.data.lights.new("RockLamp_%03d" % i, 'POINT')
+            ld.energy, ld.color, ld.shadow_soft_size = energy, (1.0, 0.72, 0.45), 0.3
+            lobj = bpy.data.objects.new("Lamp_%03d" % i, ld)
+            lobj.location = (lx, ly - yc, lz)
+            context.scene.collection.objects.link(lobj)
+            made.append(lobj)
+    _plan_adopt_objects(context.scene, path, world, made)
+    return made
+
+
 PLAN_BUILDERS = {"tower": _plan_build_tower, "castle": _plan_build_castle,
                  "house": _plan_build_house, "chapel": _plan_build_house, "stable": _plan_build_house,
                  "barn": _plan_build_house, "well": _plan_build_well, "keep": _plan_build_keep,
                  "tree": _plan_build_prop, "barrel": _plan_build_prop, "crate": _plan_build_prop, "haystack": _plan_build_prop,
-                 "hut": _plan_build_hut, "terrace_city": _plan_build_terrace_city, "swan_castle": _plan_build_swan_castle, "mansion": _plan_build_mansion}
+                 "hut": _plan_build_hut, "terrace_city": _plan_build_terrace_city, "swan_castle": _plan_build_swan_castle, "mansion": _plan_build_mansion, "rock_city": _plan_build_rock_city}
 
 
 # ------------------------------------------------------------------------------
@@ -16438,6 +17334,8 @@ def plan_new_example(scene, kind, existing_ids):
                          children=[hamlet, farm, watch, path_])
     if kind == 'MANSION':
         return plan_node(unique("mansion"), "building", "mansion", transform=transform, params={})
+    if kind == 'ROCK':
+        return plan_node(unique("rock_city"), "building", "rock_city", transform=transform, params={})
     if kind == 'VILLA':
         return plan_node(unique("villa"), "building", "mansion", transform=transform,
                          params={"plan": "random", "plan_shape": "random", "plan_seed": random.randint(1, 99999), "floors": random.choice((2, 3)), "wing": float(random.choice((30, 36, 44)))})
@@ -16606,7 +17504,7 @@ class OBJECT_OT_PlanCreate(bpy.types.Operator):
                               ('HOUSE', "House", ""), ('CHAPEL', "Chapel", ""), ('STABLE', "Stable", ""),
                               ('FORTRESS', "Fortress", ""), ('FARM', "Farm", ""), ('HAMLET', "Hamlet", ""),
                               ('STREET', "Street", ""), ('BLOCK', "Block", ""),
-                              ('HUT', "Hut", ""), ('HUTS', "Hut cluster", ""), ('TERRAIN', "Terrain", ""), ('TOWN', "Walled town", ""), ('CITY', "City", ""), ('TERRACES', "Terrace city", ""), ('TWIN', "Twin peaks", ""), ('LAND', "City on land", ""), ('SWAN', "Swan castle", ""), ('MANSION', "Mansion", ""), ('VILLA', "Villa (random plan)", "")])
+                              ('HUT', "Hut", ""), ('HUTS', "Hut cluster", ""), ('TERRAIN', "Terrain", ""), ('TOWN', "Walled town", ""), ('CITY', "City", ""), ('TERRACES', "Terrace city", ""), ('TWIN', "Twin peaks", ""), ('LAND', "City on land", ""), ('SWAN', "Swan castle", ""), ('MANSION', "Mansion", ""), ('VILLA', "Villa (random plan)", ""), ('ROCK', "Rock city", "")])
 
     def execute(self, context):
         plan = plan_new_example(context.scene, self.kind, set(plan_list_ids()))
@@ -18011,7 +18909,7 @@ class VIEW3D_PT_GLAPlans(bpy.types.Panel):
         for kind, label in (('FARM', "Farm"), ('HAMLET', "Hamlet"), ('STREET', "Street"), ('BLOCK', "Block")):
             row.operator("object.gla_plan_create", text=label).kind = kind
         row = layout.row(align=True)
-        for kind, label in (('HUT', "Hut"), ('HUTS', "Huts"), ('TOWN', "Town"), ('CITY', "City"), ('TERRACES', "Terraces"), ('TWIN', "Twin"), ('LAND', "Land"), ('SWAN', "Swan"), ('MANSION', "Mansion"), ('VILLA', "Villa"), ('TERRAIN', "Terrain")):
+        for kind, label in (('HUT', "Hut"), ('HUTS', "Huts"), ('TOWN', "Town"), ('CITY', "City"), ('TERRACES', "Terraces"), ('TWIN', "Twin"), ('LAND', "Land"), ('SWAN', "Swan"), ('MANSION', "Mansion"), ('VILLA', "Villa"), ('ROCK', "Rock city"), ('TERRAIN', "Terrain")):
             row.operator("object.gla_plan_create", text=label).kind = kind
         for plan_id in plan_list_ids():
             box = layout.box()
