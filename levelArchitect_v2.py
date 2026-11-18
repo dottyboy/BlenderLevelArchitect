@@ -33,7 +33,7 @@ from bpy_extras.io_utils import ExportHelper, ImportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 62, 0),
+    "version": (0, 63, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -16224,11 +16224,563 @@ def _plan_build_rock_city(context, node, world, seed, path):
     return made
 
 
+# ------------------------------------------------------------------------------
+# House from a floor-plan picture. An architect's drawing (black walls on white, thin lines for furniture, door swings drawn as quarter circles) becomes a
+# `floor_plan` building: walls as boxes, windows where an outside wall is interrupted, doors where a swing arc is found (each with its own hinged leaf),
+# floor and roof slabs, stairs between floors. `floorplan_trace` does the reading (numpy only), `_build_floor_plan` the building,
+# `floor_plan_walk_check` proves the rooms can be walked (doors, stairs).
+# ------------------------------------------------------------------------------
+PLAN_FLOOR_DEFAULTS = dict(heights=[2.7], floors=None, stairs=[], roof=True, lights=True, entrance=None, glass=True)
+FP_SILL, FP_HEAD, FP_DOOR_H = 0.9, 2.1, 2.1
+
+
+def _fp_win(mask, ky, kx):
+    """Sum of `mask` over a ky x kx window whose top-left corner is at each pixel (valid positions only; the result is smaller by ky-1, kx-1)."""
+    import numpy as np
+    c = np.zeros((mask.shape[0] + 1, mask.shape[1] + 1), dtype=np.int32)
+    c[1:, 1:] = mask.astype(np.int32).cumsum(0).cumsum(1)
+    return c[ky:, kx:] - c[:-ky, kx:] - c[ky:, :-kx] + c[:-ky, :-kx]
+
+
+def _fp_open(mask, ky, kx):
+    """Binary opening by a ky x kx rectangle: what survives is whatever contains such a rectangle."""
+    import numpy as np
+    er = _fp_win(mask, ky, kx) == ky * kx
+    pad = np.zeros((mask.shape[0] + 2 * (ky - 1), mask.shape[1] + 2 * (kx - 1)), dtype=bool)
+    pad[ky - 1:ky - 1 + er.shape[0], kx - 1:kx - 1 + er.shape[1]] = er
+    return _fp_win(pad, ky, kx)[:mask.shape[0], :mask.shape[1]] > 0
+
+
+def _fp_dilate(mask, r):
+    import numpy as np
+    pad = np.zeros((mask.shape[0] + 2 * r, mask.shape[1] + 2 * r), dtype=bool)
+    pad[r:-r, r:-r] = mask
+    return _fp_win(pad, 2 * r + 1, 2 * r + 1)[:mask.shape[0], :mask.shape[1]] > 0
+
+
+def _fp_runs(row):
+    import numpy as np
+    d = np.diff(np.concatenate([[0], row.astype(np.int8), [0]]))
+    return np.nonzero(d == 1)[0], np.nonzero(d == -1)[0]
+
+
+def _fp_label(mask, diag=True):
+    """Connected components of a boolean image by runs and union-find. Returns (labels, n); labels are 1..n, 0 is background."""
+    import numpy as np
+    h, w = mask.shape
+    parent = [0]
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+    runs = []
+    prev = []
+    ext = 1 if diag else 0
+    for y in range(h):
+        st, en = _fp_runs(mask[y])
+        cur = []
+        j = 0
+        for a, b in zip(st.tolist(), en.tolist()):
+            parent.append(len(parent))
+            idx = len(parent) - 1
+            cur.append((a, b, idx))
+            while j < len(prev) and prev[j][1] <= a - ext:
+                j += 1
+            k = j
+            while k < len(prev) and prev[k][0] < b + ext:
+                ra, rb = find(idx), find(prev[k][2])
+                if ra != rb:
+                    parent[max(ra, rb)] = min(ra, rb)
+                k += 1
+        runs.append(cur)
+        prev = cur
+    remap = {}
+    lab = np.zeros((h, w), dtype=np.int32)
+    for y in range(h):
+        for a, b, idx in runs[y]:
+            r = find(idx)
+            if r not in remap:
+                remap[r] = len(remap) + 1
+            lab[y, a:b] = remap[r]
+    return lab, len(remap)
+
+
+def _fp_rects(grid):
+    """Disjoint rectangles covering a boolean grid exactly (equal row runs on consecutive rows are stacked): [(x0, y0, x1, y1)] in cell units, x1 / y1 exclusive."""
+    rects, active = [], {}
+    for y in range(grid.shape[0] + 1):
+        runs = []
+        if y < grid.shape[0]:
+            st, en = _fp_runs(grid[y])
+            runs = list(zip(st.tolist(), en.tolist()))
+        new = {}
+        for r in runs:
+            new[r] = active.pop(r) if r in active else y
+        for r, y0 in active.items():
+            rects.append((r[0], y0, r[1], y))
+        active = new
+    return rects
+
+
+def _fp_gaps(W, minrun, lmin, lmax, minthick, strict=True):
+    """Horizontal gaps in the wall mask: a white run between two wall runs that are both long (a wall continuing across the gap), the same on several rows.
+    Returns [(x0, y0, x1, y1)] in pixels."""
+    h = W.shape[0]
+    out, active = [], {}
+    for y in range(h + 1):
+        cur = []
+        if y < h:
+            st, en = _fp_runs(W[y])
+            for i in range(len(st) - 1):
+                la, lb = en[i] - st[i], en[i + 1] - st[i + 1]
+                if ((la >= minrun and lb >= minrun) if strict else (max(la, lb) >= minrun and min(la, lb) >= 8)) and lmin <= st[i + 1] - en[i] <= lmax:
+                    cur.append((int(en[i]), int(st[i + 1])))
+        newa = {}
+        for g in cur:
+            m = next((k for k in active if abs(k[0] - g[0]) <= 6 and abs(k[1] - g[1]) <= 6), None)
+            if m is not None:
+                newa[m] = (active.pop(m)[0], y)
+            else:
+                newa[g] = (y, y)
+        for k, (y0, y1) in active.items():
+            if y1 - y0 + 1 >= minthick:
+                out.append((k[0], y0, k[1], y1 + 1))
+        active = newa
+    return out
+
+
+def floorplan_trace(rgb, mpp=None, width=12.0, dark=110):
+    """Reads an architect's floor plan from an RGB / grey image array (rows top to bottom, 0..255).
+    Walls are the thick dark strokes (thin lines — furniture, text — are ignored); a window is a gap in an outside wall, a door is a drawn swing arc
+    (a quarter circle with its leaf; a door whose arc is not found is just an open doorway), the opening lowest in the picture is the front entrance.
+    `mpp` = metres per pixel, or `width` = the width in metres of the whole drawing (walls only). Returns a floor dict:
+    walls [[x0, y0, x1, y1]], windows [[x0, y0, x1, y1, kind]] (kind window / wide / garage), doors [[x0, y0, x1, y1, hinge_x, hinge_y]],
+    slab [[x0, y0, x1, y1]] (the floor area, walls included), entrance (index into doors or None), size [width, depth]. Metres, y up, origin in the middle."""
+    import numpy as np
+    a = np.asarray(rgb, dtype=np.float32)
+    if a.ndim == 3:
+        a = a[..., :3].mean(axis=2)
+    ih, iw = a.shape
+    k = max(5, int(round(iw * 0.0044)))
+    ink = a < dark
+    W = _fp_open(ink, k, k)
+    lab, n = _fp_label(W)
+    if n == 0:
+        raise PlanError("no walls found: the picture needs thick dark wall strokes on a light background")
+    sizes = np.bincount(lab.ravel())
+    keep = sizes >= max(300, iw * ih * 0.0003)
+    keep[0] = False
+    W = keep[lab]
+    ys, xs = np.nonzero(W)
+    if len(xs) == 0:
+        raise PlanError("no walls found: the picture needs thick dark wall strokes on a light background")
+    x_lo, x_hi, y_lo, y_hi = int(xs.min()), int(xs.max()) + 1, int(ys.min()), int(ys.max()) + 1
+    if mpp is None:
+        mpp = float(width) / float(x_hi - x_lo)
+    if mpp <= 0:
+        raise PlanError("the scale (metres per pixel) must be positive")
+    px = lambda m: m / mpp
+    # --- doors: a swing arc (a quarter circle round the hinge, with the open leaf) in front of a gap in a wall. Candidate gaps are the white runs between a long
+    # wall run and another wall run; each end of the gap is tried as the hinge, on both sides of the wall, for a set of radii.
+    thin = (a < 200) & ~_fp_dilate(W, 3)
+    cand = [(g[0], g[1], g[2], g[3], "h") for g in _fp_gaps(W, int(px(0.37)), int(px(0.3)), int(px(1.7)), 6, strict=False)]
+    cand += [(g[1], g[0], g[3], g[2], "v") for g in _fp_gaps(W.T, int(px(0.37)), int(px(0.3)), int(px(1.7)), 6, strict=False)]
+    def arc_cover(cx, cy, r, sx_, sy_):
+        """Angular bins (of 9) covered by thin line pixels on a circle of radius r round (cx, cy), in the quadrant (sx_, sy_), and the pixel share."""
+        pad = r + 4
+        x_a, x_b = (cx, cx + sx_ * pad) if sx_ > 0 else (cx + sx_ * pad, cx)
+        y_a, y_b = (cy, cy + sy_ * pad) if sy_ > 0 else (cy + sy_ * pad, cy)
+        x_a, y_a, x_b, y_b = max(0, x_a), max(0, y_a), min(iw, x_b + 1), min(ih, y_b + 1)
+        if x_b <= x_a or y_b <= y_a:
+            return 0, 0.0, 1.0
+        yy, xx = np.nonzero(thin[y_a:y_b, x_a:x_b])
+        yy, xx = yy + y_a, xx + x_a
+        dd = np.hypot(xx - cx, yy - cy)
+        on = np.abs(dd - r) <= 2.6
+        if not on.any():
+            return 0, 0.0, 1.0
+        ang = np.degrees(np.arctan2(np.abs(yy[on] - cy), np.abs(xx[on] - cx)))
+        bins = np.bincount(np.minimum((ang // 10).astype(int), 8), minlength=9)
+        ang_all = np.degrees(np.arctan2(np.abs(yy - cy), np.abs(xx - cx)))
+        inner = ((dd < r - 6) & (ang_all > 12) & (ang_all < 78)).sum() / (0.5 * r * r)
+        return int((bins >= 2).sum()), on.sum() / (math.pi / 2 * r), float(inner)
+    doors_px = []
+    taken = []
+    for x0, y0, x1, y1, ax in cand:
+        if any(abs((x0 + x1) - (t[0] + t[2])) < 12 and abs((y0 + y1) - (t[1] + t[3])) < 12 for t in taken):
+            continue
+        best = None
+        for end in (0, 1):
+            for sd in (-1, 1):
+                for off in (0, (y1 - y0) // 2, y1 - y0 - 1):
+                    for r in range(int(px(0.6)), int(px(1.12)), 4):
+                        if ax == "h":
+                            hx, hy = (x0 if end == 0 else x1), y0 + off
+                            cv, share, inner = arc_cover(hx, hy, r, 1 if end == 0 else -1, sd)
+                        else:
+                            hx, hy = x0 + off, (y0 if end == 0 else y1)
+                            cv, share, inner = arc_cover(hx, hy, r, sd, 1 if end == 0 else -1)
+                        if cv >= 9 and share >= 0.5 and inner < 0.06 and (best is None or (cv, share) > best[0]):
+                            best = ((cv, share), end, hx, hy, r)
+        if best:
+            _, end, hx, hy, r = best
+            taken.append((x0, y0, x1, y1))
+            if ax == "h":
+                bx0, bx1 = (x0, min(x1, x0 + r)) if end == 0 else (max(x0, x1 - r), x1)
+                doors_px.append((bx0, y0, bx1, y1, hx if end == 0 else x1, (y0 + y1) // 2, "h"))
+            else:
+                by0, by1 = (y0, min(y1, y0 + r)) if end == 0 else (max(y0, y1 - r), y1)
+                doors_px.append((x0, by0, x1, by1, (x0 + x1) // 2, hy if end == 0 else y1, "v"))
+    # --- gaps in the walls (windows, big glazing, the garage door)
+    minrun, lmin, lmax, mth = int(px(0.37)), int(px(0.4)), int(px(6.5)), max(4, int(px(0.07)))
+    gaps = [(g[0], g[1], g[2], g[3], "h") for g in _fp_gaps(W, minrun, lmin, lmax, mth)]
+    gaps += [(g[1], g[0], g[3], g[2], "v") for g in _fp_gaps(W.T, minrun, lmin, lmax, mth)]
+    # --- which side is outside: bridge every gap and door, then flood the background from the border
+    B = W.copy()
+    for x0, y0, x1, y1, *_ in gaps:
+        B[y0:y1, x0:x1] = True
+    for x0, y0, x1, y1, *_ in doors_px:
+        B[max(0, y0):y1, max(0, x0):x1] = True
+    bl, bn = _fp_label(~B, diag=False)
+    outside_ids = set(np.unique(np.concatenate([bl[0], bl[-1], bl[:, 0], bl[:, -1]])).tolist()) - {0}
+    out = np.isin(bl, list(outside_ids)) & ~B
+    def is_out(x, y):
+        x, y = int(min(max(x, 0), iw - 1)), int(min(max(y, 0), ih - 1))
+        return bool(out[y, x])
+    d = int(px(0.3)) + 3
+    windows_px, used = [], []
+    for x0, y0, x1, y1, ax in gaps:
+        cx, cy = (x0 + x1) // 2, (y0 + y1) // 2
+        if any(abs(cx - (u[0] + u[2]) / 2) < (u[2] - u[0]) / 2 + 4 and abs(cy - (u[1] + u[3]) / 2) < (u[3] - u[1]) / 2 + 4 for u in used):
+            continue
+        if any(x0 <= (q[0] + q[2]) / 2 <= x1 and y0 <= (q[1] + q[3]) / 2 <= y1 for q in doors_px):
+            continue                                  # a door already stands here
+        a_out = is_out(cx, y0 - d) if ax == "h" else is_out(x0 - d, cy)
+        b_out = is_out(cx, y1 + d) if ax == "h" else is_out(x1 + d, cy)
+        if a_out == b_out:
+            continue
+        used.append((x0, y0, x1, y1))
+        L = (x1 - x0 if ax == "h" else y1 - y0) * mpp
+        windows_px.append((x0, y0, x1, y1, "garage" if L >= 3.6 else ("wide" if L >= 2.2 else "window")))
+    # the front entrance: the lowest opening in the picture (the portico) stays open - no glass in it, and the walk starts there
+    entrance = None
+    if windows_px:
+        low = max(windows_px, key=lambda w: (w[1] + w[3]) / 2)
+        ex_, ey_ = (low[0] + low[2]) / 2.0, (low[1] + low[3]) / 2.0
+        if (low[1] + low[3]) / 2.0 > y_lo + 0.6 * (y_hi - y_lo):
+            entrance = (ex_, ey_)
+            windows_px = [w for w in windows_px if math.hypot((w[0] + w[2]) / 2.0 - ex_, (w[1] + w[3]) / 2.0 - ey_) > px(2.5)]
+    # --- slab: everything the outside flood did not reach (walls included)
+    C = max(2, int(round(px(0.05))))
+    mask = ~out
+    h2, w2 = ih // C, iw // C
+    g = mask[:h2 * C, :w2 * C].reshape(h2, C, w2, C).mean(axis=(1, 3)) > 0.5
+    wl = W[:h2 * C, :w2 * C].reshape(h2, C, w2, C).mean(axis=(1, 3)) > 0.5
+    cxm, cym = (x_lo + x_hi) / 2.0, (y_lo + y_hi) / 2.0
+    X = lambda v: round((v - cxm) * mpp, 3)
+    Y = lambda v: round(-(v - cym) * mpp, 3)
+    def rect_m(r):
+        return [X(r[0]), min(Y(r[1]), Y(r[3])), X(r[2]), max(Y(r[1]), Y(r[3]))]
+    walls = [rect_m((r[0] * C, r[1] * C, r[2] * C, r[3] * C)) for r in _fp_rects(wl)]
+    slab = [rect_m((r[0] * C, r[1] * C, r[2] * C, r[3] * C)) for r in _fp_rects(g)]
+    windows = [rect_m(w[:4]) + [w[4]] for w in windows_px]
+    doors = [rect_m(dd[:4]) + [X(dd[4]), Y(dd[5])] for dd in doors_px]
+    entrance = [X(entrance[0]), Y(entrance[1])] if entrance else None
+    return dict(walls=walls, windows=windows, doors=doors, slab=slab, entrance=entrance,
+                size=[round((x_hi - x_lo) * mpp, 2), round((y_hi - y_lo) * mpp, 2)], mpp=round(mpp, 5))
+
+
+def _fp_floors(p):
+    fl = p.get("floors")
+    if not isinstance(fl, list) or not fl:
+        raise PlanError("params.floors must be a list with one floor dict per storey (walls, windows, doors, slab) - import a floor-plan picture to make one")
+    for i, f in enumerate(fl):
+        if not isinstance(f, dict) or not isinstance(f.get("walls"), list) or not f["walls"]:
+            raise PlanError("params.floors[%d].walls must be a list of [x0, y0, x1, y1] rectangles" % i)
+        for key, ln in (("walls", 4), ("windows", 5), ("doors", 6), ("slab", 4)):
+            for r in f.get(key, []) or []:
+                if not isinstance(r, (list, tuple)) or len(r) < ln or any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in r[:4]):
+                    raise PlanError("params.floors[%d].%s: every entry needs %d numbers%s" % (i, key, ln, " and a kind" if key == "windows" else ""))
+    hs = p.get("heights") or [2.7]
+    if not isinstance(hs, list) or any(isinstance(h, bool) or not isinstance(h, (int, float)) or not 2.2 <= h <= 6.0 for h in hs):
+        raise PlanError("params.heights must be a list of storey heights between 2.2 and 6 m")
+    hs = [float(h) for h in hs] + [float(hs[-1])] * max(0, len(fl) - len(hs))
+    return fl, hs[:len(fl)]
+
+
+def _fp_slab_rects(rects, holes, grow=0.0, cell=0.1):
+    """The slab as disjoint rectangles: the union of `rects`, grown by `grow`, minus `holes` (all [x0, y0, x1, y1] in metres)."""
+    import numpy as np
+    if not rects:
+        return []
+    x0 = min(r[0] for r in rects) - grow - cell
+    y0 = min(r[1] for r in rects) - grow - cell
+    x1 = max(r[2] for r in rects) + grow + cell
+    y1 = max(r[3] for r in rects) + grow + cell
+    nx, ny = int(math.ceil((x1 - x0) / cell)), int(math.ceil((y1 - y0) / cell))
+    g = np.zeros((ny, nx), dtype=bool)
+    def cells(r, gr=0.0):
+        return (max(0, int(round((r[1] - gr - y0) / cell))), min(ny, int(round((r[3] + gr - y0) / cell))),
+                max(0, int(round((r[0] - gr - x0) / cell))), min(nx, int(round((r[2] + gr - x0) / cell))))
+    for r in rects:
+        a, b, c, d = cells(r, grow)
+        g[a:b, c:d] = True
+    for r in holes:
+        a, b, c, d = cells(r)
+        g[a:b, c:d] = False
+    return [[x0 + r[0] * cell, y0 + r[1] * cell, x0 + r[2] * cell, y0 + r[3] * cell] for r in _fp_rects(g)]
+
+
+def _fp_stairs(p, hs, zs, n_floors):
+    out = []
+    for i, s in enumerate(p.get("stairs") or []):
+        if not isinstance(s, dict):
+            raise PlanError("params.stairs[%d] must be a dict (floor, x, y, dir, width)" % i)
+        fl = s.get("floor", 0)
+        if not isinstance(fl, int) or isinstance(fl, bool) or not 0 <= fl < n_floors - 1:
+            raise PlanError("params.stairs[%d].floor must be a storey below the top one (0..%d)" % (i, n_floors - 2))
+        if s.get("dir", "+y") not in ("+x", "-x", "+y", "-y"):
+            raise PlanError("params.stairs[%d].dir must be +x, -x, +y or -y" % i)
+        for key in ("x", "y"):
+            if not isinstance(s.get(key), (int, float)) or isinstance(s.get(key), bool):
+                raise PlanError("params.stairs[%d].%s must be a number (metres)" % (i, key))
+        w = float(s.get("width", 1.0))
+        rise = hs[fl] + 0.25
+        n = max(3, int(math.ceil(rise / 0.19)))
+        run = 0.27
+        L = n * run
+        dx, dy = {"+x": (1, 0), "-x": (-1, 0), "+y": (0, 1), "-y": (0, -1)}[s.get("dir", "+y")]
+        x, y = float(s["x"]), float(s["y"])
+        ex, ey = x + dx * L, y + dy * L
+        rect = [min(x, ex) - (w / 2 if dx == 0 else 0), min(y, ey) - (w / 2 if dy == 0 else 0), max(x, ex) + (w / 2 if dx == 0 else 0), max(y, ey) + (w / 2 if dy == 0 else 0)]
+        out.append(dict(floor=fl, x=x, y=y, dx=dx, dy=dy, w=w, n=n, run=run, rise=rise, z0=zs[fl], rect=rect))
+    return out
+
+
+def _build_floor_plan(p, seed):
+    """Returns (soup, layout). Materials: 0 wall, 1 trim, 2 roof, 3 wood, 5 glass, 6 floor."""
+    floors, hs = _fp_floors(p)
+    zs = [0.0]
+    for h in hs:
+        zs.append(zs[-1] + h)
+    soup = _TowerMesh()
+    stairs = _fp_stairs(p, hs, zs, len(floors))
+    layout = {"name": p.get("name", "floor_plan"), "zs": zs, "floors": [], "doors": [], "door_panels": [], "windows": [], "stairs": [], "lights": [], "entrance": None}
+    for st in stairs:
+        layout["stairs"].append(dict(floor=st["floor"], rect=st["rect"], dx=st["dx"], dy=st["dy"]))
+    TH = 0.25
+    for fi, f in enumerate(floors):
+        z0, h = zs[fi], hs[fi]
+        walls = [[float(v) for v in r[:4]] for r in f["walls"]]
+        for x0, y0, x1, y1 in walls:
+            if x1 - x0 > 0.01 and y1 - y0 > 0.01:
+                _tc_box(soup, (x0 + x1) / 2, (y0 + y1) / 2, z0, x1 - x0, y1 - y0, h, 0)
+        slab = [[float(v) for v in r[:4]] for r in (f.get("slab") or f["walls"])]
+        holes = [s["rect"] for s in stairs if s["floor"] == fi - 1]
+        for x0, y0, x1, y1 in _fp_slab_rects(slab, holes):
+            if fi == 0:
+                _tc_box(soup, (x0 + x1) / 2, (y0 + y1) / 2, -0.2, x1 - x0, y1 - y0, 0.2, 6)
+            else:
+                _tc_box(soup, (x0 + x1) / 2, (y0 + y1) / 2, z0 - TH, x1 - x0, y1 - y0, TH, 6)
+        if fi == len(floors) - 1 and p.get("roof", True):
+            for x0, y0, x1, y1 in _fp_slab_rects(slab, [], 0.35):
+                _tc_box(soup, (x0 + x1) / 2, (y0 + y1) / 2, z0 + h, x1 - x0, y1 - y0, 0.3, 2)
+        wins, dors = [], []
+        for w in f.get("windows", []) or []:
+            x0, y0, x1, y1, kind = float(w[0]), float(w[1]), float(w[2]), float(w[3]), w[4]
+            if kind not in ("window", "wide", "garage"):
+                raise PlanError("params.floors[%d].windows: kind %r is not window, wide or garage" % (fi, kind))
+            along_x = (x1 - x0) >= (y1 - y0)
+            cx, cy, L, T = (x0 + x1) / 2, (y0 + y1) / 2, max(x1 - x0, y1 - y0), min(x1 - x0, y1 - y0)
+            sill, head = (0.0, 2.2) if kind == "garage" else ((0.5, 2.3) if kind == "wide" else (FP_SILL, FP_HEAD))
+            head = min(head, h - 0.3)
+            bx, by = (L, T) if along_x else (T, L)
+            if sill > 0.0:
+                _tc_box(soup, cx, cy, z0, bx, by, sill, 0)
+            _tc_box(soup, cx, cy, z0 + head, bx, by, h - head, 0)
+            if kind == "garage":
+                _tc_box(soup, cx, cy, z0, bx * 0.98, by * 0.7, head, 3)
+            else:
+                if p.get("glass", True):
+                    _tc_box(soup, cx, cy, z0 + sill, bx if along_x else 0.03, 0.03 if along_x else by, head - sill, 5)
+                _tc_box(soup, cx, cy, z0 + sill - 0.05, bx + 0.1 if along_x else T + 0.12, T + 0.12 if along_x else by + 0.1, 0.05, 1)
+            wins.append(dict(x0=x0, y0=y0, x1=x1, y1=y1, kind=kind))
+        for di, d in enumerate(f.get("doors", []) or []):
+            x0, y0, x1, y1, hx, hy = [float(v) for v in d[:6]]
+            along_x = (x1 - x0) >= (y1 - y0)
+            cx, cy, L, T = (x0 + x1) / 2, (y0 + y1) / 2, max(x1 - x0, y1 - y0), min(x1 - x0, y1 - y0)
+            dh = min(FP_DOOR_H, h - 0.3)
+            bx, by = (L, T) if along_x else (T, L)
+            _tc_box(soup, cx, cy, z0 + dh, bx, by, h - dh, 0)
+            if along_x:
+                rot = 0.0 if abs(hx - x0) <= abs(hx - x1) else math.pi
+                hinge = (hx, cy)
+            else:
+                rot = math.pi / 2 if abs(hy - y0) <= abs(hy - y1) else -math.pi / 2
+                hinge = (cx, hy)
+            layout["door_panels"].append([hinge[0], hinge[1], z0, rot, L - 0.04, dh - 0.03])
+            dors.append(dict(x0=x0, y0=y0, x1=x1, y1=y1, x=cx, y=cy, w=L))
+        layout["floors"].append(dict(z=z0, h=h, walls=walls, slab=slab, windows=wins, doors=dors))
+        layout["doors"] += [dict(d, floor=fi) for d in dors]
+    ent = p.get("entrance") or floors[0].get("entrance")
+    if isinstance(ent, (list, tuple)) and len(ent) >= 2:
+        layout["entrance"] = dict(x=float(ent[0]), y=float(ent[1]))
+    for st in stairs:
+        for i in range(st["n"]):
+            top = st["z0"] + (i + 1) * st["rise"] / st["n"]
+            cx = st["x"] + st["dx"] * (i + 0.5) * st["run"]
+            cy = st["y"] + st["dy"] * (i + 0.5) * st["run"]
+            sx = st["run"] if st["dx"] else st["w"]
+            sy = st["run"] if st["dy"] else st["w"]
+            _tc_box(soup, cx, cy, st["z0"], sx, sy, top - st["z0"], 3)
+    return soup, layout
+
+
+def floor_plan_walk_check(layout, cell=0.1, margin=0.22):
+    """Walks the building from its front door (cells at least `margin` from a wall or window, stairs link the storeys). Returns
+    {'rooms_reached': share of the walkable ground-floor area reached, 'storeys': [share reached per storey], 'unreached': [(floor, area m2)...]}."""
+    import numpy as np
+    from collections import deque
+    fl = layout["floors"]
+    xs = [r[0] for f in fl for r in f["slab"]] + [r[2] for f in fl for r in f["slab"]]
+    ys = [r[1] for f in fl for r in f["slab"]] + [r[3] for f in fl for r in f["slab"]]
+    x0, y0 = min(xs) - 0.5, min(ys) - 0.5
+    nx, ny = int(math.ceil((max(xs) + 0.5 - x0) / cell)), int(math.ceil((max(ys) + 0.5 - y0) / cell))
+    def paint(grid, r, gr=0.0, val=True):
+        a, b = max(0, int((r[1] - gr - y0) / cell)), min(ny, int(math.ceil((r[3] + gr - y0) / cell)))
+        c, d = max(0, int((r[0] - gr - x0) / cell)), min(nx, int(math.ceil((r[2] + gr - x0) / cell)))
+        grid[a:b, c:d] = val
+    free = []
+    for i, f in enumerate(fl):
+        g = np.zeros((ny, nx), dtype=bool)
+        for r in f["slab"]:
+            paint(g, r)
+        for st in layout["stairs"]:
+            if st["floor"] == i - 1:
+                paint(g, st["rect"], 0.0, False)
+            if st["floor"] == i or st["floor"] == i - 1:
+                paint(g, st["rect"])
+        blocked = np.zeros((ny, nx), dtype=bool)
+        for r in f["walls"]:
+            paint(blocked, r, margin)
+        for w in f["windows"]:
+            paint(blocked, [w["x0"], w["y0"], w["x1"], w["y1"]], margin)
+        # a door leaves the wall ends free: its band is clear of the walls already (the wall mask has a gap there)
+        free.append(g & ~blocked)
+    ent = layout.get("entrance")
+    if ent is None:
+        return {"rooms_reached": 0.0, "storeys": [0.0] * len(fl), "unreached": []}
+    seeds = [(0, int((ent["y"] - y0) / cell), int((ent["x"] - x0) / cell))]
+    seen = [np.zeros((ny, nx), dtype=bool) for _ in fl]
+    dq = deque()
+    for s in seeds:
+        if free[s[0]][s[1], s[2]]:
+            seen[0][s[1], s[2]] = True
+            dq.append(s)
+    st_cells = []
+    for st in layout["stairs"]:
+        a = np.zeros((ny, nx), dtype=bool)
+        paint(a, st["rect"])
+        st_cells.append((st["floor"], a))
+    while dq:
+        f_, y, x = dq.popleft()
+        for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            yy, xx = y + dy, x + dx
+            if 0 <= yy < ny and 0 <= xx < nx and free[f_][yy, xx] and not seen[f_][yy, xx]:
+                seen[f_][yy, xx] = True
+                dq.append((f_, yy, xx))
+        for sf, a in st_cells:
+            if a[y, x] and f_ in (sf, sf + 1):
+                o = sf + 1 if f_ == sf else sf
+                if free[o][y, x] and not seen[o][y, x]:
+                    seen[o][y, x] = True
+                    dq.append((o, y, x))
+    shares, unreached = [], []
+    for i in range(len(fl)):
+        tot = int(free[i].sum())
+        shares.append(float(seen[i].sum()) / tot if tot else 1.0)
+        lab, n = _fp_label(free[i] & ~seen[i], diag=False)
+        if n:
+            cnt = np.bincount(lab.ravel())[1:]
+            unreached += [(i, round(float(c) * cell * cell, 1)) for c in cnt if c * cell * cell >= 0.5]
+    return {"rooms_reached": shares[0], "storeys": shares, "unreached": unreached}
+
+
+def floor_plan_size(params=None):
+    fl = (params or {}).get("floors") or []
+    xs = [r[0] for f in fl for r in f.get("walls", [])] + [r[2] for f in fl for r in f.get("walls", [])]
+    ys = [r[1] for f in fl for r in f.get("walls", [])] + [r[3] for f in fl for r in f.get("walls", [])]
+    if not xs:
+        return (12.0, 12.0)
+    return (max(xs) - min(xs) + 2.0, max(ys) - min(ys) + 2.0)
+
+
+PLAN_DEFAULT_FOOTPRINTS["floor_plan"] = lambda params: _footprint_rect(dict(zip(("width", "depth"), floor_plan_size(params))))
+
+
+def _plan_build_floor_plan(context, node, world, seed, path):
+    where = "/".join(path)
+    try:
+        p = {**PLAN_FLOOR_DEFAULTS, **(node.get("params") or {})}
+        soup, layout = _build_floor_plan(p, seed)
+    except PlanError as exc:
+        raise PlanError("%s: %s" % (where, exc))
+    style = plan_style_name(node.get("style"))
+    mesh = soup.to_mesh("FloorPlan_" + node["id"])
+    obj = bpy.data.objects.new(mesh.name, mesh)
+    context.scene.collection.objects.link(obj)
+    if style == 'medieval':
+        base = [get_style_material('AIRCRETE'), get_style_material('FITTED'), get_or_create_roof_material('SLATE'), get_or_create_wood_material('DARK')]
+    else:
+        base = list(plan_material_slots(style, 'PLAIN', None, True))
+    for mat_ in base + [get_or_create_leaf_material('GREEN'), _water_material(), get_style_material('FITTED'), _gold_material()]:
+        mesh.materials.append(mat_)
+    _add_viewport_color_attribute(mesh)
+    obj["gla_walk_layout"] = json.dumps(layout)
+    made = [obj]
+    for i, (hx, hy, hz, rot, w, h) in enumerate(layout["door_panels"]):
+        dm = _tc_door_mesh(w, h).to_mesh("FpDoor_%03d" % i)
+        dobj = bpy.data.objects.new("Door_Panel_%03d" % i, dm)
+        context.scene.collection.objects.link(dobj)
+        dobj.location = (hx, hy, hz)
+        dobj.rotation_euler = (0.0, 0.0, rot)
+        for m_ in (base[3], base[1], base[3], base[3]):
+            dm.materials.append(m_)
+        made.append(dobj)
+    if p.get("lights", True):
+        for fi, f in enumerate(layout["floors"]):
+            for r in _fp_slab_rects(f["slab"], [], 0.0, 3.0)[:12]:
+                if (r[2] - r[0]) >= 2.5 and (r[3] - r[1]) >= 2.5:
+                    ld = bpy.data.lights.new("FpLamp_%d_%03d" % (fi, len(made)), 'POINT')
+                    ld.energy, ld.color, ld.shadow_soft_size = 260.0, (1.0, 0.82, 0.6), 0.2
+                    lobj = bpy.data.objects.new("Lamp_%03d" % len(made), ld)
+                    lobj.location = ((r[0] + r[2]) / 2, (r[1] + r[3]) / 2, f["z"] + f["h"] - 0.4)
+                    context.scene.collection.objects.link(lobj)
+                    made.append(lobj)
+    _plan_adopt_objects(context.scene, path, world, made)
+    return made
+
+
+def plan_from_floorplan_picture(path, plan_id="house", mpp=None, width=12.0, extra=(), heights=(2.7,)):
+    """A plan tree (one `floor_plan` building) from one picture per storey (`path` first, the `extra` pictures are the storeys above, all drawn to the same scale; they
+    are lined up on the walls' middles). Add `params.stairs` between storeys by hand (floor, x, y, dir, width)."""
+    floors = []
+    scale = mpp
+    for i, pth in enumerate([path] + list(extra)):
+        f = floorplan_trace(_plan_image_pixels(path=pth), scale, width)
+        scale = f["mpp"] if scale is None else scale
+        floors.append(f)
+    root = plan_node(plan_id, "building", "floor_plan", transform={"x": 0.0, "y": 0.0, "z": 0.0, "rot": 0.0},
+                     params={"floors": floors, "heights": list(heights) + [heights[-1]] * (len(floors) - len(heights)), "stairs": []})
+    return root
+
+
 PLAN_BUILDERS = {"tower": _plan_build_tower, "castle": _plan_build_castle,
                  "house": _plan_build_house, "chapel": _plan_build_house, "stable": _plan_build_house,
                  "barn": _plan_build_house, "well": _plan_build_well, "keep": _plan_build_keep,
                  "tree": _plan_build_prop, "barrel": _plan_build_prop, "crate": _plan_build_prop, "haystack": _plan_build_prop,
-                 "hut": _plan_build_hut, "terrace_city": _plan_build_terrace_city, "swan_castle": _plan_build_swan_castle, "mansion": _plan_build_mansion, "rock_city": _plan_build_rock_city}
+                 "hut": _plan_build_hut, "terrace_city": _plan_build_terrace_city, "swan_castle": _plan_build_swan_castle, "mansion": _plan_build_mansion, "rock_city": _plan_build_rock_city, "floor_plan": _plan_build_floor_plan}
 
 
 # ------------------------------------------------------------------------------
@@ -17736,6 +18288,38 @@ class OBJECT_OT_PlanLoad(bpy.types.Operator, ImportHelper):
         return {'FINISHED'}
 
 
+class OBJECT_OT_PlanImportHouse(bpy.types.Operator, ImportHelper):
+    """Builds a house from a picture of an architect's floor plan (black walls on white): walls, windows, doors, floor and roof slabs. Pick the ground floor; upper floors are further pictures drawn to the same scale."""
+    bl_idname = "object.gla_plan_import_house"
+    bl_label = "House from Floor-Plan Picture"
+    bl_options = {'REGISTER', 'UNDO'}
+    filename_ext = ".png"
+    filter_glob: StringProperty(default="*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff;*.webp", options={'HIDDEN'})
+    width: FloatProperty(name="House width (m)", default=12.0, min=3.0, max=200.0,
+                         description="The real width of the whole drawing (outer wall to outer wall); sets the scale")
+    height: FloatProperty(name="Storey height (m)", default=2.7, min=2.2, max=6.0)
+    upper: StringProperty(name="Upper floors", default="",
+                          description="Pictures of the floors above, in order, separated by ; (same scale as the ground floor). Add stairs afterwards in params.stairs")
+
+    def execute(self, context):
+        try:
+            extra = [q.strip() for q in self.upper.split(";") if q.strip()]
+            root = plan_from_floorplan_picture(self.filepath, "house", None, self.width, extra, (self.height,))
+            base = re.sub(r"[^a-z0-9_]+", "_", os.path.splitext(os.path.basename(self.filepath))[0].lower()).strip("_") or "house"
+            ids = set(plan_list_ids())
+            n, root["id"] = 1, base
+            while root["id"] in ids:
+                n += 1
+                root["id"] = "%s_%d" % (base, n)
+            plan_write_to_blend(context.scene, root)
+        except (PlanError, OSError) as exc:
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+        f = root["params"]["floors"][0]
+        self.report({'INFO'}, "House '%s': %d wall pieces, %d windows, %d doors found on %d floor(s). Press Build." % (root["id"], len(f["walls"]), len(f["windows"]), len(f["doors"]), len(root["params"]["floors"])))
+        return {'FINISHED'}
+
+
 class OBJECT_OT_PlanImport(bpy.types.Operator, ImportHelper):
     """Imports a floor-plan drawing (.svg or .dxf) as a plan: closed shapes become buildings or yards, lines roads, circles trees or towers."""
     bl_idname = "object.gla_plan_import"
@@ -19049,6 +19633,7 @@ class VIEW3D_PT_GLAPlans(bpy.types.Panel):
         row = layout.row(align=True)
         row.operator("object.gla_plan_load", text="Load Plan...", icon='IMPORT')
         row.operator("object.gla_plan_import", text="Import Plan (SVG, DXF, image)...", icon='IMPORT')
+        layout.operator("object.gla_plan_import_house", text="House from Floor-Plan Picture...", icon='HOME')
 
 
 # ==============================================================================
@@ -19072,6 +19657,7 @@ classes = (
     OBJECT_OT_PlanSave,
     OBJECT_OT_PlanLoad,
     OBJECT_OT_PlanImport,
+    OBJECT_OT_PlanImportHouse,
     OBJECT_OT_GenerateLevelTower,
     OBJECT_OT_GenerateLevelCastle,
     OBJECT_OT_ExportGamePackage,

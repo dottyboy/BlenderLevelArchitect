@@ -297,6 +297,12 @@ Doors are separate objects named `..._Panel_NNN` with their origin on the hinge,
 construction and `terrace_city_walk_check(layout)` proves it on a height grid (steps of at most two risers): from the gate to every palace door, over the viaduct, into every
 furnished room and over 97 % of the free terrace cells. The layout is stored on the mesh object as `gla_walk_layout` (JSON). Export as glTF and give the mesh a collision shape.
 
+### A house from a picture of its floor plan
+
+Press **House from Floor-Plan Picture...** in the Plans panel and choose a picture of an architect's floor plan: black walls on a light background, furniture and text as thin lines, doors drawn as swing arcs. Set **House width (m)** to the real width of the whole drawing (it gives the scale) and the storey height, then press **Build**. Walls, windows (gaps in outside walls), doors (swing arcs, each with a leaf that opens), floor and roof come out; the opening lowest in the picture is the front entrance.
+
+For a house with several floors choose the ground floor and list the pictures of the floors above in *Upper floors* (separated by `;`, drawn to the same scale). Then add the stairs with *Edit a parameter* on `stairs`, e.g. `[{"floor": 0, "x": -3.5, "y": 2.4, "dir": "-y", "width": 1.0}]` (the flight starts at x, y and runs in `dir`; the floor above gets a hole over it). Walls must be straight and square to the picture; a door whose arc is not recognised stays an open doorway.
+
 ### Walled towns
 
 The **Town** button makes a round town: a stone wall with towers (none in the gateway) and a gate with an approach road, and inside

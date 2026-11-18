@@ -5651,6 +5651,47 @@ try:
 except addon.PlanError as exc:
     check("Mansion: an unknown plan name is refused", "versailles" in str(exc), str(exc))
 
+# --- House from a floor-plan picture: walls, windows, doors read from a drawing; stacked floors with stairs; walk check
+import numpy as _np
+def _fp_drawing():
+    """A 10 m x 6 m house drawn at 1 cm per pixel: outer walls 22 px, one inner wall with a door and its swing arc, a window gap in the north wall, a front opening in the south wall."""
+    cv = _np.full((800, 1200), 255.0)
+    def box(x0, y0, x1, y1, v=0.0):
+        cv[y0:y1, x0:x1] = v
+    box(100, 100, 1122, 122); box(100, 678, 1122, 700); box(100, 100, 122, 700); box(1100, 100, 1122, 700)    # outer walls
+    box(595, 122, 606, 678)                                                                                    # inner wall
+    cv[300:392, 595:606] = 255.0                                                                               # a doorway
+    for th in _np.linspace(0, _np.pi / 2, 400):                                                                # the swing arc (grey, thin) and the open leaf
+        x, y = int(round(600 - 90 * _np.sin(th))), int(round(300 + 90 * _np.cos(th)))
+        cv[y - 1:y + 1, x - 1:x + 1] = 120.0
+    cv[299:301, 510:600] = 120.0
+    cv[100:122, 250:400] = 255.0; cv[108:110, 250:400] = 120.0; cv[112:114, 250:400] = 120.0                  # a window (thin lines in a wall gap)
+    cv[678:700, 700:800] = 255.0                                                                               # the front opening
+    cv[400:440, 700:760] = 120.0                                                                               # furniture outline (thin lines) must be ignored
+    cv[400:402, 700:760] = 0.0; cv[438:440, 700:760] = 0.0
+    return cv
+fpd = addon.floorplan_trace(_fp_drawing(), width=10.22)
+check("House picture: the walls are read (thick strokes only), the furniture outline is ignored", len(fpd["walls"]) >= 4 and abs(fpd["size"][0] - 10.22) < 0.05 and abs(fpd["size"][1] - 6.0) < 0.1, str(fpd["size"]) + " %d" % len(fpd["walls"]))
+check("House picture: the window gap in the north wall is found as a window, the swing arc as a door",
+      any(w[4] == "window" and w[3] > 2.5 for w in fpd["windows"]) and len(fpd["doors"]) == 1, str(fpd["windows"]) + str(fpd["doors"]))
+check("House picture: the lowest opening is the front entrance and stays open", fpd["entrance"] is not None and fpd["entrance"][1] < -2.5, str(fpd["entrance"]))
+fp_node = addon.plan_node("fp_test", "building", "floor_plan", params={"floors": [fpd, fpd], "heights": [2.7, 2.6], "stairs": [{"floor": 0, "x": -3.5, "y": 2.4, "dir": "-y", "width": 1.0}]})
+fp_made = addon.plan_build(bpy.context, fp_node)
+fp_obj = [o for o in bpy.data.objects if o.type == "MESH" and o.data.name.startswith("FloorPlan_fp_test")]
+check("House picture: builds one mesh, a hinged door leaf object for the drawn door, lights", len(fp_obj) == 1 and len([o for o in bpy.data.objects if o.type == "MESH" and o.data.name.startswith("FpDoor_")]) >= 2 and len(bpy.data.lights) >= 2)
+fl_ = json.loads(fp_obj[0]["gla_walk_layout"])
+fwk = addon.floor_plan_walk_check(fl_)
+check("House picture: both floors can be walked from the front opening, through the doorway and up the stairs", fwk["rooms_reached"] > 0.95 and min(fwk["storeys"]) > 0.95 and not fwk["unreached"], str(fwk))
+fl_ns = dict(fl_, stairs=[])
+fwk2 = addon.floor_plan_walk_check(fl_ns)
+check("House picture: without the stairs the upper floor is not reachable", fwk2["storeys"][1] < 0.05, str(fwk2))
+for bad, why in (({"floors": None}, "floors"), ({"floors": [fpd], "stairs": [{"floor": 3, "x": 0, "y": 0}]}, "stairs"), ({"floors": [fpd], "heights": [1.0]}, "heights")):
+    try:
+        addon.plan_build(bpy.context, addon.plan_node("fp_bad", "building", "floor_plan", params=bad))
+        check("House picture: bad %s are refused" % why, False)
+    except addon.PlanError as exc:
+        check("House picture: bad %s are refused" % why, why in str(exc), str(exc))
+
 # ==============================================================================
 print()
 if failures:

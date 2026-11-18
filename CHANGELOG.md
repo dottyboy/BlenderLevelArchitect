@@ -3,6 +3,13 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.63.0 — a house from a picture of its floor plan
+
+- **House from Floor-Plan Picture...** (Plans panel): reads an architect's drawing (black walls on a light background, thin lines for furniture and text, door swings as quarter circles) and builds a `floor_plan` building. Only thick strokes count as walls (thin lines are ignored); **a window** is a gap in an outside wall (big glazing and a garage door by width), **a door** is a swing arc in front of a gap in a wall (each with its own hinged `Door_Panel_NNN` leaf; a doorway whose arc is not recognised simply stays an open doorway), the lowest opening in the picture is the front entrance and stays open. Floor and roof slabs follow the outline, lamps hang in the rooms. The scale is set by the real width of the house (`House width`) or `mpp`.
+- **Several floors**: give the pictures of the upper floors (same scale; lined up on the middle of their walls) and add `params.stairs` (`floor`, `x`, `y`, `dir`, `width`): the flight is built, the floor above gets a hole over it.
+- **`floor_plan_walk_check(layout)`** walks the house from the front opening (doorways, stairs) and reports the share of every floor that can be reached and the unreachable pockets. The tests draw a house with numpy (walls, a door with its arc, a window, furniture outlines, two floors, stairs) and check all of this.
+- Limits: walls must be axis-aligned (a diagonal wall becomes steps), rooms are not named (no text reading), doors whose swing arc touches other lines may be missed (the gap stays open), furniture is not built, the roof is a flat slab.
+
 ## 0.62.0 — richer rock city, one Add menu
 
 (see the two entries below under 0.61.0 — they ship in 0.62.0)
