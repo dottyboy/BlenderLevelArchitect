@@ -283,6 +283,8 @@ door, and checks the tower has a storey and a doorway for every floor. In a terr
 ### The mansion — a house from a floor plan
 
 The **Mansion** button builds a big country house from a **floor plan given as data**, the way a plan like the Bear Wood one is drawn: rooms (a name, a floor, a rectangle in metres, a kind) on up to three floors.
+
+The **Villa** button builds a house from a **generated plan** (`plan: "random"`): square junction halls joined by wings, laid out as a bar, an L, a U, a T or a ring round a courtyard (`plan_shape`, `plan_seed`, `floors`, `wing`, `depth`), with stair towers and entrances found by the generator and the same walk check as the Bear Wood plan. The Swan castle takes `shuffle`, `roof_pitch`, `turret_r` and `top` (`dome` / `spire` / `lantern`) for different silhouettes.
 Walls come from the village houses' wall-run builder (pointed windows every 3 m, arched doors), floors and ceilings from the rooms' rectangles, gable and hip roofs from the house roof builders with chimneys, and the
 **doors are found from the plan**: circulation rooms (`circ: true`: halls, corridors, galleries) join each other, every other room joins the circulation room it touches (or a room already joined), wide archways open between halls,
 and the plan can ask for more (`extra_doors`). **Round stair towers** (the plugin's tower builder: a storey and a turn of spiral stairs per floor) are put where the plan says (`towers`, with the rooms and floors they serve),

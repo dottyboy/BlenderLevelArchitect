@@ -142,6 +142,8 @@ the summit of a terrace city (the **Land** example does), which is how the pictu
 <p align="center"><img src="docs/img/mansion.png" alt="A long Victorian country house with two round stair towers, a servants' wing, pointed windows, gable roofs and chimneys" width="640"> <img src="docs/img/mansion_gallery.png" alt="The two-storey picture gallery inside: a ring of clerestory windows, chandeliers, busts and frames" width="400"></p>
 
 The **Mansion** button builds a country house from a **floor plan given as data** — rooms with a name, a floor, a rectangle and a kind — the way the plan of Bear Wood is drawn. The built-in plan `bearwood` follows its arrangement:
+
+The **Villa** button builds a house from a **generated plan** (`plan: "random"`): square junction halls joined by wings, laid out as a bar, an L, a U, a T or a ring round a courtyard (`plan_shape`, `plan_seed`, `floors`, `wing`, `depth`), with stair towers and entrances found by the generator and the same walk check as the Bear Wood plan. The Swan castle takes `shuffle`, `roof_pitch`, `turret_r` and `top` (`dome` / `spire` / `lantern`) for different silhouettes.
 public rooms round a two-storey picture gallery, a stair hall with a tower, bedrooms and nurseries upstairs, a long servants' wing, 48 rooms on three floors. Doors are found from the plan, the stair towers come from the plugin's round tower builder,
 rooms are furnished by kind and lit, and a built-in check proves every room can be reached from the front door. Pass your own plan (a dict of rooms) to build any other house.
 

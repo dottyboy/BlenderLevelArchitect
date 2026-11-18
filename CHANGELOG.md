@@ -3,6 +3,12 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## 0.60.0 — plans: generated house plans, Swan castle variants
+
+- **Villa generator** (**Villa** button, `plan: "random"`): a house plan from a seed instead of one fixed plan — square junction halls joined by wings (a corridor down the middle, rooms on both sides) arranged as a bar, an L, a U, a T or a ring round a courtyard (`plan_shape`, `random` picks one), 1-3 floors, wing length and room depth, public rooms / service rooms / bedrooms by wing and floor, stair towers on the outside of junction halls serving every floor, a front entrance facing south where it can and a side door. `mansion_generate_plan(shape, seed, floors, wing, depth)` returns the plan dict, so a generated plan can also be edited by hand. The tests build and walk-check every shape for several seeds and floor counts.
+- **Swan castle variants**: `shuffle` puts the hall themes in a seeded order, `roof_pitch`, `turret_r` and `top` (`dome` / `spire` / `lantern` over the stair tower) change the silhouette; defaults are unchanged.
+- The terraced hill city was already generated from its seed and parameters (tiers, peaks, shapes, irregularity, buildings).
+
 ## 0.59.0 — plans: the mansion (a house from a floor plan)
 
 - **`mansion` building** (**Mansion** button): a big country house built from a floor plan given as data — rooms with a name, floor, rectangle and kind on up to three floors. Walls and pointed windows from the wall-run builder,

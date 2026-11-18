@@ -5560,6 +5560,35 @@ _fs_a, fl_a = addon._build_mansion(dict(addon.PLAN_MANSION_DEFAULTS, facade=Fals
 _fs_b, fl_b = addon._build_mansion(dict(addon.PLAN_MANSION_DEFAULTS), 1)
 check("Mansion: the façade (window frames, cornice, pilasters, bay windows, dormers, porch pediment) adds geometry and stays walkable; facade=False leaves it off",
       len(_fs_b.faces) > len(_fs_a.faces) + 2000 and addon.mansion_walk_check(fl_b)["ok"] and addon.mansion_walk_check(fl_a)["ok"], "%d vs %d" % (len(_fs_b.faces), len(_fs_a.faces)))
+# --- the plan generator: many different houses, all walkable
+gen_shapes = {}
+for shp_ in addon.MAN_SHAPES:
+    for sd_ in (1, 2, 3):
+        for fl_ in (1, 3):
+            pl_ = addon.mansion_generate_plan(shp_, sd_, fl_, 30.0 + 6 * sd_)
+            _, gl_ = addon._build_mansion({**addon.PLAN_MANSION_DEFAULTS, "plan": pl_, "interiors": sd_ != 2}, sd_)
+            gw_ = addon.mansion_walk_check(gl_)
+            check("Mansion generator: %s seed %d, %d floor(s) is walkable from the front door (%d rooms, %d towers)" % (shp_, sd_, fl_, len(gl_["rooms"]), len(gl_["towers"])),
+                  gw_["ok"] and gw_["rooms"] == len(pl_["rooms"]), str(gw_))
+            gen_shapes.setdefault(shp_, set()).add((len(pl_["rooms"]), tuple(sorted(r["kind"] for r in pl_["rooms"]))))
+check("Mansion generator: the same seed gives the same plan, another seed another plan, 'random' picks any of the five shapes",
+      addon.mansion_generate_plan("U", 5) == addon.mansion_generate_plan("U", 5) and addon.mansion_generate_plan("U", 5) != addon.mansion_generate_plan("U", 6)
+      and len({addon.mansion_generate_plan("random", k_)["name"].split("-")[1] for k_ in range(1, 40)}) == 5)
+check("Mansion generator: a plan_shape in params builds through plan_build and the footprint follows it",
+      addon.mansion_size({"plan": "random", "plan_shape": "O", "plan_seed": 4}) != addon.mansion_size({"plan": "random", "plan_shape": "bar", "plan_seed": 4}))
+try:
+    addon.mansion_generate_plan("spiral", 1)
+    check("Mansion generator: an unknown shape is refused", False)
+except addon.PlanError:
+    check("Mansion generator: an unknown shape is refused", True)
+vill = addon.plan_new_example(bpy.context.scene, 'VILLA', set())
+check("Mansion generator: the Villa example is a mansion with a random plan", vill["kind"] == "mansion" and vill["params"]["plan"] == "random")
+# --- Swan castle variants
+for kw_ in (dict(top="spire", roof_pitch=0.7, turret_r=2.2, shuffle=True), dict(top="lantern", roof_pitch=1.3, turret_r=3.8, shuffle=True, floors=5)):
+    _, swl_ = addon._build_swan_castle({**addon.PLAN_SWAN_DEFAULTS, **kw_}, 7)
+    check("Swan castle: variant %s is walkable" % kw_, addon.swan_castle_walk_check(swl_)["ok"])
+check("Swan castle: shuffle puts the hall themes in another order", [r_["name"] for f_ in addon._build_swan_castle({**addon.PLAN_SWAN_DEFAULTS, "shuffle": True, "interiors": False}, 3)[1]["floors"] for r_ in f_["rooms"]] !=
+      [r_["name"] for f_ in addon._build_swan_castle({**addon.PLAN_SWAN_DEFAULTS, "interiors": False}, 3)[1]["floors"] for r_ in f_["rooms"]])
 for sd_ in (2, 3, 4):
     _, ml_ = addon._build_mansion(dict(addon.PLAN_MANSION_DEFAULTS), sd_)
     check("Mansion: seed %d is walkable too" % sd_, addon.mansion_walk_check(ml_)["ok"])

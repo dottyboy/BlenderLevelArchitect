@@ -33,7 +33,7 @@ from bpy_extras.io_utils import ExportHelper, ImportHelper
 bl_info = {
     "name": "Game Level Architect",
     "author": "Ivica Sršan",
-    "version": (0, 59, 0),
+    "version": (0, 60, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Level Architect Tab",
     "description": "Procedural game level generator using Python WFC and automatic Geometry Nodes meshing.",
@@ -13980,8 +13980,8 @@ def _plan_build_terrace_city(context, node, world, seed, path):
 # ------------------------------------------------------------------------------
 SW_CORE_R, SW_CORE_WALL, SW_STAIR_W, SW_T = 6.6, 0.7, 1.5, 0.9
 SW_GOLD_SLOT = 7
-PLAN_SWAN_DEFAULTS = dict(floors=8, floor_h=5.5, width=44.0, depth=30.0, interiors=True, spires=True, lights=True, roof_color=None, brick_color='PLAIN')
-PLAN_SWAN_RANGES = {"floors": (3, 10), "floor_h": (4.5, 6.5), "width": (36.0, 70.0), "depth": (24.0, 50.0)}
+PLAN_SWAN_DEFAULTS = dict(floors=8, floor_h=5.5, width=44.0, depth=30.0, interiors=True, spires=True, lights=True, shuffle=False, roof_pitch=0.95, turret_r=2.9, top='dome', roof_color=None, brick_color='PLAIN')
+PLAN_SWAN_RANGES = {"floors": (3, 10), "floor_h": (4.5, 6.5), "width": (36.0, 70.0), "depth": (24.0, 50.0), "roof_pitch": (0.6, 1.4), "turret_r": (2.0, 4.0)}
 PLAN_DEFAULT_FOOTPRINTS["swan_castle"] = lambda params: _footprint_rect({"width": float(params.get("width", 44.0)), "depth": float(params.get("depth", 30.0))})
 SW_THEMES_LEFT = ("banquet", "ballroom", "throne", "library", "bedroom", "bedroom", "bedroom", "bedroom", "bedroom", "bedroom")
 SW_THEMES_RIGHT = ("treasury", "salon", "gallery", "salon", "bedroom", "bedroom", "bedroom", "bedroom", "bedroom", "bedroom")
@@ -14206,6 +14206,11 @@ def _build_swan_castle(p, seed):
     layout = {"W": W, "D": D, "H": H, "R": R, "Ri": R - SW_CORE_WALL, "floors": [], "lobby": None, "levels": levels, "core_doors": {},
               "door_panels": [], "lights": [], "entrance": [0.0, -D / 2], "style_slots": 8}
     lights = layout["lights"]
+    themes_l, themes_r = list(SW_THEMES_LEFT), list(SW_THEMES_RIGHT)
+    if p.get("shuffle"):
+        trng = random.Random(int(seed) * 31 + 5)
+        trng.shuffle(themes_l)
+        trng.shuffle(themes_r)
     # --- the round stair tower in the middle: the plugin's tower builder (floors and one turn of spiral stairs per storey), with a doorway
     #     to each hall on every floor and, on the ground floor, one to the lobby
     core = _TowerBuilder(R, H, SW_CORE_WALL, battlements=False, detail='MEDIUM', seed=int(seed) % 100000 + 3, interior=True, stair_width=SW_STAIR_W,
@@ -14231,7 +14236,7 @@ def _build_swan_castle(p, seed):
     for k in range(floors):
         z, zc = levels[k], levels[k + 1]
         rooms = []
-        for side, themes in ((-1.0, SW_THEMES_LEFT), (1.0, SW_THEMES_RIGHT)):
+        for side, themes in ((-1.0, themes_l), (1.0, themes_r)):
             x0, x1 = (hall_x0, hall_x1) if side > 0 else (-hall_x1, -hall_x0)
             y0, y1 = -D / 2 + t / 2, D / 2 - t / 2
             name = themes[k % len(themes)]
@@ -14254,7 +14259,7 @@ def _build_swan_castle(p, seed):
     layout["lobby"] = {"rect": [lx0, ly0, lx1, ly1], "furniture": [[0.0, fy, 1.7], [-4.5, -D / 2 + 3.0, 0.5], [4.5, -D / 2 + 3.0, 0.5]]}
     layout["door_panels"] = [[-2.0, -D / 2, 0.0, 0.0, 1.95, 4.35], [2.0, -D / 2, 0.0, math.pi, 1.95, 4.35]]
     # --- the roofs of the plugin's house builder over the two halls, flat roofs over the piers, a dome over the stair tower
-    pitch = 0.95
+    pitch = float(p.get("roof_pitch", 0.95))
     for side in (-1.0, 1.0):
         hw_ = hall_x1 - hall_x0 + t
         rm = _TowerMesh()
@@ -14262,15 +14267,25 @@ def _build_swan_castle(p, seed):
         soup.append(rm, rot=math.pi / 2, offset=(side * (hall_x0 + hall_x1) / 2, 0.0, 0.0))
     _tc_box(soup, 0.0, (ly0 + ly1) / 2, H, lx1 - lx0 + 1.1, ly1 - ly0, 0.45, 2)
     _tc_box(soup, 0.0, (D / 2 - t / 2 + R - 0.2) / 2, H, lx1 - lx0 + 1.1, D / 2 - t / 2 - R + 0.2, 0.45, 2)
-    _tc_dome(soup, 0.0, 0.0, H + 0.1, R + 0.5, R * 1.15, n=28, rings=7, ribs=14)
-    _tc_drum(soup, 0.0, 0.0, H + R * 1.15 * 0.97, 1.8, 2.0, 12, 0.0, 0, 0.0, 0.5, 0, (1, 4, 7, 10), 0.5, 1.6)
-    _tc_dome(soup, 0.0, 0.0, H + R * 1.15 * 0.97 + 1.9, 2.1, 2.2, n=12, rings=4, ribs=6)
-    _cone(soup, 0.0, 0.0, H + R * 1.15 * 0.97 + 4.0, 0.4, 3.6, 6, ROOF_SOURCE_SLOT)
+    top_ = p.get("top", "dome")
+    if top_ == "spire":
+        _cone(soup, 0.0, 0.0, H + 0.1, R + 0.6, R * 3.4, 20, ROOF_SOURCE_SLOT)
+        _cone(soup, 0.0, 0.0, H + R * 3.4, 0.3, 3.0, 6, ROOF_SOURCE_SLOT)
+    elif top_ == "lantern":
+        _tc_dome(soup, 0.0, 0.0, H + 0.1, R + 0.5, R * 0.8, n=28, rings=6, ribs=14)
+        _tc_drum(soup, 0.0, 0.0, H + R * 0.8 * 0.97, 2.4, 3.2, 12, 0.0, 0, 0.0, 0.5, 0, (1, 3, 5, 7, 9, 11), 0.6, 2.0)
+        _cone(soup, 0.0, 0.0, H + R * 0.8 * 0.97 + 3.1, 2.8, 3.6, 12, ROOF_SOURCE_SLOT)
+        _cone(soup, 0.0, 0.0, H + R * 0.8 * 0.97 + 6.6, 0.3, 2.4, 6, ROOF_SOURCE_SLOT)
+    else:
+        _tc_dome(soup, 0.0, 0.0, H + 0.1, R + 0.5, R * 1.15, n=28, rings=7, ribs=14)
+        _tc_drum(soup, 0.0, 0.0, H + R * 1.15 * 0.97, 1.8, 2.0, 12, 0.0, 0, 0.0, 0.5, 0, (1, 4, 7, 10), 0.5, 1.6)
+        _tc_dome(soup, 0.0, 0.0, H + R * 1.15 * 0.97 + 1.9, 2.1, 2.2, n=12, rings=4, ribs=6)
+        _cone(soup, 0.0, 0.0, H + R * 1.15 * 0.97 + 4.0, 0.4, 3.6, 6, ROOF_SOURCE_SLOT)
     # --- corner turrets with spires: round towers of the plugin's tower builder
     if p["spires"]:
         for sx in (-1.0, 1.0):
             for sy in (-1.0, 1.0):
-                tr, th = 2.9, H + 6.0
+                tr, th = float(p.get("turret_r", 2.9)), H + 6.0
                 tw = _TowerBuilder(tr, th, 0.7, battlements=False, detail='LOW', seed=int(seed) % 1000 + int(sx * 7 + sy * 3), interior=False)
                 for k in range(1, floors):
                     for a_ in (45.0, 135.0, 225.0, 315.0)[:2 + (k % 2) * 2]:
@@ -14337,7 +14352,7 @@ def swan_castle_walk_check(layout, cell=0.4):
 def _plan_build_swan_castle(context, node, world, seed, path):
     where = "/".join(path)
     try:
-        p = _plan_checked({**PLAN_SWAN_DEFAULTS, **(node.get("params") or {})}, PLAN_SWAN_RANGES, {"roof_color": (None, *ROOF_COLORS)})
+        p = _plan_checked({**PLAN_SWAN_DEFAULTS, **(node.get("params") or {})}, PLAN_SWAN_RANGES, {"roof_color": (None, *ROOF_COLORS), "top": ("dome", "spire", "lantern")})
         soup, layout = _build_swan_castle(p, seed)
     except PlanError as exc:
         raise PlanError("%s: %s" % (where, exc))
@@ -14431,6 +14446,134 @@ def _man_bearwood():
                dict(rect=(0, 30, 66, 46), top=2, kind="GABLE", pitch=1.1), dict(rect=(-52, 4, 0, 36), top=1, kind="GABLE", pitch=0.65)])
 
 
+MAN_SHAPES = ("bar", "L", "U", "T", "O")
+
+
+def mansion_generate_plan(shape="U", seed=1, floors=3, wing=36.0, depth=8.0):
+    """A house plan from a seed: square junction halls joined by wings (a corridor down the middle, a row of rooms on each side), arranged as a bar,
+    an L, a U, a T or a ring round a courtyard ('random' picks one). Every floor has the same footprint; stair towers on the outside of some junction
+    halls serve all floors, the entrance hall faces south where it can. Returns a plan dict (see `_man_bearwood`)."""
+    rng = random.Random(int(seed) * 7919 + 11)
+    if shape == "random":
+        shape = rng.choice(MAN_SHAPES)
+    if shape not in MAN_SHAPES:
+        raise PlanError("mansion shape %r is not one of %s or 'random'" % (shape, ", ".join(MAN_SHAPES)))
+    floors = max(1, min(3, int(floors)))
+    depth = max(7, min(10, int(round(depth))))
+    wing = max(16.0, min(70.0, float(wing)))
+    S = 2 * depth + 4
+    half = S // 2
+    le = lambda: int(round(wing * rng.uniform(0.75, 1.25)))
+    a, b = S + le(), S + le()
+    tpl = {"bar": ([(0, 0), (a, 0), (2 * a, 0)], [(0, 1), (1, 2)], 1, [0, 2]),
+           "L": ([(0, 0), (a, 0), (0, b)], [(0, 1), (0, 2)], 0, [1, 2]),
+           "U": ([(0, 0), (a, 0), (2 * a, 0), (0, b), (2 * a, b)], [(0, 1), (1, 2), (0, 3), (2, 4)], 1, [3, 4]),
+           "T": ([(0, 0), (a, 0), (2 * a, 0), (a, b)], [(0, 1), (1, 2), (1, 3)], 1, [0, 2, 3]),
+           "O": ([(0, 0), (a, 0), (a, b), (0, b)], [(0, 1), (1, 2), (2, 3), (3, 0)], 0, [2])}
+    nodes, edges, ent, tnodes = tpl[shape]
+    node_rect = [(cx - half, cy - half, cx + half, cy + half) for cx, cy in nodes]
+    heights = [4.4, 3.8, 3.6][:floors]
+    rooms, roofs = [], []
+    R = _man_room
+    used_sides = {i: set() for i in range(len(nodes))}
+    service_edge = len(edges) - 1 if len(edges) > 1 else -1
+    PUBLIC = ["drawing", "dining", "library", "billiard", "drawing", "library", "drawing"]
+    SERVICE = ["kitchen", "servants", "storage", "storage", "kitchen", "servants"]
+    UP = ["bedroom", "bedroom", "bath", "nursery", "bedroom", "bedroom", "storage"]
+    UP_SERVICE = ["bedroom", "bedroom", "storage", "bedroom"]
+    seg_rects = []
+    for ei, (i, j) in enumerate(edges):
+        (xa, ya), (xb, yb) = nodes[i], nodes[j]
+        if ya == yb:
+            lo, hi = min(xa, xb) + half, max(xa, xb) - half
+            seg_rects.append(("h", lo, hi, ya))
+            used_sides[i].add("E" if xb > xa else "W")
+            used_sides[j].add("W" if xb > xa else "E")
+        else:
+            lo, hi = min(ya, yb) + half, max(ya, yb) - half
+            seg_rects.append(("v", lo, hi, xa))
+            used_sides[i].add("N" if yb > ya else "S")
+            used_sides[j].add("S" if yb > ya else "N")
+    def widths(L):
+        n = max(1, int(L // 10))
+        while L / n > 14:
+            n += 1
+        ws = [6] * n
+        for _ in range(int(L) - 6 * n):
+            ws[rng.randrange(n)] += 1
+        return ws
+    kind_cnt = {}
+    def name_of(kind):
+        kind_cnt[kind] = kind_cnt.get(kind, 0) + 1
+        return "%s_%d" % (kind, kind_cnt[kind])
+    for fl in range(floors):
+        for ni, rc in enumerate(node_rect):
+            rooms.append(R("hall_%d" % ni, fl, rc, "hall", circ=True))
+        for ei, (orient, lo, hi, c) in enumerate(seg_rects):
+            svc = ei == service_edge
+            pool = (SERVICE if svc else PUBLIC) if fl == 0 else (UP_SERVICE if svc else UP)
+            rooms.append(R("corridor_%d" % ei, fl, ((lo, c - 2, hi, c + 2) if orient == "h" else (c - 2, lo, c + 2, hi)), "corridor", circ=True))
+            for side in (-1, 1):
+                pos = lo
+                for k, w in enumerate(widths(hi - lo)):
+                    kind = pool[(k + (0 if side < 0 else 3) + ei) % len(pool)]
+                    if orient == "h":
+                        rc = (pos, c - half, pos + w, c - 2) if side < 0 else (pos, c + 2, pos + w, c + half)
+                    else:
+                        rc = (c - half, pos, c - 2, pos + w) if side < 0 else (c + 2, pos, c + half, pos + w)
+                    rooms.append(R("%s_e%d_%d" % (kind, ei, len(rooms)), fl, rc, kind))
+                    pos += w
+    for rc in node_rect:
+        roofs.append(dict(rect=rc, top=floors - 1, kind="HIP", pitch=0.8))
+    for orient, lo, hi, c in seg_rects:
+        rc = (lo, c - half, hi, c + half) if orient == "h" else (c - half, lo, c + half, hi)
+        roofs.append(dict(rect=rc, top=floors - 1, kind="GABLE", pitch=0.95))
+    # --- stair towers on the outside of some junction halls, then the doors to the outside
+    def rect_dist(cx, cy, rc):
+        return math.hypot(cx - min(max(cx, rc[0]), rc[2]), cy - min(max(cy, rc[1]), rc[3]))
+    towers, taken = [], {}
+    ent_side = None
+    for side in ("S", "W", "E", "N"):
+        if side not in used_sides[ent]:
+            ent_side = side
+            break
+    if ent_side is None:
+        raise PlanError("mansion plan: no free side on the entrance hall")
+    taken.setdefault(ent, set()).add(ent_side)
+    for ti in tnodes:
+        Rr = 4.0 + rng.choice((0.0, 0.5, 1.0)) if floors > 1 else 3.4
+        order = ["N", "S", "E", "W"]
+        rng.shuffle(order)
+        for side in order:
+            if side in used_sides[ti] or side in taken.get(ti, set()):
+                continue
+            x0, y0, x1, y1 = node_rect[ti]
+            cx, cy = nodes[ti]
+            tx, ty = {"N": (cx, y1 + Rr - 0.5), "S": (cx, y0 - Rr + 0.5), "E": (x1 + Rr - 0.5, cy), "W": (x0 - Rr + 0.5, cy)}[side]
+            if any(rect_dist(tx, ty, rc) < Rr + 0.4 for k, rc in enumerate(node_rect) if k != ti) or \
+               any(rect_dist(tx, ty, (lo, c - half, hi, c + half) if o == "h" else (c - half, lo, c + half, hi)) < Rr + 0.4 for o, lo, hi, c in seg_rects) or \
+               any(math.hypot(tx - t_["x"], ty - t_["y"]) < Rr + t_["R"] + 1.0 for t_ in towers):
+                continue
+            if ti == ent and side == "S":
+                continue
+            taken.setdefault(ti, set()).add(side)
+            towers.append(dict(name="tower_%d" % ti, x=float(tx), y=float(ty), R=Rr, links=[("hall_%d" % ti, f, side) for f in range(floors)]))
+            break
+        if towers and floors == 1:
+            break
+    if floors > 1 and not towers:
+        raise PlanError("mansion plan: no stair tower fits (shape %s, wing %.0f); try another seed" % (shape, wing))
+    entrances = [dict(room="hall_%d" % ent, side=ent_side, t=0.5, w=2.6)]
+    for ni in range(len(nodes) - 1, -1, -1):
+        if ni == ent:
+            continue
+        side = next((sd for sd in ("S", "W", "E", "N") if sd not in used_sides[ni] and sd not in taken.get(ni, set())), None)
+        if side:
+            entrances.append(dict(room="hall_%d" % ni, side=side, t=0.5, w=1.4))
+            break
+    return dict(name="random-%s-%d" % (shape, int(seed)), heights=heights, rooms=rooms, towers=towers, entrances=entrances, extra_doors=[], roofs=roofs)
+
+
 PLAN_MANSION_DEFAULTS = dict(plan="bearwood", interiors=True, lights=True, facade=True, roof_color=None, brick_color='PLAIN')
 
 
@@ -14440,7 +14583,10 @@ def _man_plan_of(params):
         return plan
     if plan == "bearwood":
         return _man_bearwood()
-    raise PlanError("params.plan = %r is not a known plan (bearwood) or a dict of rooms" % (plan,))
+    if plan == "random":
+        prm = params or {}
+        return mansion_generate_plan(prm.get("plan_shape", "U"), prm.get("plan_seed", 1), prm.get("floors", 3), prm.get("wing", 36.0), prm.get("depth", 8.0))
+    raise PlanError("params.plan = %r is not a known plan (bearwood, random) or a dict of rooms" % (plan,))
 
 
 def mansion_size(params=None):
@@ -16292,6 +16438,9 @@ def plan_new_example(scene, kind, existing_ids):
                          children=[hamlet, farm, watch, path_])
     if kind == 'MANSION':
         return plan_node(unique("mansion"), "building", "mansion", transform=transform, params={})
+    if kind == 'VILLA':
+        return plan_node(unique("villa"), "building", "mansion", transform=transform,
+                         params={"plan": "random", "plan_shape": "random", "plan_seed": random.randint(1, 99999), "floors": random.choice((2, 3)), "wing": float(random.choice((30, 36, 44)))})
     if kind == 'SWAN':
         return plan_node(unique("swan_castle"), "building", "swan_castle", transform=transform, params={})
     if kind == 'LAND':
@@ -16457,7 +16606,7 @@ class OBJECT_OT_PlanCreate(bpy.types.Operator):
                               ('HOUSE', "House", ""), ('CHAPEL', "Chapel", ""), ('STABLE', "Stable", ""),
                               ('FORTRESS', "Fortress", ""), ('FARM', "Farm", ""), ('HAMLET', "Hamlet", ""),
                               ('STREET', "Street", ""), ('BLOCK', "Block", ""),
-                              ('HUT', "Hut", ""), ('HUTS', "Hut cluster", ""), ('TERRAIN', "Terrain", ""), ('TOWN', "Walled town", ""), ('CITY', "City", ""), ('TERRACES', "Terrace city", ""), ('TWIN', "Twin peaks", ""), ('LAND', "City on land", ""), ('SWAN', "Swan castle", ""), ('MANSION', "Mansion", "")])
+                              ('HUT', "Hut", ""), ('HUTS', "Hut cluster", ""), ('TERRAIN', "Terrain", ""), ('TOWN', "Walled town", ""), ('CITY', "City", ""), ('TERRACES', "Terrace city", ""), ('TWIN', "Twin peaks", ""), ('LAND', "City on land", ""), ('SWAN', "Swan castle", ""), ('MANSION', "Mansion", ""), ('VILLA', "Villa (random plan)", "")])
 
     def execute(self, context):
         plan = plan_new_example(context.scene, self.kind, set(plan_list_ids()))
@@ -17862,7 +18011,7 @@ class VIEW3D_PT_GLAPlans(bpy.types.Panel):
         for kind, label in (('FARM', "Farm"), ('HAMLET', "Hamlet"), ('STREET', "Street"), ('BLOCK', "Block")):
             row.operator("object.gla_plan_create", text=label).kind = kind
         row = layout.row(align=True)
-        for kind, label in (('HUT', "Hut"), ('HUTS', "Huts"), ('TOWN', "Town"), ('CITY', "City"), ('TERRACES', "Terraces"), ('TWIN', "Twin"), ('LAND', "Land"), ('SWAN', "Swan"), ('MANSION', "Mansion"), ('TERRAIN', "Terrain")):
+        for kind, label in (('HUT', "Hut"), ('HUTS', "Huts"), ('TOWN', "Town"), ('CITY', "City"), ('TERRACES', "Terraces"), ('TWIN', "Twin"), ('LAND', "Land"), ('SWAN', "Swan"), ('MANSION', "Mansion"), ('VILLA', "Villa"), ('TERRAIN', "Terrain")):
             row.operator("object.gla_plan_create", text=label).kind = kind
         for plan_id in plan_list_ids():
             box = layout.box()
