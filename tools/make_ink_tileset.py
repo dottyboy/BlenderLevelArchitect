@@ -143,6 +143,25 @@ def apse_tile(side, seed=0):
     return np.rot90(img, k={"n": 0, "e": 3, "s": 2, "w": 1}[side]).copy()
 
 
+def upper_tile(seed):
+    """A raised platform floor: slightly darker paper with a heavier dotted grid and ticks at the corners."""
+    img = floor_tile(seed + 50)
+    img[img.sum(axis=2) > 650] = (0xd8, 0xd8, 0xe2)
+    img[1, 1] = img[1, T - 2] = img[T - 2, 1] = img[T - 2, T - 2] = INK
+    return img
+
+
+def stairs_tile(vertical, seed=0):
+    """Steps seen from above: parallel ink lines across the way up (`vertical` False: horizontal lines, the way up is north-south)."""
+    img = floor_tile(seed + 70)
+    for k in range(2, T, 3):
+        if vertical:
+            img[:, k] = INK
+        else:
+            img[k, :] = INK
+    return img
+
+
 def chasm_tile(seed):
     img = np.empty((T, T, 3), np.uint8)
     img[:] = (0x3a, 0x3c, 0x4e)
@@ -172,6 +191,10 @@ for _d in range(4):
 TILES.append(("pillar", pillar_tile(1), "prop"))
 for i in range(2):
     TILES.append(("chasm", chasm_tile(i), "water"))
+for i in range(2):
+    TILES.append(("upper", upper_tile(i), "upper"))
+TILES.append(("stairs_ns", stairs_tile(False), "stairs"))
+TILES.append(("stairs_ew", stairs_tile(True), "stairs"))
 PROP_KINDS = {}
 for _side in ("n", "e", "s", "w"):
     PROP_KINDS[len(TILES)] = "apse"
@@ -230,7 +253,7 @@ def make_dungeon(w=72, h=54, seed=4):
         yy = (y0 + y1) // 2
         for x in range(x0 + 1, x1 - 1):
             k[yy + int(round(np.sin(x * 0.7))), x] = "chasm"
-    free = [b for b in rooms if b not in (big[0], big[1] if len(big) > 1 else None, big[2] if len(big) > 2 else None)]      # apses: half columns along a wall of two other rooms
+    free = [b for b in rooms if b not in big[:4]]      # apses: half columns along a wall of two other rooms
     for n_, (x0, y0, x1, y1) in enumerate(free[:2]):
         if n_ == 0:
             for x in range(x0 + 1, x1 - 1, 2):
@@ -240,6 +263,11 @@ def make_dungeon(w=72, h=54, seed=4):
             for y in range(y0 + 1, y1 - 1, 2):
                 if k[y, x0] == "floor":
                     k[y, x0] = "apse_w"
+    if len(big) > 3:                                              # a raised platform at the far end of another room, reached by a short flight of stairs
+        x0, y0, x1, y1 = big[3]
+        k[y0:y0 + 3, x0:x1] = "upper"
+        mid = (x0 + x1) // 2
+        k[y0 + 3, mid - 1:mid + 1] = "stairs_ns"
     rock = k == "rock"                                            # the rock tiles next to floor (4-neighbour) become wall
     near = np.zeros_like(rock)
     solid = ~rock

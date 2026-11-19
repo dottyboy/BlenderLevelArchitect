@@ -16791,8 +16791,8 @@ def plan_from_floorplan_picture(path, plan_id="house", mpp=None, width=12.0, ext
 # the exact pixel look of the tiles. `tilemap_analyze` reads (numpy only), `_build_tilemap` builds the one mesh with walls where heights differ.
 # ==============================================================================
 PLAN_TILEMAP_DEFAULTS = dict(image=None, tile=16, tile_m=1.0, canopy=0.7, stone=3.0, water=-0.35, green=0.375, rough=22.0, roles=None, tileset=None, smooth=True,
-                             trees=True, tree_spacing=2.3, props=True, prop_height=1.7, prop_max=6)
-TILEMAP_ROLES = ("floor", "canopy", "stone", "water", "prop")
+                             trees=True, tree_spacing=2.3, props=True, prop_height=1.7, prop_max=6, upper=1.2, stair_steps=4)
+TILEMAP_ROLES = ("floor", "canopy", "stone", "water", "prop", "upper", "stairs")
 
 
 def _tilemap_tileset(spec, tile):
@@ -16858,10 +16858,11 @@ def _tilemap_side(spec, tile):
 
 
 def tilemap_analyze(rgb, tile=16, green=0.375, rough=22.0, roles=None, lut=None):
-    """Roles of the tiles of a map picture: an int array (rows top to bottom, tile columns), 0 floor, 1 canopy, 2 stone, 3 water, 4 prop (an object standing on the floor; see `_tilemap_props`).
+    """Roles of the tiles of a map picture: an int array (rows top to bottom, tile columns), 0 floor, 1 canopy, 2 stone, 3 water, 4 prop (an object standing on the floor; see `_tilemap_props`), 5 upper (a raised platform), 6 stairs (steps up
+    to the upper tile they touch).
     With a tileset (`lut`: tile pixels -> role) every tile that matches a tileset tile exactly takes that tile's role; the others (and every tile
     without a tileset) are read from colour and texture: canopy when the green share of the colour is above `green`, stone when it is not green but
-    rough (mean standard deviation of the pixels above `rough`), floor otherwise. `roles` = {"x,y": 0..4} overrides single tiles (tile column x, row y from the top)."""
+    rough (mean standard deviation of the pixels above `rough`), floor otherwise. `roles` = {"x,y": 0..6} overrides single tiles (tile column x, row y from the top)."""
     import numpy as np
     rgb = np.asarray(rgb, dtype=float)
     h, w = rgb.shape[:2]
@@ -16883,7 +16884,7 @@ def tilemap_analyze(rgb, tile=16, green=0.375, rough=22.0, roles=None, lut=None)
                     out[y, x] = code
     for key, role in (roles or {}).items():
         x, y = (int(v) for v in str(key).split(","))
-        if 0 <= x < tx and 0 <= y < ty and role in (0, 1, 2, 3, 4):
+        if 0 <= x < tx and 0 <= y < ty and role in (0, 1, 2, 3, 4, 5, 6):
             out[y, x] = role
     return out
 
@@ -16966,20 +16967,41 @@ def _tilemap_depth(roles):
 
 
 def tilemap_walk_check(roles, start=None):
-    """Proves the floor can be walked: the floor tiles (role 0; canopy, stone, water and props block) are flooded from `start` ([x, y] tile) or, without
-    one, from the biggest floor region. Returns {regions, reached (share of all floor tiles in the start region), start, pockets: sizes of the other regions}."""
+    """Proves the level can be walked: floor (0), stairs (6) and upper platforms (5) are walkable, canopy, stone, water and props block. Floor and upper tiles
+    touch without a way across (a step up), only a stairs tile joins them. The walkable tiles are flooded from `start` ([x, y] tile) or, without one, from
+    the biggest region. Returns {regions, reached (share of all walkable tiles in the start region), start (a floor tile of it), pockets: sizes of the others}."""
     import numpy as np
     roles = np.asarray(roles)
-    labels, n = _fp_label(roles == 0, diag=False)
-    if n == 0:
+    ty, tx = roles.shape
+    walk = (roles == 0) | (roles == 5) | (roles == 6)
+    label = np.zeros((ty, tx), dtype=int)
+    sizes = []
+    for y0 in range(ty):
+        for x0 in range(tx):
+            if walk[y0, x0] and not label[y0, x0]:
+                n = len(sizes) + 1
+                label[y0, x0] = n
+                stack, count = [(y0, x0)], 0
+                while stack:
+                    y, x = stack.pop()
+                    count += 1
+                    for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                        yy, xx = y + dy, x + dx
+                        if 0 <= yy < ty and 0 <= xx < tx and walk[yy, xx] and not label[yy, xx] and {int(roles[y, x]), int(roles[yy, xx])} != {0, 5}:
+                            label[yy, xx] = n
+                            stack.append((yy, xx))
+                sizes.append(count)
+    if not sizes:
         return {"regions": 0, "reached": 0.0, "start": None, "pockets": []}
-    sizes = np.bincount(labels.ravel())[1:]
-    if start is not None and 0 <= start[1] < roles.shape[0] and 0 <= start[0] < roles.shape[1] and labels[start[1], start[0]] > 0:
-        main = int(labels[start[1], start[0]])
+    sizes_a = np.array(sizes)
+    if start is not None and 0 <= start[1] < ty and 0 <= start[0] < tx and label[start[1], start[0]] > 0:
+        main = int(label[start[1], start[0]])
     else:
-        main = int(sizes.argmax()) + 1
-    ys, xs = np.nonzero(labels == main)
-    return {"regions": int(n), "reached": float(sizes[main - 1]) / float(sizes.sum()), "start": [int(xs[0]), int(ys[0])],
+        main = int(sizes_a.argmax()) + 1
+    ys, xs = np.nonzero((label == main) & (roles != 5))
+    if len(ys) == 0:
+        ys, xs = np.nonzero(label == main)
+    return {"regions": len(sizes), "reached": float(sizes_a[main - 1]) / float(sizes_a.sum()), "start": [int(xs[0]), int(ys[0])],
             "pockets": sorted((int(v) for i, v in enumerate(sizes, 1) if i != main), reverse=True)}
 
 
@@ -17072,7 +17094,45 @@ def _build_tilemap(p):
             uv = [(u0, v0), (u1, v0), (u1, v1), (u0, v1)]
             stone = roles[j, i] == 2
             c = (corner[j + 1, i], corner[j + 1, i + 1], corner[j, i + 1], corner[j, i])      # sw, se, ne, nw
-            quad([(x0, y0, c[0]), (x1, y0, c[1]), (x1, y1, c[2]), (x0, y1, c[3])], uv, not stone)
+            role_ij = int(roles[j, i])
+            if role_ij == 5:                                                   # an upper platform: a flat top at `upper` height with cliffs down to lower neighbours
+                H = float(p["upper"])
+                quad([(x0, y0, H), (x1, y0, H), (x1, y1, H), (x0, y1, H)], uv, False)
+                for (di, dj), edge in (((1, 0), "e"), ((-1, 0), "w"), ((0, -1), "n"), ((0, 1), "s")):
+                    ni, nj = i + di, j + dj
+                    if 0 <= ni < tx and 0 <= nj < ty and int(roles[nj, ni]) in (2, 5, 6):
+                        continue
+                    zl = float(tz[nj, ni]) if 0 <= ni < tx and 0 <= nj < ty else -0.5
+                    pts = {"e": [(x1, y0, zl), (x1, y1, zl), (x1, y1, H), (x1, y0, H)], "w": [(x0, y1, zl), (x0, y0, zl), (x0, y0, H), (x0, y1, H)],
+                           "n": [(x1, y1, zl), (x0, y1, zl), (x0, y1, H), (x1, y1, H)], "s": [(x0, y0, zl), (x1, y0, zl), (x1, y0, H), (x0, y0, H)]}[edge]
+                    quad(pts, side_uv if atlas is not None else uv, False)
+                continue
+            quad([(x0, y0, c[0]), (x1, y0, c[1]), (x1, y1, c[2]), (x0, y1, c[3])], uv, False if role_ij == 6 else not stone)
+            if role_ij == 6:                                                   # stairs: steps rising towards the neighbouring upper tile (flat floor when there is none)
+                H, n_st = float(p["upper"]), max(1, int(p["stair_steps"]))
+                up = next((d for d, (di, dj) in {"n": (0, -1), "e": (1, 0), "s": (0, 1), "w": (-1, 0)}.items()
+                           if 0 <= i + di < tx and 0 <= j + dj < ty and int(roles[j + dj, i + di]) == 5), None)
+                if up is not None:
+                    wd, dp = x1 - x0, y1 - y0
+
+                    def sp(t_, s_, z_):                                       # t_: 0 at the low edge .. 1 at the high edge, s_: across the stairs
+                        return {"n": (x0 + s_ * wd, y0 + t_ * dp, z_), "s": (x0 + s_ * wd, y1 - t_ * dp, z_),
+                                "e": (x0 + t_ * wd, y0 + s_ * dp, z_), "w": (x1 - t_ * wd, y0 + s_ * dp, z_)}[up]
+
+                    def oriented(pts, want):                                  # flips a quad whose normal points away from `want`
+                        ax_, ay_, az_ = (pts[1][k_] - pts[0][k_] for k_ in range(3))
+                        bx_, by_, bz_ = (pts[2][k_] - pts[0][k_] for k_ in range(3))
+                        nrm = (ay_ * bz_ - az_ * by_, az_ * bx_ - ax_ * bz_, ax_ * by_ - ay_ * bx_)
+                        return pts if nrm[0] * want[0] + nrm[1] * want[1] + nrm[2] * want[2] >= 0 else pts[::-1]
+                    low_dir = {"n": (0.0, -1.0, 0.0), "s": (0.0, 1.0, 0.0), "e": (-1.0, 0.0, 0.0), "w": (1.0, 0.0, 0.0)}[up]
+                    for k_ in range(n_st):
+                        t0_, t1_ = k_ / n_st, (k_ + 1) / n_st
+                        zk, zk1 = H * k_ / n_st, H * (k_ + 1) / n_st
+                        quad(oriented([sp(t0_, 0, zk1), sp(t1_, 0, zk1), sp(t1_, 1, zk1), sp(t0_, 1, zk1)], (0.0, 0.0, 1.0)), uv, False)
+                        quad(oriented([sp(t0_, 0, zk), sp(t0_, 1, zk), sp(t0_, 1, zk1), sp(t0_, 0, zk1)], low_dir), uv, False)
+                        for s_ in (0, 1):                                   # the sides of the step, hidden when it stands against a wall
+                            quad(oriented([sp(t0_, s_, 0.0), sp(t1_, s_, 0.0), sp(t1_, s_, zk1), sp(t0_, s_, zk1)], ((-1.0, 0.0, 0.0) if s_ == 0 else (1.0, 0.0, 0.0)) if up in ("n", "s") else ((0.0, -1.0, 0.0) if s_ == 0 else (0.0, 1.0, 0.0))), uv, False)
+                continue
             if not stone:
                 continue
             z0 = min(c)
@@ -17120,7 +17180,7 @@ def _build_tilemap(p):
                     trees.append([fx * tm - ox, oy - fy * tm, float(tz[cj, ci])])
     layout = {"name": "tilemap", "tile_m": tm, "tiles": [tx, ty], "floor_share": floor / float(tx * ty), "size": [tx * tm, ty * tm],
               "roles": roles.tolist(), "props": props, "trees": trees, "walk": tilemap_walk_check(roles),
-              "uvdims": [iw, ih], "atlas": atlas}
+              "uvdims": [iw, ih], "atlas": atlas, "upper": float(p["upper"])}
     return (verts, faces, uvs, smooth), roles, layout
 
 
@@ -17190,7 +17250,7 @@ def _plan_build_tilemap(context, node, world, seed, path):
     context.scene.collection.objects.link(obj)
     obj["gla_walk_layout"] = json.dumps({k: v for k, v in layout.items() if k not in ("roles", "trees", "props")})
     obj["gla_tilemap"] = json.dumps({"id": node["id"], "tile_m": layout["tile_m"], "tiles": layout["tiles"], "rows": ["".join(str(v) for v in row) for row in layout["roles"]],
-                                     "props": layout["props"], "trees": [[round(v, 3) for v in t_] for t_ in layout["trees"]], "walk": layout["walk"]})
+                                     "props": layout["props"], "trees": [[round(v, 3) for v in t_] for t_ in layout["trees"]], "walk": layout["walk"], "upper": layout["upper"]})
     made = [obj]
     tm, (tx, ty) = layout["tile_m"], layout["tiles"]
     iw, ih = layout["uvdims"]
@@ -19119,7 +19179,8 @@ class OBJECT_OT_PlanImportHouse(bpy.types.Operator, ImportHelper):
 
 
 def _tilemap_far_tile(rows, start):
-    """The floor tile farthest from `start` by walking (4-neighbour breadth first search over floor tiles); None without a start."""
+    """The floor tile farthest from `start` by walking (4-neighbour breadth first search over floor, stairs and upper tiles; floor and upper touch only through
+    stairs); None without a start."""
     if start is None:
         return None
     ty, tx = len(rows), len(rows[0])
@@ -19130,10 +19191,11 @@ def _tilemap_far_tile(rows, start):
         x, y = queue.popleft()
         for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
             nx_, ny_ = x + dx, y + dy
-            if 0 <= nx_ < tx and 0 <= ny_ < ty and rows[ny_][nx_] == "0" and (nx_, ny_) not in seen:
+            if 0 <= nx_ < tx and 0 <= ny_ < ty and rows[ny_][nx_] in "056" and (nx_, ny_) not in seen and {rows[y][x], rows[ny_][nx_]} != {"0", "5"}:
                 seen[(nx_, ny_)] = seen[(x, y)] + 1
                 queue.append((nx_, ny_))
-                far = (nx_, ny_)
+                if rows[ny_][nx_] != "5":
+                    far = (nx_, ny_)
     return list(far)
 
 
@@ -19144,10 +19206,23 @@ def tilemap_game_package(data, glb_name=""):
     tm, (tx, ty) = float(data["tile_m"]), data["tiles"]
     rows = data["rows"]
     ox, oy = tx * tm / 2.0, ty * tm / 2.0
-    cells = {(i, j) for j, row in enumerate(rows) for i, ch in enumerate(row) if ch == "0"}
-    rects = []
-    for x0, y0, x1, y1 in _merge_cells_to_rects(cells):           # tile columns/rows, inclusive, rows counted from the top (north)
-        rects.append([round(x0 * tm - ox, 4), round(-(oy - y0 * tm), 4), round((x1 + 1) * tm - ox, 4), round(-(oy - (y1 + 1) * tm), 4)])
+    cells = {(i, j) for j, row in enumerate(rows) for i, ch in enumerate(row) if ch in "06"}
+    upper_cells = {(i, j) for j, row in enumerate(rows) for i, ch in enumerate(row) if ch == "5"}
+    to_rects = lambda cs: [[round(x0 * tm - ox, 4), round(-(oy - y0 * tm), 4), round((x1 + 1) * tm - ox, 4), round(-(oy - (y1 + 1) * tm), 4)]
+                           for x0, y0, x1, y1 in (_merge_cells_to_rects(cs) if cs else [])]       # tile columns/rows, inclusive, rows counted from the top (north)
+    rects = to_rects(cells)
+    H = float(data.get("upper", 0.0))
+    floors = [{"z": 0, "y": 0.0, "cells": len(cells), "walk_rects": rects}]
+    stairs = []
+    if upper_cells:
+        floors.append({"z": 1, "y": round(H, 4), "cells": len(upper_cells), "walk_rects": to_rects(upper_cells)})
+        for j, row in enumerate(rows):
+            for i, ch in enumerate(row):
+                if ch == "6":
+                    d = next((k_ for k_, (di, dj) in {"north": (0, -1), "east": (1, 0), "south": (0, 1), "west": (-1, 0)}.items()
+                              if 0 <= j + dj < len(rows) and 0 <= i + di < len(row) and rows[j + dj][i + di] == "5"), None)
+                    if d:
+                        stairs.append({"from": 0, "to": 1, "pos": [round((i + 0.5) * tm - ox, 4), round(H / 2.0, 4), round(-(oy - (j + 0.5) * tm), 4)], "up": d, "rise": round(H, 4)})
     centre = lambda t_: [round((t_[0] + 0.5) * tm - ox, 4), 0.0, round(-(oy - (t_[1] + 0.5) * tm), 4)] if t_ else None
     start = data["walk"].get("start")
     far = _tilemap_far_tile(rows, start)
@@ -19160,10 +19235,10 @@ def tilemap_game_package(data, glb_name=""):
         "tile_size": tm,
         "interior": False,
         "coordinates": "engine: x right, y up, z = -blender_y",
-        "floors": [{"z": 0, "y": 0.0, "cells": len(cells), "walk_rects": rects}],
+        "floors": floors,
         "entrance": {"floor": 0, "pos": centre(start)},
         "exit": {"floor": 0, "pos": centre(far)},
-        "stairs": [], "rooms": [], "lights": [],
+        "stairs": stairs, "rooms": [], "lights": [],
         "props": props,
         "trees": [[t_[0], t_[2], -t_[1]] for t_ in data["trees"]],
         "walk": data["walk"],

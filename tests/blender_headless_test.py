@@ -5800,6 +5800,26 @@ check("Tile map: a prop tile named apse in prop_kinds is an apse facing away fro
 addon.plan_build(bpy.context, addon.plan_node("tm_apse", "building", "tilemap", params=_apq))
 _apo = [o for o in bpy.data.objects if o.type == "MESH" and o.get("gla_prop") and json.loads(o["gla_prop"])["kind"] == "apse" and o.get("gla_tilemap_id") == "tm_apse"]
 check("Tile map: the apse is its own half-cylinder object with a stone shaft and a picture cap", len(_apo) == 1 and len(_apo[0].data.polygons) == 11 and len(_apo[0].data.materials) == 2, str([len(o.data.polygons) for o in _apo]))
+# two heights and stairs: an upper platform joins the floor only through a stairs tile
+_np_ = _np2
+_rl2 = _np_.zeros((5, 7), dtype=_np_.uint8); _rl2[0:2, :] = 5                   # an upper platform on the two top rows
+check("Tile map: an upper platform touching the floor is a separate region without stairs", addon.tilemap_walk_check(_rl2)["regions"] == 2, str(addon.tilemap_walk_check(_rl2)))
+_rl2[2, 3] = 6                                                                  # one stairs tile between them
+_wk2 = addon.tilemap_walk_check(_rl2)
+check("Tile map: a stairs tile joins the platform and the floor into one region", _wk2["regions"] == 1 and _wk2["reached"] == 1.0, str(_wk2))
+_flat = _np_.zeros((80, 112, 3)); _flat[:] = (200, 200, 205)
+_fl_im = bpy.data.images.new("gla_flat_test.png", 112, 80); _fl_px = _np_.ones((80, 112, 4)); _fl_px[..., :3] = _flat[::-1] / 255.0
+_fl_im.pixels.foreach_set(_fl_px.ravel().astype(_np_.float32)); _fl_path = os.path.join(bpy.app.tempdir, "gla_flat_test.png")
+_fl_im.filepath_raw = _fl_path; _fl_im.file_format = 'PNG'; _fl_im.save()
+_st_roles = {"%d,%d" % (x, y): 5 for y in (0, 1) for x in range(7)}; _st_roles["3,2"] = 6
+_st_node = addon.plan_node("tm_stairs", "building", "tilemap", params={"image": _fl_path, "tile": 16, "tile_m": 1.0, "roles": _st_roles, "upper": 1.2, "stair_steps": 4})
+addon.plan_build(bpy.context, _st_node)
+_st_o = [o for o in bpy.data.objects if o.type == "MESH" and o.data.name.startswith("Tilemap_tm_stairs")]
+_sz = sorted({round(v.co.z, 3) for v in _st_o[0].data.vertices})
+check("Tile map: the platform stands at the upper height and the stairs rise in four steps", abs(max(_sz) - 1.2) < 1e-3 and all(abs(z_ - e_) < 1e-3 for z_, e_ in zip([0.3, 0.6, 0.9], [z for z in _sz if 0.2 < z < 1.1])), str(_sz))
+_stpk = addon.tilemap_game_package(json.loads(_st_o[0]["gla_tilemap"]), "x.glb")
+check("Tile map: the package has a second floor at the upper height and a stairs entry that goes up north", len(_stpk["floors"]) == 2 and abs(_stpk["floors"][1]["y"] - 1.2) < 1e-6
+      and len(_stpk["stairs"]) == 1 and _stpk["stairs"][0]["up"] == "north", str((_stpk["floors"], _stpk["stairs"])))
 # the game package of a tile-map level: floor tiles as exact walk rectangles, entrance and exit on the floor, props and trees listed
 _pk_root = addon.plan_from_tilemap_picture(_tm_path, "tm_pkg", 16, 1.0)
 addon.plan_build(bpy.context, _pk_root)
