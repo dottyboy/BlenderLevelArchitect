@@ -234,6 +234,10 @@ and [examples/godot_tilemap_demo](examples/godot_tilemap_demo) is a small Godot 
 
 <p align="center"><img src="docs/img/godot_tilemap_demo.png" alt="The tile map level in Godot: a figure standing on grass among 3D trees, a lake and a brick wall" width="900"></p>
 
+The same project also plays the **ink dungeon** (`godot --path . -- --level ink`), including its raised platform: the walk rectangles of a second floor can only be entered over the stairs, and the height rises smoothly on them.
+
+<p align="center"><img src="docs/img/godot_ink_demo.png" alt="The ink-on-paper dungeon in Godot: a figure in a brick-walled room, solid stippled rock around it" width="900"></p>
+
 ### Ink on paper, as a style
 
 <p align="center"><img src="docs/img/ink_papers.png" alt="The same village in the ink style on white, old and grey paper: pale blocks outlined in black, stippled grass tinted green, a river drawn in wave lines" width="900"></p>
