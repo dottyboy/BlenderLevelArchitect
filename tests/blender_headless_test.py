@@ -5717,7 +5717,19 @@ tm_obj = [o for o in bpy.data.objects if o.type == "MESH" and o.data.name.starts
 check("Tile map: builds one mesh with the picture as its texture and UVs inside 0..1", len(tm_obj) == 1 and len(tm_obj[0].data.materials) == 1
       and all(-1e-4 <= c <= 1 + 1e-4 for d_ in tm_obj[0].data.uv_layers[0].data for c in d_.uv))
 tzs = [v.co.z for v in tm_obj[0].data.vertices]
-check("Tile map: green mass is raised and the floor stays at 0", max(tzs) > 3.0 and min(tzs) <= 0.0 and abs(max(tzs) - 3.2) < 1e-3, str((min(tzs), max(tzs))))
+check("Tile map: stone stands up to its height and the floor stays at 0", abs(max(tzs) - 3.0) < 1e-3 and abs(min(tzs)) < 0.8, str((min(tzs), max(tzs))))
+# a tileset matches tiles exactly: here the second tile of a 2-tile sheet is declared water, and a map made of it is all water (lowered)
+_ts = _np2.zeros((16, 32, 3)); _ts[:, :16] = (30, 200, 30); _ts[:, 16:] = (200, 30, 30)
+_ts_im = bpy.data.images.new("gla_ts_test.png", 32, 16); _ts_px = _np2.ones((16, 32, 4)); _ts_px[..., :3] = _ts[::-1] / 255.0
+_ts_im.pixels.foreach_set(_ts_px.ravel().astype(_np2.float32)); _ts_path = os.path.join(bpy.app.tempdir, "gla_ts_test.png")
+_ts_im.filepath_raw = _ts_path; _ts_im.file_format = 'PNG'; _ts_im.save()
+with open(os.path.join(bpy.app.tempdir, "gla_ts_test.json"), "w") as _f:
+    json.dump({"tile": 16, "cols": 2, "roles": ["floor", "water"]}, _f)
+_lut = addon._tilemap_tileset({"image": _ts_path, "json": os.path.join(bpy.app.tempdir, "gla_ts_test.json")}, 16)
+_mp = _np2.zeros((64, 64, 3)); _mp[:] = (30, 200, 30); _mp[16:48, 16:48] = (200, 30, 30)
+_rl = addon.tilemap_analyze(_mp, 16, lut=_lut)
+check("Tile map: a tileset gives the roles by exact tile match (green here is floor, not canopy)", (_rl[1:3, 1:3] == 3).all() and (_rl[0] == 0).all() and (_rl[:, 0] == 0).all(), str(_rl.tolist()))
+
 for bad in ({"image": None}, {"image": _tm_path, "tile": 2}):
     try:
         addon.plan_build(bpy.context, addon.plan_node("tm_bad", "building", "tilemap", params=bad))

@@ -213,6 +213,17 @@ Press **House from Floor-Plan Picture...** and pick a picture of an architect's 
 **Several pictures give several floors**, joined by stairs, and a built-in walk check proves every room can be reached. Try [docs/examples/house_floorplan.png](docs/examples/house_floorplan.png) at 13 m wide
 (made by [tools/make_house_example.py](tools/make_house_example.py)). Limits: walls must be axis-aligned, a door whose arc touches other lines stays an open doorway, rooms are not named and furniture is not built.
 
+### A level from a tile map
+
+<p align="center"><img src="docs/img/tilemap_demo.png" alt="A 3D level built from a tile-map picture: rounded forest mounds, a lake with sloping banks, brick walls with bevelled tops, a dirt path" width="900"></p>
+
+<p align="center"><img src="docs/examples/tilemap_demo.png" alt="The 2D tile map" width="440"> <img src="docs/examples/tileset_demo.png" alt="The tileset" width="440"></p>
+
+The **Level from Tile Map** button turns a picture of a whole level made of square tiles — the kind 16-bit action games used — into a 3D level that keeps the pixel look. The ground is one smooth surface: **forest tiles swell into rounded mounds**,
+**water sits lower and the banks slope into it**, and **stone tiles stand up as walls** in bands one tile high with a bevelled top. The picture itself is the texture, read with nearest filtering. With a **tileset** (a sheet of tiles and a small JSON that names each tile's role: floor, canopy, stone or water)
+every tile is matched exactly; without one the roles are read from colour and texture. The pictures above are an original demo tileset and a generated map ([tools/make_tileset.py](tools/make_tileset.py)).
+Use pictures you may use; none from commercial games is shipped.
+
 ### Seven style packs and a mix
 
 <p align="center"><img src="docs/img/styles_sheet.png" alt="The same village in Medieval, Egyptian, Mexican, Chinese, Inca, Modern and Alpine styles, and a mixed street" width="900"></p>

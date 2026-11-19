@@ -113,9 +113,11 @@ def brick(seed, window=False):
             img[y0:y1, x0:x1] = col
             img[y0, x0:x1] = np.clip(col + 22, 0, 255)
     if window:
-        img[5:12, 5:11] = (0x16, 0x14, 0x18)
-        img[5, 5:11] = (0x70, 0x66, 0x60)
-        img[7:10, 8] = (0x2a, 0x2a, 0x40)
+        img[4:13, 4:12] = (0x70, 0x66, 0x60)                  # a pale stone frame round a glazed window
+        img[5:12, 5:11] = (0x2c, 0x3a, 0x58)
+        img[5:12, 8] = (0x70, 0x66, 0x60)
+        img[8, 5:11] = (0x70, 0x66, 0x60)
+        img[5:7, 5:7] = (0x6f, 0x8f, 0xc0)
     return img
 
 
@@ -186,7 +188,7 @@ def make_map(w=64, h=48, seed=3):
         for y in range(y0, y1 + 1):
             for x in range(x0, x1 + 1):
                 edge = x in (x0, x1) or y in (y0, y1)
-                m[y, x] = (pick("brick") if r.random() > 0.15 else pick("brick window")) if edge else pick("paving")
+                m[y, x] = (pick("brick") if r.random() > 0.08 else pick("brick window")) if edge else pick("paving")
         dx, dy = door
         m[dy, dx] = pick("paving")
     room(8, 10, 22, 22, (15, 22))

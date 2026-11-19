@@ -8,6 +8,8 @@ gla = importlib.util.module_from_spec(spec); spec.loader.exec_module(gla); gla.r
 args = sys.argv[sys.argv.index("--") + 1:]
 biome, out = args[0], args[1]
 sc = bpy.context.scene
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o)                                  # the default cube, camera and light
 node = gla.plan_node("land", "terrain", "terrain", params={"biome": biome, "width": 240.0, "depth": 240.0, "scatter": 1.0})
 gla.plan_write_to_blend(sc, node); gla.plan_build(bpy.context, node)
 cam = bpy.data.objects.new("cam", bpy.data.cameras.new("cam")); sc.collection.objects.link(cam)

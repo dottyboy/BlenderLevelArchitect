@@ -16782,14 +16782,40 @@ def plan_from_floorplan_picture(path, plan_id="house", mpp=None, width=12.0, ext
 # height (floor flat, canopy and stone raised), and the picture itself is the texture, read with nearest filtering, so the 3D level keeps
 # the exact pixel look of the tiles. `tilemap_analyze` reads (numpy only), `_build_tilemap` builds the one mesh with walls where heights differ.
 # ==============================================================================
-PLAN_TILEMAP_DEFAULTS = dict(image=None, tile=16, tile_m=1.0, canopy=2.4, stone=3.2, green=0.375, rough=22.0, roles=None)
-TILEMAP_ROLES = ("floor", "canopy", "stone")
+PLAN_TILEMAP_DEFAULTS = dict(image=None, tile=16, tile_m=1.0, canopy=2.4, stone=3.0, water=-0.35, green=0.375, rough=22.0, roles=None, tileset=None, smooth=True)
+TILEMAP_ROLES = ("floor", "canopy", "stone", "water")
 
 
-def tilemap_analyze(rgb, tile=16, green=0.375, rough=22.0, roles=None):
-    """Roles of the tiles of a map picture: an int array (rows top to bottom, tile columns), 0 floor, 1 canopy, 2 stone.
-    A tile is canopy when its green share of the colour is above `green`, stone when it is not green but its texture is rough
-    (mean standard deviation of the pixels above `rough`), floor otherwise. `roles` = {"x,y": 0|1|2} overrides single tiles (tile column x, row y from the top)."""
+def _tilemap_tileset(spec, tile):
+    """{tile bytes: role code} of a tileset: spec = {"image": sheet path, "json": roles file} (json: {"tile", "cols", "roles": [...]}); None without one."""
+    if not spec:
+        return None
+    path = bpy.path.abspath(spec["image"])
+    jp = bpy.path.abspath(spec.get("json") or os.path.splitext(path)[0] + ".json")
+    try:
+        with open(jp) as f:
+            meta = json.load(f)
+    except (OSError, ValueError) as exc:
+        raise PlanError("params.tileset: cannot read %r (%s)" % (jp, exc))
+    t = int(meta.get("tile", tile))
+    if t != tile:
+        raise PlanError("params.tileset: the tileset's tile size (%d) differs from params.tile (%d)" % (t, tile))
+    sheet = _plan_image_pixels(path=path)
+    cols = int(meta["cols"])
+    lut = {}
+    for i, role in enumerate(meta["roles"]):
+        if role not in TILEMAP_ROLES:
+            raise PlanError("params.tileset: role %r of tile %d is not one of %s" % (role, i, ", ".join(TILEMAP_ROLES)))
+        y, x = (i // cols) * t, (i % cols) * t
+        lut.setdefault(sheet[y:y + t, x:x + t, :3].round().astype("uint8").tobytes(), TILEMAP_ROLES.index(role))
+    return lut
+
+
+def tilemap_analyze(rgb, tile=16, green=0.375, rough=22.0, roles=None, lut=None):
+    """Roles of the tiles of a map picture: an int array (rows top to bottom, tile columns), 0 floor, 1 canopy, 2 stone, 3 water.
+    With a tileset (`lut`: tile pixels -> role) every tile that matches a tileset tile exactly takes that tile's role; the others (and every tile
+    without a tileset) are read from colour and texture: canopy when the green share of the colour is above `green`, stone when it is not green but
+    rough (mean standard deviation of the pixels above `rough`), floor otherwise. `roles` = {"x,y": 0..3} overrides single tiles (tile column x, row y from the top)."""
     import numpy as np
     rgb = np.asarray(rgb, dtype=float)
     h, w = rgb.shape[:2]
@@ -16803,9 +16829,15 @@ def tilemap_analyze(rgb, tile=16, green=0.375, rough=22.0, roles=None):
     out = np.zeros((ty, tx), dtype=np.uint8)
     out[gshare > green] = 1
     out[(gshare <= green) & (std > rough)] = 2
+    if lut:
+        for y in range(ty):
+            for x in range(tx):
+                code = lut.get(tiles[y, x].round().astype("uint8").tobytes())
+                if code is not None:
+                    out[y, x] = code
     for key, role in (roles or {}).items():
         x, y = (int(v) for v in str(key).split(","))
-        if 0 <= x < tx and 0 <= y < ty and role in (0, 1, 2):
+        if 0 <= x < tx and 0 <= y < ty and role in (0, 1, 2, 3):
             out[y, x] = role
     return out
 
@@ -16834,55 +16866,111 @@ def tilemap_size(params=None):
     return (w // p["tile"]) * p["tile_m"], (h // p["tile"]) * p["tile_m"]
 
 
+def _tilemap_heights(roles, p):
+    """Per-tile ground height: floor 0, water a little below, canopy a rounded mound that rises over two tiles from its edge (a different
+    bump per tile so a forest is not a smooth cushion). Stone tiles are built separately as walls, so the ground under them is 0."""
+    import numpy as np
+    ty, tx = roles.shape
+    z = np.zeros((ty, tx))
+    z[roles == 3] = float(p["water"])
+    can = roles == 1
+    if can.any():
+        inf = 99.0
+        d = np.where(can, inf, 0.0)                               # distance (in tiles, 4-neighbour) from each canopy tile to the nearest non-canopy tile
+        d = np.where(can, inf, 0.0)
+        for _ in range(4):
+            for axis, shift in ((0, 1), (0, -1), (1, 1), (1, -1)):
+                nb = np.roll(d, shift, axis)
+                if axis == 0:
+                    nb[0 if shift == 1 else -1, :] = 0.0              # the map edge counts as open ground
+                else:
+                    nb[:, 0 if shift == 1 else -1] = 0.0
+                d = np.where(can, np.minimum(d, nb + 1.0), 0.0)
+        t = np.clip(d / 3.0, 0.0, 1.0)
+        t = t * t * (3.0 - 2.0 * t)
+        rng = np.random.default_rng(11)
+        z = np.where(can, float(p["canopy"]) * (0.35 + 0.65 * t) * (0.9 + 0.2 * rng.random((ty, tx))), z)
+    return z
+
+
 def _build_tilemap(p):
-    """(mesh data as (verts, faces, uvs), role grid, layout) of a tile map; the origin is the middle of the map, y up = north = the top of the picture."""
+    """((verts, faces, uvs, smooth flags), role grid, layout) of a tile map; the origin is the middle of the map, y up = north = the top of the picture.
+    The ground is one smooth surface over the tile corners (banks slope into water, canopy swells into mounds); stone tiles stand on it as walls
+    in bands one tile high with a bevelled top, all textured with the picture itself."""
     import numpy as np
     path = bpy.path.abspath(p["image"])
     rgb = _plan_image_pixels(path=path)
     tile, tm = int(p["tile"]), float(p["tile_m"])
     if not 4 <= tile <= 128 or not 0.1 <= tm <= 20.0:
         raise PlanError("params.tile must be 4..128 px and params.tile_m 0.1..20 m")
-    roles = tilemap_analyze(rgb, tile, p["green"], p["rough"], p.get("roles"))
+    roles = tilemap_analyze(rgb, tile, p["green"], p["rough"], p.get("roles"), _tilemap_tileset(p.get("tileset"), tile))
     ty, tx = roles.shape
     if ty * tx > 90000:
         raise PlanError("the map has %d tiles (at most 90000)" % (ty * tx))
     iw, ih = rgb.shape[1], rgb.shape[0]
-    zs = np.array([0.0, float(p["canopy"]), float(p["stone"])])[roles]
-    verts, faces, uvs = [], [], []
+    tz = _tilemap_heights(roles, p)
+    pad = np.pad(tz, 1, mode="edge")
+    corner = (pad[:-1, :-1] + pad[:-1, 1:] + pad[1:, :-1] + pad[1:, 1:]) / 4.0          # (ty+1, tx+1) heights at tile corners
+    if not p.get("smooth", True):
+        corner = np.zeros_like(corner)
+    verts, faces, uvs, smooth = [], [], [], []
     ox, oy = tx * tm / 2.0, ty * tm / 2.0
+    wall_h = float(p["stone"])
+    bevel = min(0.12 * tm, 0.4)
 
-    def quad(pts, uv):
+    def quad(pts, uv, sm):
         i = len(verts)
         verts.extend(pts)
         faces.append((i, i + 1, i + 2, i + 3))
         uvs.extend(uv)
+        smooth.append(sm)
     for j in range(ty):
         for i in range(tx):
             x0, x1 = i * tm - ox, (i + 1) * tm - ox
-            y1, y0 = oy - j * tm, oy - (j + 1) * tm                  # row 0 is the top of the picture = +y
+            y1, y0 = oy - j * tm, oy - (j + 1) * tm
             u0, u1 = i * tile / iw, (i + 1) * tile / iw
             v1, v0 = 1.0 - j * tile / ih, 1.0 - (j + 1) * tile / ih
-            z = float(zs[j, i])
             uv = [(u0, v0), (u1, v0), (u1, v1), (u0, v1)]
-            quad([(x0, y0, z), (x1, y0, z), (x1, y1, z), (x0, y1, z)], uv)
-            for (di, dj), edge in (((1, 0), "e"), ((-1, 0), "w"), ((0, -1), "n"), ((0, 1), "s")):    # walls down to a lower neighbour
-                ni, nj = i + di, j + dj
-                zn = float(zs[nj, ni]) if 0 <= ni < tx and 0 <= nj < ty else -0.5
-                if zn >= z:
+            stone = roles[j, i] == 2
+            c = (corner[j + 1, i], corner[j + 1, i + 1], corner[j, i + 1], corner[j, i])      # sw, se, ne, nw
+            quad([(x0, y0, c[0]), (x1, y0, c[1]), (x1, y1, c[2]), (x0, y1, c[3])], uv, not stone)
+            if not stone:
+                continue
+            z0 = min(c)
+            ext = {k: not (0 <= ni < tx and 0 <= nj < ty and roles[nj, ni] == 2) for k, (ni, nj) in
+                   {"e": (i + 1, j), "w": (i - 1, j), "n": (i, j - 1), "s": (i, j + 1)}.items()}
+            E, W, N, S = (bevel if ext[k] else 0.0 for k in ("e", "w", "n", "s"))
+            zt, zb2 = z0 + wall_h, z0 + wall_h - bevel
+            n_bands = max(1, int(math.ceil((wall_h - bevel) / tm - 1e-6)))
+            for edge in ("e", "w", "n", "s"):
+                if not ext[edge]:
                     continue
+                for bnd in range(n_bands):
+                    za = z0 + bnd * tm
+                    zb = min(zb2, za + tm)
+                    if edge == "e":
+                        pts = [(x1, y0, za), (x1, y1, za), (x1, y1, zb), (x1, y0, zb)]
+                    elif edge == "w":
+                        pts = [(x0, y1, za), (x0, y0, za), (x0, y0, zb), (x0, y1, zb)]
+                    elif edge == "n":
+                        pts = [(x1, y1, za), (x0, y1, za), (x0, y1, zb), (x1, y1, zb)]
+                    else:
+                        pts = [(x0, y0, za), (x1, y0, za), (x1, y0, zb), (x0, y0, zb)]
+                    quad(pts, uv, False)
                 if edge == "e":
-                    pts = [(x1, y0, zn), (x1, y1, zn), (x1, y1, z), (x1, y0, z)]
+                    pts = [(x1, y0, zb2), (x1, y1, zb2), (x1 - E, y1 - N, zt), (x1 - E, y0 + S, zt)]
                 elif edge == "w":
-                    pts = [(x0, y1, zn), (x0, y0, zn), (x0, y0, z), (x0, y1, z)]
+                    pts = [(x0, y1, zb2), (x0, y0, zb2), (x0 + W, y0 + S, zt), (x0 + W, y1 - N, zt)]
                 elif edge == "n":
-                    pts = [(x1, y1, zn), (x0, y1, zn), (x0, y1, z), (x1, y1, z)]
+                    pts = [(x1, y1, zb2), (x0, y1, zb2), (x0 + W, y1 - N, zt), (x1 - E, y1 - N, zt)]
                 else:
-                    pts = [(x0, y0, zn), (x1, y0, zn), (x1, y0, z), (x0, y0, z)]
-                quad(pts, [(u0, v0), (u1, v0), (u1, v1), (u0, v1)])
+                    pts = [(x0, y0, zb2), (x1, y0, zb2), (x1 - E, y0 + S, zt), (x0 + W, y0 + S, zt)]
+                quad(pts, uv, False)
+            quad([(x0 + W, y0 + S, zt), (x1 - E, y0 + S, zt), (x1 - E, y1 - N, zt), (x0 + W, y1 - N, zt)], uv, False)
     floor = int((roles == 0).sum())
     layout = {"name": "tilemap", "tile_m": tm, "tiles": [tx, ty], "floor_share": floor / float(tx * ty), "size": [tx * tm, ty * tm],
               "roles": roles.tolist()}
-    return (verts, faces, uvs), roles, layout
+    return (verts, faces, uvs, smooth), roles, layout
 
 
 def _tilemap_material(path):
@@ -16908,7 +16996,7 @@ def _plan_build_tilemap(context, node, world, seed, path):
     where = "/".join(path)
     p = {**PLAN_TILEMAP_DEFAULTS, **(node.get("params") or {})}
     try:
-        (verts, faces, uvs), roles, layout = _build_tilemap(p)
+        (verts, faces, uvs, smooth), roles, layout = _build_tilemap(p)
     except PlanError as exc:
         raise PlanError("%s: %s" % (where, exc))
     mesh = bpy.data.meshes.new("Tilemap_" + node["id"])
@@ -16918,6 +17006,8 @@ def _plan_build_tilemap(context, node, world, seed, path):
     # loops follow the faces in order, four per quad, in the same order as the vertices were added
     uv_layer.data.foreach_set("uv", flat)
     mesh.update()
+    for poly, sm in zip(mesh.polygons, smooth):
+        poly.use_smooth = sm
     mesh.materials.append(_tilemap_material(bpy.path.abspath(p["image"])))
     obj = bpy.data.objects.new(mesh.name, mesh)
     context.scene.collection.objects.link(obj)

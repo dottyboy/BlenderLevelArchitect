@@ -307,7 +307,9 @@ For a house with several floors choose the ground floor and list the pictures of
 
 Press **Level from Tile Map...** in the Plans panel and choose a picture of a whole level drawn from square tiles (the kind of map 16-bit action games used). Set **Tile size (px)** (usually 16) and **Tile size (m)**, then press **Build**.
 Each tile gets a role from its colour and texture: **floor** (flat), **green mass** (raised, for foliage) or **rough grey mass** (raised, for stone walls and machinery). The picture itself is the texture, read pixel-sharp, so the 3D level keeps the look of the tiles.
-In a plan, `params.roles` = `{"x,y": 0|1|2}` overrides single tiles, and `params.green` / `params.rough` move the thresholds (green share of the colour 0.375, texture roughness 22). The maps and tilesets of commercial games are not included; use pictures you are allowed to use.
+In a plan, `params.roles` = `{"x,y": 0|1|2}` overrides single tiles, and `params.green` / `params.rough` move the thresholds (green share of the colour 0.375, texture roughness 22). A fourth role, **water**, sits a little lower and the ground slopes into it; green masses swell into rounded mounds (`params.smooth: false` makes everything flat-topped blocks).
+With a **tileset** (`params.tileset` = `{"image": sheet.png, "json": roles.json}`; the JSON has `tile`, `cols` and a `roles` list, one of floor / canopy / stone / water per tile in sheet order) every map tile that equals a tileset tile pixel for pixel takes that tile's role; others are read from colour and texture.
+`tools/make_tileset.py` draws an original example tileset and map. The maps and tilesets of commercial games are not included; use pictures you are allowed to use.
 
 ### Walled towns
 
