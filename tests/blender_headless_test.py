@@ -5838,6 +5838,35 @@ for bad in ({"image": None}, {"image": _tm_path, "tile": 2}):
     except addon.PlanError:
         check("Tile map: bad params are refused (%s)" % list(bad), True)
 
+# --- The ink-on-paper style pack
+print("\n--- Plans: the ink style ---")
+check("Ink style: the pack exists, is selectable and is not part of a mixed plan", "ink" in addon.PLAN_STYLES and "ink" in addon.PLAN_STYLE_CHOICES
+      and all(addon.plan_pick_style("mixed", sd) != "ink" for sd in range(1, 200)))
+ink_tree = addon.plan_node("ink_tree", "building", "tree", style="ink", params={"height": 6.0, "crown": "ROUND"})
+ink_house = addon.plan_node("ink_house", "building", "house", style="ink", transform={"x": 12.0, "y": 0.0, "z": 0.0, "rot": 0.0})
+ink_land = addon.plan_node("ink_land", "terrain", "terrain", style="ink", params={"biome": "meadow", "width": 80.0, "depth": 80.0, "scatter": 1.0, "rivers": "none"}, children=[ink_tree, ink_house])
+addon.plan_build(bpy.context, ink_land)
+ink_mats = {m.name for o in bpy.data.objects if o.type == "MESH" and o.name.startswith("PB_ink_land") for m in o.data.materials if m}
+check("Ink style: the terrain, trees and houses of an ink plan get ink materials (terrain, leaf, wall, roof)",
+      {"LA_Ink_Terrain", "LA_Ink_Leaf"} <= ink_mats and any(n.startswith("LA_Style_Ink") for n in ink_mats), str(sorted(ink_mats)))
+check("Ink style: the skin is switched off again after the build", addon._ACTIVE_SKIN == "" and addon.get_or_create_leaf_material("GREEN").name == "LA_Leaf_Green")
+
+# paper kinds of the ink style: the plan's paper tints every surface, green things greenish, water bluish
+ink_old = dict(addon.plan_node("ink_old", "terrain", "terrain", style="ink", params={"biome": "meadow", "width": 80.0, "depth": 80.0, "scatter": 1.0, "rivers": "none"},
+                               children=[addon.plan_node("ink_old_tree", "building", "tree", style="ink", params={"height": 6.0, "crown": "ROUND"})]), paper="old")
+addon.plan_build(bpy.context, ink_old)
+def _ink_paper_rgb(mat):
+    mix = next(n for n in mat.node_tree.nodes if n.type == 'MIX')
+    return tuple(mix.inputs[6].default_value)[:3]
+old_leaf = bpy.data.materials.get("LA_Ink_Leaf_Old")
+check("Ink paper: a plan with paper 'old' builds its own leaf and wall materials (the white ones stay)", old_leaf is not None and bpy.data.materials.get("LA_Ink_Leaf") is not None
+      and any(m.name.startswith("LA_Style_InkWall_Old") for m in bpy.data.materials if m.users or True), str([m.name for m in bpy.data.materials if "Ink" in m.name]))
+lf = _ink_paper_rgb(old_leaf)
+check("Ink paper: leaves tint the old paper green (green above red and blue), water bluish", lf[1] > lf[0] and lf[1] > lf[2], str(lf))
+wt = _ink_paper_rgb(addon._ink_material("water"))
+check("Ink paper: water paper is bluish (blue above red)", wt[2] > wt[0], str(wt))
+check("Ink paper: the paper choice is switched off after the build", addon._INK_PAPER == "white")
+
 # ==============================================================================
 print()
 if failures:

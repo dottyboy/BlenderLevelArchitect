@@ -7298,7 +7298,7 @@ TOWER_ROWS = 8
 ROOF_SOURCE_SLOT = 2                 # material slot the building builders give roof faces (maps to the roof slot)
 
 
-def _masonry_images(prefix, rows, row_h, lens_choices, palette, seed, joint_m=0.011, bevel_m=0.016, wear=0.12, contrast=1.0):
+def _masonry_images(prefix, rows, row_h, lens_choices, palette, seed, joint_m=0.011, bevel_m=0.016, wear=0.12, contrast=1.0, ink=False):
     """(albedo, normal) procedural masonry images, generated once per session
     with numpy and packed into the .blend so glTF export embeds them. rows *
     row_h must equal the brick tile height so every material shares one UV
@@ -7369,6 +7369,12 @@ def _masonry_images(prefix, rows, row_h, lens_choices, palette, seed, joint_m=0.
     mortar = np.array([0.20, 0.19, 0.17])
     albedo = np.where((d_edge < joint + 0.5)[..., None], mortar, base)
     albedo = np.clip(albedo * (0.55 + 0.45 * np.clip(height * 1.6, 0, 1))[..., None], 0, 1)
+    if ink:                                  # ink on paper: pale blocks, a black line round every block, a little stipple, no relief shading
+        line = d_edge < joint + 7.0
+        dots = rng.random((H, W)) < 0.012
+        albedo = np.where(line[..., None], np.array([0.05, 0.05, 0.07]), np.clip(base, 0, 1))
+        albedo = np.where(dots[..., None], np.array([0.12, 0.12, 0.15]), albedo)
+        height = height * 0.0 + 0.5
     dhx = (np.roll(height, -1, 1) - np.roll(height, 1, 1)) * 0.5
     dhy = (np.roll(height, -1, 0) - np.roll(height, 1, 0)) * 0.5
     nrm_arr = np.stack([-dhx * 5.0, -dhy * 5.0, np.ones_like(height)], -1)
@@ -7464,23 +7470,152 @@ _STYLE_TEXTURES = {
     'SANDROOF': (2, 1.04, [1.2, 2.4], (0.74, 0.62, 0.42), 0.03, 0.01, 0.02, 0.05, 0.95),
     'TILE_GREY': (10, 0.208, [0.22, 0.26], (0.34, 0.38, 0.42), 0.04, 0.012, 0.03, 0.08, 0.7),
     'METAL': (2, 1.04, [1.2, 2.4], (0.24, 0.27, 0.32), 0.02, 0.016, 0.006, 0.015, 0.35),
+    # the ink-on-paper pack: pale blocks outlined in black
+    'INK_WALL': (4, 0.52, [0.9, 1.2, 1.5], (0.91, 0.91, 0.94), 0.012, 0.010, 0.0, 0.0, 0.95),
+    'INK_TRIM': (2, 1.04, [1.1, 1.6], (0.86, 0.86, 0.90), 0.012, 0.012, 0.0, 0.0, 0.95),
+    'INK_ROOF': (8, 0.26, [0.35, 0.45, 0.55], (0.93, 0.93, 0.96), 0.01, 0.008, 0.0, 0.0, 0.95),
+    'INK_WOOD': (8, 0.26, [2.4], (0.88, 0.87, 0.88), 0.01, 0.008, 0.0, 0.0, 0.95),
 }
 _STYLE_CONTRAST = {'ALPINE_LOG': 0.5, 'STRAW': 0.5, 'BRANCH': 0.5, 'EARTH': 0.25, 'EARTHBAG': 0.35, 'AIRCRETE': 0.15, 'SHINGLE': 0.5, 'SOD': 0.4,
                    'SANDSTONE': 0.45, 'SANDSTONE_DARK': 0.5, 'ADOBE': 0.2, 'ADOBE_TRIM': 0.3, 'TIMBER': 0.4, 'TIMBER_DARK': 0.4,
                    'FITTED': 0.6, 'FITTED_DARK': 0.6, 'PANEL': 0.25, 'PANEL_DARK': 0.25, 'THATCH': 0.55, 'SANDROOF': 0.4,
-                   'TILE_GREY': 0.6, 'METAL': 0.25}
-ROOF_COLORS = ('TERRACOTTA', 'SLATE', 'STONE', 'THATCH', 'SANDROOF', 'TILE_GREY', 'METAL', 'SHINGLE', 'SOD', 'AIRCRETE')
+                   'TILE_GREY': 0.6, 'METAL': 0.25, 'INK_WALL': 0.0, 'INK_TRIM': 0.0, 'INK_ROOF': 0.0, 'INK_WOOD': 0.0}
+ROOF_COLORS = ('TERRACOTTA', 'SLATE', 'STONE', 'THATCH', 'SANDROOF', 'TILE_GREY', 'METAL', 'SHINGLE', 'SOD', 'AIRCRETE', 'INK_ROOF')
+
+
+_ACTIVE_SKIN = ""                                              # "ink" while a plan node of the ink style is being built: grass, leaves, water, rock and wood take the ink look too
+INK_PAPERS = {"white": (0.91, 0.91, 0.94), "old": (0.89, 0.84, 0.70), "grey": (0.74, 0.76, 0.80), "cream": (0.95, 0.93, 0.85)}
+_INK_PAPER = "white"                                            # the paper of the plan being built (plan field "paper")
+# how each kind of surface tints the paper: green things greenish, water bluish, wood brownish ... (multiplied with the paper colour)
+INK_TINTS = {"leaf": (0.80, 0.98, 0.72), "cactus": (0.80, 0.98, 0.72), "water": (0.78, 0.88, 1.00), "wood": (1.0, 0.90, 0.78), "rock": (0.93, 0.93, 0.96),
+             "metal": (0.90, 0.93, 1.00), "terrain": (1.0, 1.0, 1.0), "INK_WALL": (1.0, 1.0, 1.0), "INK_TRIM": (0.96, 0.96, 0.97),
+             "INK_ROOF": (1.0, 0.97, 0.94), "INK_WOOD": (1.0, 0.93, 0.84)}
+
+
+def _ink_paper(kind):
+    """The paper colour of an ink surface of this kind: the plan's paper times the kind's tint."""
+    base = INK_PAPERS.get(_INK_PAPER, INK_PAPERS["white"])
+    tint = INK_TINTS.get(kind, (1.0, 1.0, 1.0))
+    return tuple(min(1.0, b * t) for b, t in zip(base, tint))
+
+
+def _skin_ink():
+    return _ACTIVE_SKIN == "ink"
+
+
+def _ink_material(kind):
+    """Ink-on-paper surface materials (shader only): pale paper with black marks -- `leaf` stipple, `wood` grain lines, `rock` cracks and stipple, `metal` fine lines,
+    `water` wave lines on a pale blue paper (slightly see-through), `terrain` stipple that is denser on grass (read from the baked colour) over paper that darkens
+    with height."""
+    name = "LA_Ink_" + kind.title() + ("" if _INK_PAPER == "white" else "_" + _INK_PAPER.title())
+    mat = bpy.data.materials.get(name)
+    if mat is not None:
+        return mat
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    nt = mat.node_tree
+    N, L = nt.nodes, nt.links
+    bsdf = next(n for n in N if n.type == 'BSDF_PRINCIPLED')
+
+    def node(t, x, y):
+        n = N.new(t)
+        n.location = (x, y)
+        return n
+
+    def math(op, a, b, x, y):
+        n = node("ShaderNodeMath", x, y)
+        n.operation = op
+        for k_, v in ((0, a), (1, b)):
+            if isinstance(v, (int, float)):
+                n.inputs[k_].default_value = float(v)
+            elif v is not None:
+                L.new(v, n.inputs[k_])
+        return n.outputs[0]
+    tc = node("ShaderNodeTexCoord", -900, 0)
+    paper = (*_ink_paper(kind), 1.0)
+    ink = (0.04, 0.04, 0.06, 1.0)
+    mask = None
+    if kind in ("leaf", "terrain", "cactus"):
+        nz = node("ShaderNodeTexNoise", -700, 0)
+        nz.inputs["Scale"].default_value, nz.inputs["Detail"].default_value, nz.inputs["Roughness"].default_value = {"leaf": 7.0, "terrain": 2.6, "cactus": 6.0}[kind], 2.0, 0.55
+        L.new(tc.outputs["Object"], nz.inputs["Vector"])
+        thr = 0.62
+        if kind == "terrain":                                      # grass (green-dominant colour) gets dense stipple, bare ground sparse
+            attr = node("ShaderNodeAttribute", -900, 250)
+            attr.attribute_name = "Col"
+            _set_prop(attr, 'attribute_type', 'GEOMETRY')
+            sep = node("ShaderNodeSeparateColor", -700, 250)
+            L.new(attr.outputs["Color"], sep.inputs["Color"])
+            green = math("SUBTRACT", sep.outputs["Green"], math("MULTIPLY", math("ADD", sep.outputs["Red"], sep.outputs["Blue"], -560, 300), 0.5, -480, 300), -400, 300)
+            thr = math("SUBTRACT", 0.72, math("MULTIPLY", math("MAXIMUM", green, 0.0, -320, 300), 1.4, -240, 300), -160, 300)
+            lum = math("ADD", math("ADD", sep.outputs["Red"], sep.outputs["Green"], -560, 150), sep.outputs["Blue"], -480, 150)
+        mask = math("GREATER_THAN", nz.outputs["Fac"], thr, -400, 0)
+    elif kind in ("wood", "metal", "water"):
+        wv = node("ShaderNodeTexWave", -700, 0)
+        wv.wave_type = 'BANDS'
+        wv.bands_direction = 'Z' if kind == "wood" else 'X'
+        wv.inputs["Scale"].default_value = {"wood": 3.0, "metal": 5.0, "water": 0.35}[kind]
+        wv.inputs["Distortion"].default_value = {"wood": 4.0, "metal": 0.0, "water": 6.0}[kind]
+        wv.inputs["Detail"].default_value = 1.0
+        L.new(tc.outputs["Object"], wv.inputs["Vector"])
+        mask = math("GREATER_THAN", wv.outputs["Fac"], 0.93 if kind != "water" else 0.9, -400, 0)
+    elif kind == "rock":
+        vr = node("ShaderNodeTexVoronoi", -700, 0)
+        vr.feature = 'DISTANCE_TO_EDGE'
+        vr.inputs["Scale"].default_value = 1.4
+        L.new(tc.outputs["Object"], vr.inputs["Vector"])
+        crack = math("LESS_THAN", vr.outputs["Distance"], 0.05, -500, 100)
+        nz = node("ShaderNodeTexNoise", -700, -200)
+        nz.inputs["Scale"].default_value = 7.0
+        L.new(tc.outputs["Object"], nz.inputs["Vector"])
+        dots = math("GREATER_THAN", nz.outputs["Fac"], 0.66, -500, -100)
+        mask = math("MAXIMUM", crack, dots, -300, 0)
+    mix = node("ShaderNodeMix", -100, 0)
+    mix.data_type = 'RGBA'
+    L.new(mask, mix.inputs[0])
+    mix.inputs[6].default_value, mix.inputs[7].default_value = paper, ink
+    if kind == "terrain":                                          # the paper darkens a little with the baked colour's brightness
+        shade = math("ADD", 0.78, math("MULTIPLY", lum, 0.075, -240, 200), -100, 250)
+        tint = node("ShaderNodeMix", 100, 0)
+        tint.data_type = 'RGBA'
+        tint.blend_type = 'MULTIPLY'
+        tint.inputs[0].default_value = 1.0
+        L.new(mix.outputs[2], tint.inputs[6])
+        L.new(shade, tint.inputs[7])
+        grass = node("ShaderNodeMix", 100, -250)                      # grass-coloured ground gets greenish paper, bare ground and rock stay plain
+        grass.data_type = 'RGBA'
+        L.new(math("MINIMUM", math("MAXIMUM", math("MULTIPLY", green, 6.0, -80, 450), 0.0, -40, 450), 1.0, 0.0, 450), grass.inputs[0])
+        grass.inputs[6].default_value = (1.0, 1.0, 1.0, 1.0)
+        grass.inputs[7].default_value = (0.82, 0.97, 0.72, 1.0)
+        tint2 = node("ShaderNodeMix", 300, 0)
+        tint2.data_type = 'RGBA'
+        tint2.blend_type = 'MULTIPLY'
+        tint2.inputs[0].default_value = 1.0
+        L.new(tint.outputs[2], tint2.inputs[6])
+        L.new(grass.outputs[2], tint2.inputs[7])
+        L.new(tint2.outputs[2], bsdf.inputs["Base Color"])
+    else:
+        L.new(mix.outputs[2], bsdf.inputs["Base Color"])
+    _set_input(bsdf, "Roughness", 1.0)
+    _set_input(bsdf, "Specular IOR Level", 0.0)
+    if kind == "water":
+        _set_input(bsdf, "Alpha", 0.93)
+    mat.diffuse_color = paper
+    return mat
 
 
 def get_style_material(key):
     """A style-pack wall/trim/roof material by key (procedural, packed like the masonry textures)."""
-    name = "LA_Style_" + key.title().replace("_", "")
+    name = "LA_Style_" + key.title().replace("_", "") + ("_" + _INK_PAPER.title() if key.startswith("INK_") and _INK_PAPER != "white" else "")
     existing = bpy.data.materials.get(name)
     if existing is not None:
         return existing
     rows, row_h, lens, base, jitter, joint, bevel, wear, rough = _STYLE_TEXTURES[key]
+    if key.startswith("INK_"):                                      # the ink pack's block colour is the plan's paper (times the surface's tint)
+        pr = _ink_paper(key)
+        base = tuple(min(1.0, c * (pr[i] / 0.92)) for i, c in enumerate(base))
     images = _masonry_images(name, rows, row_h, lens, _flat_palette(base, jitter), 31 + len(key), joint_m=joint,
-                             bevel_m=bevel, wear=wear, contrast=_STYLE_CONTRAST.get(key, 1.0))
+                             bevel_m=bevel, wear=wear, contrast=_STYLE_CONTRAST.get(key, 1.0), ink=key.startswith('INK_'))
     return _masonry_material(name, images, name + ".png", "%02x%02x%02x" % tuple(int(c * 255) for c in base), roughness=rough)
 
 
@@ -7670,6 +7805,8 @@ def _wood_images(variant='BROWN'):
 
 def get_or_create_wood_material(variant='BROWN'):
     """Weathered wood (procedural planks, packed like the masonry textures); BROWN, RED (lacquer) or DARK."""
+    if _skin_ink():
+        return _ink_material("wood")
     name = "LA_Wood" if variant == 'BROWN' else "LA_Wood_" + variant.title()
     return _masonry_material(name, _wood_images(variant) if bpy.data.materials.get(name) is None else None,
                              name + ".png", "3a2616", roughness=0.85)
@@ -9379,7 +9516,8 @@ def _concrete_style(rng, style):
     """The style of one generated child: a `mixed` parent gives each child a random concrete pack (so its footprint
     is known while the layout is computed); otherwise None = inherit."""
     if style == 'mixed':
-        return list(PLAN_STYLES)[rng.randrange(len(PLAN_STYLES))]
+        names_ = [n_ for n_ in PLAN_STYLES if n_ != 'ink']
+        return names_[rng.randrange(len(names_))]
     return None
 
 
@@ -11132,6 +11270,7 @@ PLAN_STYLES = {
             'stable': dict(roof='FLAT', parapet=0.2, wall_thickness=0.4, door_style='rect', window_kind='rect', chimney=False),
             'barn': dict(roof='FLAT', parapet=0.2, wall_thickness=0.4, door_style='rect', chimney=False),
         }),
+    'ink': dict(label="Ink on paper", wall='INK_WALL', trim='INK_TRIM', wood='INK_WOOD', roof_color='INK_ROOF', fence='stone', skin='ink', kinds={}),
     'alpine': dict(
         label="Alpine chalet", wall='ALPINE_LOG', trim='FITTED_DARK', wood='DARK', roof_color='SHINGLE', fence='wood',
         kinds={
@@ -11176,7 +11315,7 @@ def plan_pick_style(style, seed):
     """The concrete style of one node: a `mixed` plan gives every building, fence and road its own pack,
     chosen from its (derived, deterministic) seed; anything else is returned unchanged."""
     if style == 'mixed':
-        names = list(PLAN_STYLES)
+        names = [n_ for n_ in PLAN_STYLES if n_ != 'ink']                      # the ink look is a deliberate choice, not part of a mix
         return names[plan_child_seed(int(seed), "style") % len(names)]
     return style
 
@@ -11186,6 +11325,8 @@ def plan_style_name(style):
 
 
 def _style_wood_material(spec):
+    if spec["wood"] == 'INK_WOOD':
+        return get_style_material('INK_WOOD')
     return get_style_material('PANEL_DARK') if spec["wood"] == 'METAL' else get_or_create_wood_material(spec["wood"])
 
 
@@ -11902,6 +12043,8 @@ for _k, _sz in (("barrel", 1.0), ("crate", 1.1), ("haystack", 2.6)):
 
 
 def get_or_create_leaf_material(color='GREEN'):
+    if _skin_ink():
+        return _ink_material("leaf")
     name = "LA_Leaf_" + color.title()
     mat = bpy.data.materials.get(name)
     if mat is not None:
@@ -13996,6 +14139,8 @@ SW_THEMES_RIGHT = ("treasury", "salon", "gallery", "salon", "bedroom", "bedroom"
 
 
 def _gold_material():
+    if _skin_ink():
+        return _ink_material("metal")
     mat = bpy.data.materials.get("LA_Gold")
     if mat is None:
         mat = bpy.data.materials.new("LA_Gold")
@@ -15277,6 +15422,8 @@ def _rc_fbm(x, y, z, seed, octaves=4):
 
 def _rock_material(kind):
     """Organic rock: stretched noise bands (strata) and fine grain on object coordinates, no tiling. kinds: CLIFF_<tone>, CARVED_<tone>, GROUND."""
+    if _skin_ink():
+        return _ink_material("rock")
     name = "LA_Rock_" + kind
     mat = bpy.data.materials.get(name)
     if mat is not None:
@@ -18175,6 +18322,8 @@ def _terrain_node_group(name, tp):
 
 
 def _terrain_material(name):
+    if _skin_ink():
+        return _ink_material("terrain")
     mat = bpy.data.materials.get(name)
     if mat is not None:
         return mat
@@ -18231,6 +18380,8 @@ def _terrain_material(name):
 def _water_shader(name, kind):
     """Lake / river water: shallow turquoise to deep blue by the baked `depth` attribute (lake) or the ribbon's UV (river), foam along the
     shore or banks, ripples as a normal bump. Shader only; kind is 'lake' or 'river'."""
+    if _skin_ink():
+        return _ink_material("water")
     mat = bpy.data.materials.get(name)
     if mat is not None:
         return mat
@@ -18359,6 +18510,8 @@ def _terrain_water_mesh(heights, nx, ny, w, d, sea, name, margin=0.7):
 
 
 def _water_material():
+    if _skin_ink():
+        return _ink_material("water")
     mat = bpy.data.materials.get("LA_Water")
     if mat is None:
         mat = bpy.data.materials.new("LA_Water")
@@ -18497,15 +18650,15 @@ def _terrain_scatter(context, tp, sampler, pads, seed, path, world, sea_level, w
     amp = tp["amplitude"]
     rng = random.Random(seed)
     wood_mat = get_or_create_wood_material('BROWN')
-    rock_mat = bpy.data.materials.get("LA_Rock") or bpy.data.materials.new("LA_Rock")
-    if not rock_mat.use_nodes:
+    rock_mat = _ink_material("rock") if _skin_ink() else (bpy.data.materials.get("LA_Rock") or bpy.data.materials.new("LA_Rock"))
+    if not _skin_ink() and not rock_mat.use_nodes:
         rock_mat.use_nodes = True
         bsdf = next(n for n in rock_mat.node_tree.nodes if n.type == 'BSDF_PRINCIPLED')
         _set_input(bsdf, "Base Color", (0.36, 0.34, 0.31, 1.0))
         _set_input(bsdf, "Roughness", 0.95)
         rock_mat.diffuse_color = (0.36, 0.34, 0.31, 1.0)
-    cactus_mat = bpy.data.materials.get("LA_Cactus") or bpy.data.materials.new("LA_Cactus")
-    if not cactus_mat.use_nodes:
+    cactus_mat = _ink_material("cactus") if _skin_ink() else (bpy.data.materials.get("LA_Cactus") or bpy.data.materials.new("LA_Cactus"))
+    if not _skin_ink() and not cactus_mat.use_nodes:
         cactus_mat.use_nodes = True
         bsdf = next(n for n in cactus_mat.node_tree.nodes if n.type == 'BSDF_PRINCIPLED')
         _set_input(bsdf, "Base Color", (0.18, 0.34, 0.16, 1.0))
@@ -18746,7 +18899,19 @@ def plan_build(context, root):
 
 
 def _plan_build_nodes(context, root, resolved, built, skipped, warnings):
+    global _ACTIVE_SKIN, _INK_PAPER
+    _INK_PAPER = root.get("paper", "white") if root.get("paper", "white") in INK_PAPERS else "white"
+    try:
+        return _plan_build_nodes_skinned(context, root, resolved, built, skipped, warnings)
+    finally:
+        _ACTIVE_SKIN = ""
+        _INK_PAPER = "white"
+
+
+def _plan_build_nodes_skinned(context, root, resolved, built, skipped, warnings):
+    global _ACTIVE_SKIN
     for node, path in plan_iter(root):
+        _ACTIVE_SKIN = "ink" if plan_pick_style(resolved[path]["style"], resolved[path]["seed"]) == "ink" else ""
         if node["type"] == "terrain":
             stats = _plan_build_terrain(context, root, resolved, {**node, "style": None}, path)
             built.append("/".join(path))
@@ -19023,6 +19188,8 @@ class OBJECT_OT_PlanCreate(bpy.types.Operator):
         plan_apply_shape(plan, context.scene.wfc_plan_shape)
         if context.scene.wfc_plan_style != 'medieval':
             plan["style"] = context.scene.wfc_plan_style
+        if context.scene.wfc_plan_style == 'ink':
+            plan["paper"] = context.scene.wfc_plan_paper
         plan_write_to_blend(context.scene, plan)
         self.report({'INFO'}, "Created plan '%s'." % plan["id"])
         return {'FINISHED'}
@@ -19324,6 +19491,8 @@ class OBJECT_OT_PlanImport(bpy.types.Operator, ImportHelper):
         try:
             root = plan_import_file(self.filepath, None, self.scale,
                                     context.scene.wfc_plan_style if context.scene.wfc_plan_style != 'medieval' else None)
+            if context.scene.wfc_plan_style == 'ink':
+                root["paper"] = context.scene.wfc_plan_paper
             ids = set(plan_list_ids())
             n, base = 1, root["id"]
             while root["id"] in ids:
@@ -20597,6 +20766,8 @@ class VIEW3D_PT_GLAPlans(bpy.types.Panel):
         box = layout.box()
         col = box.column(align=True)
         col.prop(context.scene, "wfc_plan_style", text="Style")
+        if context.scene.wfc_plan_style == 'ink':
+            col.prop(context.scene, "wfc_plan_paper", text="Paper")
         col.prop(context.scene, "wfc_plan_shape", text="Shape")
         col.prop(context.scene, "wfc_plan_biome", text="Biome")
         layout.menu("VIEW3D_MT_gla_plan_add", text="Add a plan at the 3D cursor", icon='ADD')
@@ -21317,6 +21488,10 @@ def register():
         name="Style", items=[(k, v["label"], "Style pack for new plans: wall, trim, roof and wood materials and building proportions")
                              for k, v in PLAN_STYLES.items()] + [('mixed', "Mixed", "Every building gets a random style pack")],
         default='medieval', description="Style pack used by plans created with the buttons below")
+    bpy.types.Scene.wfc_plan_paper = EnumProperty(
+        name="Paper", items=[('white', "White paper", "Pale grey-white paper"), ('old', "Old paper", "Yellowed, aged paper"),
+                             ('grey', "Grey paper", "Greyish paper"), ('cream', "Cream paper", "Warm cream paper")],
+        default='white', description="Paper of an ink-style plan: grass and leaves tint it green, water blue, wood brown")
     bpy.types.Scene.wfc_structure_kind = EnumProperty(
         name="Structure",
         items=[
@@ -21448,6 +21623,7 @@ def unregister():
     del bpy.types.Scene.wfc_active_tab
     del bpy.types.Scene.wfc_structure_kind
     del bpy.types.Scene.wfc_plan_style
+    del bpy.types.Scene.wfc_plan_paper
     del bpy.types.Scene.wfc_plan_shape
     del bpy.types.Scene.wfc_plan_biome
     del bpy.types.Scene.wfc_plan_edit_node

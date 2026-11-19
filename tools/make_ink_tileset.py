@@ -11,8 +11,12 @@ import numpy as np
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 T = 16
-PAPER = np.array((0xe8, 0xe8, 0xed), np.uint8)
-PAPER2 = np.array((0xdf, 0xdf, 0xe6), np.uint8)
+PAPERS = {"white": ((0xe8, 0xe8, 0xed), (0xdf, 0xdf, 0xe6)), "old": ((0xe6, 0xd2, 0xa4), (0xd9, 0xc4, 0x94)), "grey": ((0xc4, 0xc7, 0xcf), (0xb9, 0xbc, 0xc6)),
+          "cream": ((0xf0, 0xe9, 0xd2), (0xe6, 0xdf, 0xc4))}
+PAPER_NAME = os.environ.get("INK_PAPER", "white")                  # INK_PAPER=old|grey|cream draws the tileset and map on another paper
+PAPER = np.array(PAPERS[PAPER_NAME][0], np.uint8)
+PAPER2 = np.array(PAPERS[PAPER_NAME][1], np.uint8)
+SUFFIX = "" if PAPER_NAME == "white" else "_" + PAPER_NAME
 INK = np.array((0x16, 0x16, 0x1d), np.uint8)
 DARK = np.array((0x6a, 0x6c, 0x7a), np.uint8)
 
@@ -325,9 +329,9 @@ if __name__ == "__main__":
     import sys
     seed = int(sys.argv[1]) if len(sys.argv) > 1 else 4
     d = os.path.join(ROOT, "docs", "examples")
-    write_png(os.path.join(d, "ink_tileset.png"), sheet())
-    with open(os.path.join(d, "ink_tileset.json"), "w") as f:
+    write_png(os.path.join(d, "ink_tileset%s.png" % SUFFIX), sheet())
+    with open(os.path.join(d, "ink_tileset%s.json" % SUFFIX), "w") as f:
         json.dump({"tile": T, "cols": COLS, "roles": [t[2] for t in TILES], "names": [t[0] for t in TILES], "wall_side": WALL_SIDE, "prop_kinds": {str(k): v for k, v in PROP_KINDS.items()},
                    "walltiles": {"first": WALL_FIRST, "note": "15 side-mask variants (N=1 E=2 S=4 W=8, mask 1..15) then 4 corner variants NE SE SW NW"}}, f, indent=1)
-    write_png(os.path.join(d, "ink_map.png"), render_map(to_ids(make_dungeon(seed=seed))))
+    write_png(os.path.join(d, "ink_map%s.png" % SUFFIX), render_map(to_ids(make_dungeon(seed=seed))))
     print("wrote ink_tileset.png, ink_tileset.json and ink_map.png in", d)

@@ -234,6 +234,14 @@ and [examples/godot_tilemap_demo](examples/godot_tilemap_demo) is a small Godot 
 
 <p align="center"><img src="docs/img/godot_tilemap_demo.png" alt="The tile map level in Godot: a figure standing on grass among 3D trees, a lake and a brick wall" width="900"></p>
 
+### Ink on paper, as a style
+
+<p align="center"><img src="docs/img/ink_papers.png" alt="The same village in the ink style on white, old and grey paper: pale blocks outlined in black, stippled grass tinted green, a river drawn in wave lines" width="900"></p>
+
+**Ink on paper** is a style pack like the others (it is not part of *Mixed*): walls, trim, roofs and wood are pale blocks outlined in black, and while a plan of this style is built the **whole scene** wears the same look — the ground is stippled paper
+(denser on grass, which tints the paper green), leaves are stippled and greenish, water is drawn in wave lines on bluish paper, rock in cracks. Choose the **paper** in the Plans panel when the style is Ink: white, old (yellowed), grey or cream; the plan stores it
+as its `paper` field. It makes a quick **blockout** look and a clean base for hand-inked art. The tile-map tools draw their ink tileset on any of the papers too (`INK_PAPER=old python3 tools/make_ink_tileset.py`).
+
 ### Seven style packs and a mix
 
 <p align="center"><img src="docs/img/styles_sheet.png" alt="The same village in Medieval, Egyptian, Mexican, Chinese, Inca, Modern and Alpine styles, and a mixed street" width="900"></p>
