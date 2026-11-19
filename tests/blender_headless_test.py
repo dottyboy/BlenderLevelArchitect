@@ -5730,6 +5730,20 @@ _mp = _np2.zeros((64, 64, 3)); _mp[:] = (30, 200, 30); _mp[16:48, 16:48] = (200,
 _rl = addon.tilemap_analyze(_mp, 16, lut=_lut)
 check("Tile map: a tileset gives the roles by exact tile match (green here is floor, not canopy)", (_rl[1:3, 1:3] == 3).all() and (_rl[0] == 0).all() and (_rl[:, 0] == 0).all(), str(_rl.tolist()))
 
+# props and the walk check: a lone rough tile on the floor is a prop (statue), a long rough wall is stone; a wall across the floor makes two regions
+_pm = _np2.zeros((160, 160, 3)); _pm[:] = (104, 104, 88)
+_pm[48:64, 48:64] = _tm_rng.integers(40, 200, (16, 16, 3))               # a lone rough tile at column 3, row 3
+_pm[:, 112:128] = _tm_rng.integers(40, 200, (160, 16, 3))                 # a wall across the whole map at column 7
+_pr, _props = addon._tilemap_props(addon.tilemap_analyze(_pm, 16), {"props": True, "prop_max": 6})
+check("Tile map: a lone rough tile on the floor is a prop, the long wall stays stone", len(_props) == 1 and _props[0]["rect"] == [3, 3, 3, 3] and _pr[3, 3] == 4 and (_pr[:, 7] == 2).all(), str(_props))
+_wk = addon.tilemap_walk_check(_pr)
+check("Tile map: the walk check finds the wall splits the floor in two regions and the props block", _wk["regions"] == 2 and 0.5 < _wk["reached"] < 1.0 and len(_wk["pockets"]) == 1, str(_wk))
+check("Tile map: the walk check from a start tile reaches that side", addon.tilemap_walk_check(_pr, [9, 5])["reached"] < 0.5)
+_forest = _np2.zeros((16 * 14, 16 * 14, 3)); _forest[:] = (88, 136, 104)
+_forest[:16 * 4] = (104, 104, 88)
+_fm = addon.tilemap_analyze(_forest, 16)
+_fl = addon._build_tilemap({**addon.PLAN_TILEMAP_DEFAULTS, "image": _tm_path})[2]                      # a normal map still builds with trees off the fringe
+check("Tile map: a layout carries props, trees and the walk check", all(k in _fl for k in ("props", "trees", "walk")))
 for bad in ({"image": None}, {"image": _tm_path, "tile": 2}):
     try:
         addon.plan_build(bpy.context, addon.plan_node("tm_bad", "building", "tilemap", params=bad))

@@ -16782,8 +16782,9 @@ def plan_from_floorplan_picture(path, plan_id="house", mpp=None, width=12.0, ext
 # height (floor flat, canopy and stone raised), and the picture itself is the texture, read with nearest filtering, so the 3D level keeps
 # the exact pixel look of the tiles. `tilemap_analyze` reads (numpy only), `_build_tilemap` builds the one mesh with walls where heights differ.
 # ==============================================================================
-PLAN_TILEMAP_DEFAULTS = dict(image=None, tile=16, tile_m=1.0, canopy=2.4, stone=3.0, water=-0.35, green=0.375, rough=22.0, roles=None, tileset=None, smooth=True)
-TILEMAP_ROLES = ("floor", "canopy", "stone", "water")
+PLAN_TILEMAP_DEFAULTS = dict(image=None, tile=16, tile_m=1.0, canopy=0.7, stone=3.0, water=-0.35, green=0.375, rough=22.0, roles=None, tileset=None, smooth=True,
+                             trees=True, tree_spacing=2.3, props=True, prop_height=1.7, prop_max=6)
+TILEMAP_ROLES = ("floor", "canopy", "stone", "water", "prop")
 
 
 def _tilemap_tileset(spec, tile):
@@ -16812,10 +16813,10 @@ def _tilemap_tileset(spec, tile):
 
 
 def tilemap_analyze(rgb, tile=16, green=0.375, rough=22.0, roles=None, lut=None):
-    """Roles of the tiles of a map picture: an int array (rows top to bottom, tile columns), 0 floor, 1 canopy, 2 stone, 3 water.
+    """Roles of the tiles of a map picture: an int array (rows top to bottom, tile columns), 0 floor, 1 canopy, 2 stone, 3 water, 4 prop (an object standing on the floor; see `_tilemap_props`).
     With a tileset (`lut`: tile pixels -> role) every tile that matches a tileset tile exactly takes that tile's role; the others (and every tile
     without a tileset) are read from colour and texture: canopy when the green share of the colour is above `green`, stone when it is not green but
-    rough (mean standard deviation of the pixels above `rough`), floor otherwise. `roles` = {"x,y": 0..3} overrides single tiles (tile column x, row y from the top)."""
+    rough (mean standard deviation of the pixels above `rough`), floor otherwise. `roles` = {"x,y": 0..4} overrides single tiles (tile column x, row y from the top)."""
     import numpy as np
     rgb = np.asarray(rgb, dtype=float)
     h, w = rgb.shape[:2]
@@ -16837,7 +16838,7 @@ def tilemap_analyze(rgb, tile=16, green=0.375, rough=22.0, roles=None, lut=None)
                     out[y, x] = code
     for key, role in (roles or {}).items():
         x, y = (int(v) for v in str(key).split(","))
-        if 0 <= x < tx and 0 <= y < ty and role in (0, 1, 2, 3):
+        if 0 <= x < tx and 0 <= y < ty and role in (0, 1, 2, 3, 4):
             out[y, x] = role
     return out
 
@@ -16866,6 +16867,72 @@ def tilemap_size(params=None):
     return (w // p["tile"]) * p["tile_m"], (h // p["tile"]) * p["tile_m"]
 
 
+def _tilemap_props(roles, p):
+    """Separates the objects from the masses: a small clump of stone tiles (or of canopy tiles = a bush) that stands alone on the floor (most of its
+    surrounding ring is floor, at most `prop_max` tiles and 3 x 3) is not a wall or a forest but a prop. Returns (roles with those tiles set to 4, list of
+    props {kind: statue|bush, tiles: [[x, y]], rect: [x0, y0, x1, y1] in tile columns/rows, inclusive})."""
+    import numpy as np
+    roles = roles.copy()
+    props = []
+    if not p.get("props", True):
+        return roles, props
+    ty, tx = roles.shape
+    for role, kind in ((2, "statue"), (1, "bush")):
+        labels, n = _fp_label(roles == role, diag=True)
+        for k in range(1, n + 1):
+            ys, xs = np.nonzero(labels == k)
+            if len(ys) > int(p["prop_max"]) or xs.max() - xs.min() > 2 or ys.max() - ys.min() > 2:
+                continue
+            ring = set()
+            for y, x in zip(ys.tolist(), xs.tolist()):
+                for dy in (-1, 0, 1):
+                    for dx in (-1, 0, 1):
+                        yy, xx = y + dy, x + dx
+                        if (dy or dx) and 0 <= yy < ty and 0 <= xx < tx and labels[yy, xx] != k:
+                            ring.add((yy, xx))
+            if ring and sum(1 for (yy, xx) in ring if roles[yy, xx] == 0) >= 0.7 * len(ring):
+                props.append({"kind": kind, "tiles": [[int(x), int(y)] for y, x in zip(ys.tolist(), xs.tolist())],
+                              "rect": [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())]})
+    for pr in props:
+        for x, y in pr["tiles"]:
+            roles[y, x] = 4
+    return roles, props
+
+
+def _tilemap_depth(roles):
+    """Distance in tiles (4-neighbour, the map edge counts as open) from every canopy tile to the nearest tile that is not canopy; 0 elsewhere."""
+    import numpy as np
+    can = roles == 1
+    d = np.where(can, 99.0, 0.0)
+    for _ in range(6):
+        for axis, shift in ((0, 1), (0, -1), (1, 1), (1, -1)):
+            nb = np.roll(d, shift, axis)
+            if axis == 0:
+                nb[0 if shift == 1 else -1, :] = 0.0
+            else:
+                nb[:, 0 if shift == 1 else -1] = 0.0
+            d = np.where(can, np.minimum(d, nb + 1.0), 0.0)
+    return d
+
+
+def tilemap_walk_check(roles, start=None):
+    """Proves the floor can be walked: the floor tiles (role 0; canopy, stone, water and props block) are flooded from `start` ([x, y] tile) or, without
+    one, from the biggest floor region. Returns {regions, reached (share of all floor tiles in the start region), start, pockets: sizes of the other regions}."""
+    import numpy as np
+    roles = np.asarray(roles)
+    labels, n = _fp_label(roles == 0, diag=False)
+    if n == 0:
+        return {"regions": 0, "reached": 0.0, "start": None, "pockets": []}
+    sizes = np.bincount(labels.ravel())[1:]
+    if start is not None and 0 <= start[1] < roles.shape[0] and 0 <= start[0] < roles.shape[1] and labels[start[1], start[0]] > 0:
+        main = int(labels[start[1], start[0]])
+    else:
+        main = int(sizes.argmax()) + 1
+    ys, xs = np.nonzero(labels == main)
+    return {"regions": int(n), "reached": float(sizes[main - 1]) / float(sizes.sum()), "start": [int(xs[0]), int(ys[0])],
+            "pockets": sorted((int(v) for i, v in enumerate(sizes, 1) if i != main), reverse=True)}
+
+
 def _tilemap_heights(roles, p):
     """Per-tile ground height: floor 0, water a little below, canopy a rounded mound that rises over two tiles from its edge (a different
     bump per tile so a forest is not a smooth cushion). Stone tiles are built separately as walls, so the ground under them is 0."""
@@ -16875,17 +16942,7 @@ def _tilemap_heights(roles, p):
     z[roles == 3] = float(p["water"])
     can = roles == 1
     if can.any():
-        inf = 99.0
-        d = np.where(can, inf, 0.0)                               # distance (in tiles, 4-neighbour) from each canopy tile to the nearest non-canopy tile
-        d = np.where(can, inf, 0.0)
-        for _ in range(4):
-            for axis, shift in ((0, 1), (0, -1), (1, 1), (1, -1)):
-                nb = np.roll(d, shift, axis)
-                if axis == 0:
-                    nb[0 if shift == 1 else -1, :] = 0.0              # the map edge counts as open ground
-                else:
-                    nb[:, 0 if shift == 1 else -1] = 0.0
-                d = np.where(can, np.minimum(d, nb + 1.0), 0.0)
+        d = _tilemap_depth(roles)
         t = np.clip(d / 3.0, 0.0, 1.0)
         t = t * t * (3.0 - 2.0 * t)
         rng = np.random.default_rng(11)
@@ -16904,6 +16961,7 @@ def _build_tilemap(p):
     if not 4 <= tile <= 128 or not 0.1 <= tm <= 20.0:
         raise PlanError("params.tile must be 4..128 px and params.tile_m 0.1..20 m")
     roles = tilemap_analyze(rgb, tile, p["green"], p["rough"], p.get("roles"), _tilemap_tileset(p.get("tileset"), tile))
+    roles, props = _tilemap_props(roles, p)
     ty, tx = roles.shape
     if ty * tx > 90000:
         raise PlanError("the map has %d tiles (at most 90000)" % (ty * tx))
@@ -16930,6 +16988,13 @@ def _build_tilemap(p):
             y1, y0 = oy - j * tm, oy - (j + 1) * tm
             u0, u1 = i * tile / iw, (i + 1) * tile / iw
             v1, v0 = 1.0 - j * tile / ih, 1.0 - (j + 1) * tile / ih
+            if roles[j, i] == 4:                                         # a prop stands here: the ground shows a floor tile next to it, the prop is its own object
+                for dj, di in ((0, -1), (0, 1), (-1, 0), (1, 0), (-1, -1), (-1, 1), (1, -1), (1, 1)):
+                    nj, ni = j + dj, i + di
+                    if 0 <= nj < ty and 0 <= ni < tx and roles[nj, ni] == 0:
+                        u0, u1 = ni * tile / iw, (ni + 1) * tile / iw
+                        v1, v0 = 1.0 - nj * tile / ih, 1.0 - (nj + 1) * tile / ih
+                        break
             uv = [(u0, v0), (u1, v0), (u1, v1), (u0, v1)]
             stone = roles[j, i] == 2
             c = (corner[j + 1, i], corner[j + 1, i + 1], corner[j, i + 1], corner[j, i])      # sw, se, ne, nw
@@ -16968,8 +17033,19 @@ def _build_tilemap(p):
                 quad(pts, uv, False)
             quad([(x0 + W, y0 + S, zt), (x1 - E, y0 + S, zt), (x1 - E, y1 - N, zt), (x0 + W, y1 - N, zt)], uv, False)
     floor = int((roles == 0).sum())
+    trees = []
+    if p.get("trees", True) and (roles == 1).any():
+        depth = _tilemap_depth(roles)
+        rng = np.random.default_rng(23)
+        step = max(1.0, float(p["tree_spacing"]))                 # a jittered lattice in tiles; only well inside the canopy (not on its fringe)
+        for gy in np.arange(0.5, ty, step):
+            for gx in np.arange(0.5, tx, step):
+                fx, fy = gx + rng.uniform(-0.4, 0.4) * step, gy + rng.uniform(-0.4, 0.4) * step
+                ci, cj = int(fx), int(fy)
+                if 0 <= ci < tx and 0 <= cj < ty and roles[cj, ci] == 1 and depth[cj, ci] >= 1.5:
+                    trees.append([fx * tm - ox, oy - fy * tm, float(tz[cj, ci])])
     layout = {"name": "tilemap", "tile_m": tm, "tiles": [tx, ty], "floor_share": floor / float(tx * ty), "size": [tx * tm, ty * tm],
-              "roles": roles.tolist()}
+              "roles": roles.tolist(), "props": props, "trees": trees, "walk": tilemap_walk_check(roles)}
     return (verts, faces, uvs, smooth), roles, layout
 
 
@@ -17011,9 +17087,51 @@ def _plan_build_tilemap(context, node, world, seed, path):
     mesh.materials.append(_tilemap_material(bpy.path.abspath(p["image"])))
     obj = bpy.data.objects.new(mesh.name, mesh)
     context.scene.collection.objects.link(obj)
-    obj["gla_walk_layout"] = json.dumps({k: v for k, v in layout.items() if k != "roles"})
-    _plan_adopt_objects(context.scene, path, world, [obj])
-    return [obj]
+    obj["gla_walk_layout"] = json.dumps({k: v for k, v in layout.items() if k not in ("roles", "trees", "props")})
+    made = [obj]
+    mat = _tilemap_material(bpy.path.abspath(p["image"]))
+    tm, (tx, ty) = layout["tile_m"], layout["tiles"]
+    iw, ih = _tilemap_image_size(p)
+    ox, oy = tx * tm / 2.0, ty * tm / 2.0
+    for k, pr in enumerate(layout["props"]):                      # every prop is its own object (a short box carrying its sprite), ready to be swapped for a model
+        x0, y0, x1, y1 = pr["rect"]
+        inset = 0.12 * tm
+        bx0, bx1, by1, by0 = x0 * tm - ox + inset, (x1 + 1) * tm - ox - inset, oy - y0 * tm - inset, oy - (y1 + 1) * tm + inset
+        h = float(p["prop_height"]) * (0.55 if pr["kind"] == "bush" else 1.0) * tm
+        u0, u1 = x0 * p["tile"] / iw, (x1 + 1) * p["tile"] / iw
+        v1, v0 = 1.0 - y0 * p["tile"] / ih, 1.0 - (y1 + 1) * p["tile"] / ih
+        v_ = [(bx0, by0, 0), (bx1, by0, 0), (bx1, by1, 0), (bx0, by1, 0), (bx0, by0, h), (bx1, by0, h), (bx1, by1, h), (bx0, by1, h)]
+        quads = [(4, 5, 6, 7), (0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)]
+        pm = bpy.data.meshes.new("TilemapProp_%s_%03d" % (node["id"], k))
+        pm.from_pydata(v_, [], quads)
+        uvl = pm.uv_layers.new(name="UVMap")
+        uvl.data.foreach_set("uv", [c for _q in quads for uv_ in ((u0, v0), (u1, v0), (u1, v1), (u0, v1)) for c in uv_])
+        pm.update()
+        pm.materials.append(mat)
+        pobj = bpy.data.objects.new(pm.name, pm)
+        pobj["gla_prop"] = json.dumps({"kind": pr["kind"], "rect": pr["rect"]})
+        context.scene.collection.objects.link(pobj)
+        made.append(pobj)
+    if layout["trees"]:
+        wood, leaf_a, leaf_b = get_or_create_wood_material('BROWN'), get_or_create_leaf_material('GREEN'), get_or_create_leaf_material('DARK')
+        merged = _TowerMesh()
+        rng = random.Random(seed)
+        variants = {}
+        for (x, y, z) in layout["trees"]:
+            vkey = (rng.randrange(4), rng.randrange(3))
+            if vkey not in variants:
+                height = round(rng.uniform(3.4, 5.4) * tm * 2.0) / 2.0
+                variants[vkey] = _build_tree_mesh({"height": height, "crown": 'ROUND' if vkey[1] != 2 else 'CONE', "leaf": 'GREEN'}, seed + vkey[0] * 7 + vkey[1])
+            merged.append(variants[vkey], rot=rng.uniform(0.0, 6.28), offset=(x, y, z - 0.05),
+                          mat_map={WOOD_SOURCE_SLOT: 0, LEAF_SOURCE_SLOT: 1 if rng.random() < 0.65 else 2})
+        tmesh = merged.to_mesh("TilemapTrees_" + node["id"])
+        for m_ in (wood, leaf_a, leaf_b):
+            tmesh.materials.append(m_)
+        tobj = bpy.data.objects.new(tmesh.name, tmesh)
+        context.scene.collection.objects.link(tobj)
+        made.append(tobj)
+    _plan_adopt_objects(context.scene, path, world, made)
+    return made
 
 
 def plan_from_tilemap_picture(path, plan_id="tilemap", tile=16, tile_m=1.0, **extra):
