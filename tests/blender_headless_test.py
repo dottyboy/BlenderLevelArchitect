@@ -5987,7 +5987,7 @@ _man = addon.world_manifest(wgw)
 check("World gen: the manifest is JSON and lists every monument and road", json.loads(json.dumps(_man))["format"] == "gla-worldgen/1" and len(_man["monuments"]) == len(wgw["monuments"]) and len(_man["roads"]) == len(wgw["roads"]))
 _wd = os.path.join(bpy.app.tempdir, "wg_out")
 _files = addon.world_write(wgw, _wd)
-check("World gen: the maps and the manifest are written (16-bit height, biome colours, overview)", all(os.path.getsize(os.path.join(_wd, f_)) > 100 for f_ in _files) and len(_files) == 4)
+check("World gen: the maps and the manifest are written (16-bit height, biome colours, overview)", all(os.path.getsize(os.path.join(_wd, f_)) > 100 for f_ in _files) and len(_files) == 5 and os.path.getsize(os.path.join(_wd, "height.f32")) == 4 * wgw["height"].size)
 try:
     addon.generate_world(100.0, 4.0, 1)
     check("World gen: a too small world is refused", False)
@@ -6014,6 +6014,7 @@ check("World build: neighbouring chunks share their edge vertices at the same he
 check("World build: the sea is built where the ground dips below the water line", any(o_.name.endswith("_Sea") for c_ in wgb["chunks"].values() for o_ in c_["objects"]))
 _wf = os.path.join(bpy.app.tempdir, "wg_chunks")
 _man = addon.world_export_chunks(bpy.context, wgs, wgb, _wf)
+check("World build: the manifest says which skin the world was built in and carries the float height field", "skin" in _man and json.load(open(os.path.join(_wf, "world.json")))["height_f32"]["file"] == "height.f32" and os.path.exists(os.path.join(_wf, "height.f32")))
 check("World build: the export writes a glb per chunk and a manifest listing them", len(_man["chunks"]) >= 8 and all(os.path.exists(os.path.join(_wf, c_["glb"])) for c_ in _man["chunks"])
       and json.load(open(os.path.join(_wf, "world.json")))["chunks"] == _man["chunks"], str(len(_man["chunks"])))
 

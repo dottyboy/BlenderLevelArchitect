@@ -18029,7 +18029,7 @@ def _png_rgb8(path, a):
 
 
 def world_write(w, folder, overview_scale=2):
-    """Writes a generated world to a folder: world.json (the manifest), height16.png (16-bit, metres = value / 65535 * 250 - 50), biome.png (biome colours, north up) and
+    """Writes a generated world to a folder: world.json (the manifest), height.f32 (raw float32 metres), height16.png (16-bit, metres = value / 65535 * 250 - 50), biome.png (biome colours, north up) and
     overview.png. Returns the list of files."""
     import numpy as np
     os.makedirs(folder, exist_ok=True)
@@ -18037,12 +18037,16 @@ def world_write(w, folder, overview_scale=2):
     man["height_encoding"] = {"file": "height16.png", "offset": -50.0, "range": 250.0, "north_up": True}
     with open(os.path.join(folder, "world.json"), "w", encoding="utf-8") as fh:
         json.dump(man, fh, indent=1)
+    w["height"].astype("<f4").tofile(os.path.join(folder, "height.f32"))            # raw float32 metres, row 0 = the southern edge (an engine reads it without PNG decoding)
+    man["height_f32"] = {"file": "height.f32", "width": int(w["height"].shape[1]), "height": int(w["height"].shape[0]), "row0": "south", "res": w["res"]}
+    with open(os.path.join(folder, "world.json"), "w", encoding="utf-8") as fh:
+        json.dump(man, fh, indent=1)
     h16 = np.clip((w["height"] + 50.0) / 250.0, 0.0, 1.0) * 65535.0
     _png_gray16(os.path.join(folder, "height16.png"), h16[::-1])
     pal = np.array(WG_BIOME_COLORS)
     _png_rgb8(os.path.join(folder, "biome.png"), (pal[w["biome"]][::-1] * 255.0))
     _png_rgb8(os.path.join(folder, "overview.png"), world_overview(w, overview_scale))
-    return ["world.json", "height16.png", "biome.png", "overview.png"]
+    return ["world.json", "height.f32", "height16.png", "biome.png", "overview.png"]
 
 
 def _wg_mesh_from_arrays(name, verts, faces):
@@ -18056,15 +18060,29 @@ def world_build(context, w, chunk_cells=64, monuments=True, skin=""):
     """Builds a generated world in Blender, chunk by chunk (chunk_cells x res metres square, the chunks share their edge vertices so the ground is seamless): the ground
     with vertex colours from the biome map, the sea and each lake as depth-shaded water, river water, roads as ribbons on the ground, and every monument as its plan
     (levelled ground, styled by biome; skin 'ink' dresses everything in the ink look). Returns {"chunks": {"c<i>_<j>": {"objects": [...], "x", "y", "size", "monuments": [ids]}}}."""
-    global _ACTIVE_SKIN
+    global _ACTIVE_SKIN, _INK_IMAGES
     import numpy as np
     res, h, n = w["res"], w["height"], w["height"].shape[0]
     cx = (n - 1) / 2.0
     scene = context.scene
-    saved_skin = _ACTIVE_SKIN
+    saved_skin, saved_images = _ACTIVE_SKIN, _INK_IMAGES
     _ACTIVE_SKIN = skin
+    _INK_IMAGES = skin == "ink"                              # ink pictures, so an exported glb carries the look
     try:
-        mat_ground = _terrain_material("LA_Terrain_world")
+        if skin == "ink":
+            mat_ground = _ink_material("terrain")
+        else:                                                # the ground colour is the baked vertex colour: a Color Attribute node, which glTF exports as COLOR_0
+            mat_ground = bpy.data.materials.get("LA_WorldGround")
+            if mat_ground is None:
+                mat_ground = bpy.data.materials.new("LA_WorldGround")
+                mat_ground.use_nodes = True
+                nt_ = mat_ground.node_tree
+                bsdf_ = next(nd for nd in nt_.nodes if nd.type == 'BSDF_PRINCIPLED')
+                vc_ = nt_.nodes.new("ShaderNodeVertexColor")
+                vc_.layer_name = "Col"
+                nt_.links.new(vc_.outputs["Color"], bsdf_.inputs["Base Color"])
+                _set_input(bsdf_, "Roughness", 1.0)
+                _set_input(bsdf_, "Specular IOR Level", 0.0)
         mat_sea, mat_river = _water_shader("LA_Lake", "lake"), _water_material()
         if skin == "ink":
             mat_road = _ink_material("rock")
@@ -18078,7 +18096,7 @@ def world_build(context, w, chunk_cells=64, monuments=True, skin=""):
                 _set_input(bsdf, "Roughness", 1.0)
                 mat_road.diffuse_color = (0.42, 0.33, 0.22, 1.0)
     finally:
-        _ACTIVE_SKIN = saved_skin
+        _ACTIVE_SKIN, _INK_IMAGES = saved_skin, saved_images
     pal = np.array(WG_BIOME_COLORS) ** 2.2
     if skin == "ink":                                            # paler, less saturated baked colours: the ink terrain reads green-dominance as stipple density
         pal = pal * 0.35 + 0.22
@@ -18183,12 +18201,13 @@ def world_build(context, w, chunk_cells=64, monuments=True, skin=""):
             plan["style"] = "ink" if skin == "ink" else styles.get(p["biome"])
             if skin == "ink":
                 plan["paper"] = "white"
+                plan["ink_textures"] = True
             plan_write_to_blend(scene, plan)
             plan_build(context, plan)
             ids.add(plan["id"])
             ci_, cj_ = min(max(int((p["x"] / res + cx) // k), 0), n_c - 1), min(max(int((p["y"] / res + cx) // k), 0), n_c - 1)
             chunks["c%d_%d" % (ci_, cj_)]["monuments"].append(plan["id"])
-    return {"chunks": chunks, "collection": coll}
+    return {"chunks": chunks, "collection": coll, "skin": skin}
 
 
 def world_export_chunks(context, w, built, folder):
@@ -18216,6 +18235,7 @@ def world_export_chunks(context, w, built, folder):
     files = world_write(w, folder)
     man = json.load(open(os.path.join(folder, "world.json"), encoding="utf-8"))
     man["chunks"] = chunks
+    man["skin"] = built.get("skin", "")
     with open(os.path.join(folder, "world.json"), "w", encoding="utf-8") as fh:
         json.dump(man, fh, indent=1)
     return man
