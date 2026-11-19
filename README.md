@@ -14,25 +14,69 @@
 [![License: GPL v3](https://img.shields.io/github/license/dottyboy/BlenderLevelArchitect)](LICENSE)
 [![Blender 4.2+](https://img.shields.io/badge/blender-4.2%20LTS%20%E2%86%92%205.2-orange)](https://www.blender.org/)
 [![Latest release](https://img.shields.io/github/v/release/dottyboy/BlenderLevelArchitect)](https://github.com/dottyboy/BlenderLevelArchitect/releases/latest)
-[![Automated checks](https://img.shields.io/badge/automated%20checks-1000%2B-brightgreen)](tests/blender_headless_test.py)
+[![Automated checks](https://img.shields.io/badge/automated%20checks-1400%2B-brightgreen)](tests/blender_headless_test.py)
 
-**Procedural dungeons, towers and castles for Blender** — a Wave-Function-Collapse-style room/corridor/stair solver with
-brick-textured masonry, real doors and windows, spiral-stair towers, ruins, and engine-ready glTF packages.
+**Generate whole game worlds in Blender — dungeons, castles, villages, hill cities, cities carved into mountains and houses traced from a floor-plan picture.**
+Everything is procedural, seeded and reproducible, comes with real doors, windows, stairs and furniture, and is **checked to be walkable** before you export it as an engine-ready glTF or game package.
 
 <p align="center"><img src="docs/img/hero_castle.gif" alt="A castle with a different brick tint per tower, turning" width="720"></p>
+
+<p align="center">
+<a href="https://github.com/dottyboy/BlenderLevelArchitect/releases/latest"><b>Download</b></a> ·
+<a href="#install">Install</a> ·
+<a href="#quick-start">Quick start</a> ·
+<a href="docs/USER_GUIDE.md">User guide</a> ·
+<a href="CHANGELOG.md">Changelog</a>
+</p>
+
+## Highlights
+
+<table>
+<tr>
+<td width="33%"><a href="#a-house-from-a-picture-of-its-floor-plan"><img src="docs/img/house_open.png" alt="A house built from a floor-plan picture"></a><br><b>House from a picture</b><br><sub>Walls, windows, doors with swing arcs and storeys traced from a floor-plan image</sub></td>
+<td width="33%"><a href="#a-city-carved-into-a-mountain"><img src="docs/img/rock_city.png" alt="A city carved into a mountain"></a><br><b>City in the rock</b><br><sub>Ledges, carved facades, rooms behind them, caves, a serpentine road</sub></td>
+<td width="33%"><a href="#a-terraced-hill-city"><img src="docs/img/terrace_city.png" alt="A terraced hill city"></a><br><b>Terraced hill city</b><br><sub>Terraces joined by steps, walls, waterfalls, a palace on the summit</sub></td>
+</tr>
+<tr>
+<td><a href="#the-swan-castle"><img src="docs/img/swan_castle.png" alt="The Swan castle"></a><br><b>Swan castle</b><br><sub>A tall castle with a stair tower and a banquet hall on every floor</sub></td>
+<td><a href="#a-mansion-and-generated-villas"><img src="docs/img/mansion.png" alt="A country house"></a><br><b>Mansion and villas</b><br><sub>A house from a floor plan, or generated plans: bar, L, U, T, ring</sub></td>
+<td><a href="#terrain-and-biomes"><img src="docs/img/townland.png" alt="A walled town on a terrain"></a><br><b>Terrain, biomes, towns</b><br><sub>Geometry Nodes ground, six biomes, seven style packs</sub></td>
+</tr>
+</table>
+
+## Install
+
+1. Download `game_level_architect.zip` from the [Releases page](https://github.com/dottyboy/BlenderLevelArchitect/releases/latest) (don't unzip it).
+2. In Blender: **Edit > Preferences > Add-ons > Install from Disk…** and pick the zip. Enable **Game Level Architect**.
+3. Open the 3D Viewport sidebar (**N**) and find the **Level Architect** tab.
+
+Requires **Blender 4.2 LTS or newer** (tested on 4.2.21, 5.2.1 and 5.2.2). The bundled `Textures/` folder must stay next to the add-on file.
+
+## Quick start
+
+1. **Setup** tab → pick a Preset or set a map size.
+2. **Walls** tab → Wall Style *Masonry*.
+3. Press **Generate All Steps** (or run Step 1–5 one by one: Blueprint, Walls, Stairs, Doors, Props).
+4. **Structures** tab (choose Tower or Castle) → move the 3D cursor → **Generate**.
+5. **Export** tab → **Export Level (glTF/GLB)** or **Export Game Package**.
+
+**A whole site instead?** Open the **Plans** tab, pick a **Style** and **Biome**, choose something from **Add a plan at the 3D cursor** (a village, a terrace city, a rock city, a villa...) and press **Build**.
+**A house from a drawing?** Plans tab → **House from Floor-Plan Picture...**, pick the picture, set its width in metres.
+
+The full walkthrough is the **[User Guide](docs/USER_GUIDE.md)**.
 
 ## What you get
 
 | | |
 |---|---|
-| **Layouts** | Rooms, corridors, stairs over several floors and sub-levels. Rectangular, Round, Mixed and Cave rooms, bent stairwells, Corridor Stairs, continuous elevation. Fully seeded and reproducible. |
+| **Dungeons and levels** | Rooms, corridors, stairs over several floors and sub-levels. Rectangular, Round, Mixed and Cave rooms, bent stairwells, Corridor Stairs, continuous elevation. Fully seeded and reproducible. |
 | **Masonry** | Brick- and stone-textured walls (procedural normal maps, a few thousand vertices instead of thousands of modelled bricks), stone door frames and framed windows, a different brick colour per room. |
-| **Structures** | A round **Tower** (spiral stairs, railing, lanterns, furniture) and a walled **Castle** (four towers, wall walk, gate, furnished keep). |
-| **Ruins** | One slider breaks towers, castles and walls down: stepped jagged tops, breaches, collapsed arches, rubble. Doorways stay passable. |
-| **Doors, windows, props** | Arched / pointed / flat doors with swinging panels, windows with glass, torches with real lights, themed furniture. |
-| **Plans** *(experimental)* | Describe a site as a nested plan — fortress, farm, hamlet, street, district, walled town, hut cluster — in one of **seven style packs** (or a mix), with regular, round or organic shapes, standing on a **Geometry Nodes terrain** in one of six biomes; stored in the .blend and as JSON. See [Plans](#plans-from-one-building-to-a-site-experimental) and [the roadmap](docs/WORLD_GENERATOR_PLAN.md). |
+| **Towers, castles, ruins** | A round **Tower** (spiral stairs, railing, lanterns, furniture) and a walled **Castle**; one **Ruin** slider breaks them down with jagged tops, breaches and rubble, and doorways stay passable. |
+| **Plans: whole sites** | A site described as nested data — fortress, farm, hamlet, street, district, walled town, huts, terrace city, rock city — in one of **seven style packs** (or a mix), with regular, round or organic shapes, on a **Geometry Nodes terrain** in six biomes. Stored in the .blend and as JSON. |
+| **Buildings from plans** | **Mansion** from a room plan, **Villa** generator (random plans), **Swan castle**, and a **house traced from a picture** of its floor plan (several pictures for several floors). |
+| **Import** | SVG, DXF or a painted PNG for a whole village; a greyscale **heightmap** for the ground; a floor-plan picture for a house. |
 | **Engine export** | glTF/GLB, collision mesh, and **game packages**: glb + JSON of walkable areas, rooms, stairs, lights and props — per floor if you like. |
-| **Tested** | 1000+ automated checks (ray-cast passability, normals, vertex budgets, round-trips) on Blender 4.2 LTS and 5.2. |
+| **Tested** | 1400+ automated checks (ray-cast passability, grid walk checks, normals, vertex budgets, round-trips) on Blender 4.2 LTS and 5.2. |
 
 ## Gallery
 
@@ -71,7 +115,7 @@ locations — walkable by rectangles, torches as real lights, doors that swing o
 </tr>
 </table>
 
-## Plans: from one building to a site (experimental)
+## Plans: from one building to a whole site
 
 A **plan** describes a whole site as nested data — a fortress, a farm, a hamlet, a street, a district, a cluster of huts — and the
 generator builds it. Plans live in the .blend and as `.plan.json`, are fully seeded, and can place buildings for you.
@@ -104,7 +148,7 @@ meadow, forest, desert, tundra, mountains, island — bring their own palette, r
 A greyscale picture can shape the ground (`heightmap`, see [docs/examples/heightmap.png](docs/examples/heightmap.png)), `pad_mode: "terrain"` lifts the plans onto it,
 and up to three more biomes can take over inside polygons or noise-made patches (`regions`).
 
-### From a floor plan
+### A village from a drawing
 
 <p align="center"><img src="docs/img/svgplan.png" alt="A village built from an SVG floor plan: houses, a chapel, a walled farm, roads and a tower, with a desert region marked in the drawing" width="900"></p>
 
@@ -126,6 +170,16 @@ viaduct, **Land** puts the city in a heightmap terrain. A built-in height-grid w
 
 <p align="center"><img src="docs/img/terrace_twin.png" alt="Two summits in the Egyptian style joined by a viaduct" width="445"> <img src="docs/img/terrace_land.png" alt="The city in a heightmap valley with mountains behind" width="445"></p>
 
+### A city carved into a mountain
+
+<p align="center"><img src="docs/img/rock_city.png" alt="A city carved into a mountain: ledges one above the other with carved facades, a serpentine road, trees and a summit" width="900"></p>
+
+The **Rock city** button makes **the mountain first** — a ridge that follows the stepped profile of the city and climbs on to a summit — and cuts the ledges into it. Each ledge is uneven and curved, has a cliff wall with
+**carved facades** (temple fronts, house fronts, tombs), a **real furnished room behind every facade** with a door that opens, columned porticos, lanterns, fountains, stairs up the side of each cliff, and **caves** with stalactites and a pool.
+A serpentine road zigzags up to the first ledge. The rock is procedural (stretched-noise strata, no image tiles). A grid walk proves the road, every ledge, the stairs, every room and the caves can be reached.
+
+<p align="center"><img src="docs/img/rock_city_close.png" alt="Close view of carved facades and porticos" width="445"> <img src="docs/img/rock_city_cave.png" alt="Inside a cave with stalactites" width="445"></p>
+
 ### The Swan castle
 
 <p align="center"><img src="docs/img/swan_castle.png" alt="A tall castle with a round stair tower in the middle, pointed windows on every floor, an arched front door, gable roofs and four corner turrets with spires" width="430"> <img src="docs/img/swan_hall.png" alt="The banquet hall inside: long tables with chairs, gold chandeliers, pointed windows" width="640"></p>
@@ -137,15 +191,27 @@ the summit of a terrace city (the **Land** example does), which is how the pictu
 
 <p align="center"><img src="docs/img/terrace_land.png" alt="A walled terraced city with the Swan castle on its summit, in a valley of forested hills with mountains behind" width="900"></p>
 
-### A mansion from a floor plan
+### A mansion and generated villas
 
 <p align="center"><img src="docs/img/mansion.png" alt="A long Victorian country house with two round stair towers, a servants' wing, pointed windows, gable roofs and chimneys" width="640"> <img src="docs/img/mansion_gallery.png" alt="The two-storey picture gallery inside: a ring of clerestory windows, chandeliers, busts and frames" width="400"></p>
 
-The **Mansion** button builds a country house from a **floor plan given as data** — rooms with a name, a floor, a rectangle and a kind — the way the plan of Bear Wood is drawn. The built-in plan `bearwood` follows its arrangement:
+The **Mansion** button builds a country house from a **floor plan given as data** — rooms with a name, a floor, a rectangle and a kind. The built-in plan `bearwood` follows the arrangement of a real Victorian house:
+public rooms round a two-storey picture gallery, a stair hall with a tower, bedrooms and nurseries upstairs and a long servants' wing — 48 rooms on three floors. Doors are found from the plan, the stair towers come from the plugin's round
+tower builder, rooms are furnished by kind and lit, and a built-in check proves every room can be reached from the front door. Pass your own plan (a dict of rooms) to build any other house.
 
-The **Villa** button builds a house from a **generated plan** (`plan: "random"`): square junction halls joined by wings, laid out as a bar, an L, a U, a T or a ring round a courtyard (`plan_shape`, `plan_seed`, `floors`, `wing`, `depth`), with stair towers and entrances found by the generator and the same walk check as the Bear Wood plan. The Swan castle takes `shuffle`, `roof_pitch`, `turret_r` and `top` (`dome` / `spire` / `lantern`) for different silhouettes.
-public rooms round a two-storey picture gallery, a stair hall with a tower, bedrooms and nurseries upstairs, a long servants' wing, 48 rooms on three floors. Doors are found from the plan, the stair towers come from the plugin's round tower builder,
-rooms are furnished by kind and lit, and a built-in check proves every room can be reached from the front door. Pass your own plan (a dict of rooms) to build any other house.
+The **Villa** button builds a house from a **generated plan** instead (`plan: "random"`): square junction halls joined by wings, laid out as a bar, an L, a U, a T or a ring round a courtyard (`plan_shape`, `plan_seed`, `floors`, `wing`, `depth`),
+with stair towers and entrances found by the generator and the same walk check. The Swan castle likewise takes `shuffle`, `roof_pitch`, `turret_r` and `top` (`dome` / `spire` / `lantern`) for different silhouettes.
+
+<p align="center"><img src="docs/img/villa.png" alt="A generated U-shaped villa" width="640"></p>
+
+### A house from a picture of its floor plan
+
+<p align="center"><img src="docs/examples/house_floorplan.png" alt="A drawn floor plan: three bedrooms, a living room and a kitchen, doors drawn as swing arcs" width="440"> <img src="docs/img/house_open.png" alt="The house built from that picture, roof off" width="440"></p>
+
+Press **House from Floor-Plan Picture...** and pick a picture of an architect's plan — black walls on a light background, furniture and text as thin lines, doors as swing arcs. Tell it how wide the drawing is in metres and the house is built:
+**walls** from the thick strokes, **windows** from the gaps in outside walls, **doors** from their swing arcs (each with a leaf that opens), a floor, a roof and lights; the opening lowest in the picture is the front entrance.
+**Several pictures give several floors**, joined by stairs, and a built-in walk check proves every room can be reached. Try [docs/examples/house_floorplan.png](docs/examples/house_floorplan.png) at 13 m wide
+(made by [tools/make_house_example.py](tools/make_house_example.py)). Limits: walls must be axis-aligned, a door whose arc touches other lines stays an open doorway, rooms are not named and furniture is not built.
 
 ### Seven style packs and a mix
 
@@ -176,24 +242,6 @@ levels above a basement, on stilts, as dwelling or storage — and they can be *
   Full guide: [docs/USER_GUIDE.md](docs/USER_GUIDE.md#plans-sites-villages-towns); format: [docs/PLAN_FORMAT.md](docs/PLAN_FORMAT.md);
   roadmap towards bigger settlements, rivers and regions: [docs/WORLD_GENERATOR_PLAN.md](docs/WORLD_GENERATOR_PLAN.md).
 
-## Install
-
-1. Download `game_level_architect.zip` from the [Releases page](https://github.com/dottyboy/BlenderLevelArchitect/releases/latest) (don't unzip it).
-2. In Blender: **Edit > Preferences > Add-ons > Install from Disk…** and pick the zip. Enable **Game Level Architect**.
-3. Open the 3D Viewport sidebar (**N**) and find the **Level Architect** tab.
-
-Requires **Blender 4.2 LTS or newer** (tested on 4.2.21, 5.2.1 and 5.2.2). The bundled `Textures/` folder must stay next to the add-on file.
-
-## Quick start
-
-1. **Setup** tab → pick a Preset or set a map size.
-2. **Walls** tab → Wall Style *Masonry*.
-3. Press **Generate All Steps** (or run Step 1–5 one by one: Blueprint, Walls, Stairs, Doors, Props).
-4. **Structures** tab (choose Tower or Castle) → move the 3D cursor → **Generate**.
-5. **Export** tab → **Export Level (glTF/GLB)** or **Export Game Package**.
-
-The full walkthrough is the **[User Guide](docs/USER_GUIDE.md)**.
-
 ## The panel at a glance
 
 | Tab | What it does |
@@ -207,7 +255,7 @@ The full walkthrough is the **[User Guide](docs/USER_GUIDE.md)**.
 
 ## Tutorials
 
-Short screen recordings (they predate the masonry, tower and castle features, but the core workflow is unchanged):
+Short screen recordings of the level generator (they predate towers, castles and plans, but the core workflow is unchanged):
 
 - **Showcase** — [docs/showcase.mp4](docs/showcase.mp4), ~19 s
 - **Getting Started** — [docs/tutorial_getting_started.mp4](docs/tutorial_getting_started.mp4), 2:23 — all five steps in order
