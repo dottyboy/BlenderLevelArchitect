@@ -315,7 +315,7 @@ With a **tileset** (`params.tileset` = `{"image": sheet.png, "json": roles.json}
 
 ### The ink style
 
-Choose **Ink on paper** as the Plans panel's **Style** (and a **Paper**: white, old, grey or cream) before pressing **Build**. Buildings get pale blocks outlined in black, and the whole scene is drawn in ink: the ground and leaves in stipple (green where there is grass), water in wave lines on blue paper, rock in cracks. The ink look is also a good blockout. It does not apply to the old Structures tab (tower, castle, dungeon generator), which keep their own materials.
+Choose **Ink on paper** as the Plans panel's **Style** (and a **Paper**: white, old, grey or cream) before pressing **Build**. Buildings get pale blocks outlined in black, and the whole scene is drawn in ink: the ground and leaves in stipple (green where there is grass), water in wave lines on blue paper, rock in cracks. The ink look is also a good blockout. The **Ink Blockout (toggle)** button in the Plans panel gives the same look to anything already in the scene, whatever style it was built in (also the Structures tab's towers, castles and dungeons, and imported tile maps are left alone): every recognised material is swapped for its ink counterpart, and a second click restores the originals. A plan *built* in the Ink style gets the look from the start, with the paper of your choice.
 
 ### Walled towns
 

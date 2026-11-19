@@ -22,6 +22,8 @@ row = gla.plan_node("row", "compound", "yard", footprint=[[-34, -16], [34, -16],
 land = gla.plan_node("land", "terrain", "terrain", style=style, params={"biome": "meadow", "width": 200.0, "depth": 200.0, "scatter": 1.0}, children=[row])
 land["paper"] = os.environ.get("PAPER", "white")
 gla.plan_write_to_blend(sc, land); gla.plan_build(bpy.context, land)
+if os.environ.get("BLOCKOUT"):
+    print("BLOCKOUT", gla.ink_blockout(sc, os.environ.get("PAPER", "white")))
 cam = bpy.data.objects.new("cam", bpy.data.cameras.new("cam")); sc.collection.objects.link(cam)
 cam.data.lens = 34; cam.location = (6, -62, 30); tgt = Vector((4, 0, 2))
 cam.rotation_euler = (tgt - cam.location).to_track_quat('-Z', 'Y').to_euler(); cam.data.clip_end = 2000; sc.camera = cam

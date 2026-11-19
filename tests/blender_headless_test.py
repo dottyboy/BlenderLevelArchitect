@@ -5867,6 +5867,21 @@ wt = _ink_paper_rgb(addon._ink_material("water"))
 check("Ink paper: water paper is bluish (blue above red)", wt[2] > wt[0], str(wt))
 check("Ink paper: the paper choice is switched off after the build", addon._INK_PAPER == "white")
 
+# the ink blockout toggle: a medieval plan gets ink materials everywhere, and the originals come back
+for _o in list(bpy.data.objects):
+    if _o.type == 'MESH':
+        bpy.data.objects.remove(_o)
+addon.plan_build(bpy.context, addon.plan_node("bo_land", "terrain", "terrain", params={"biome": "meadow", "width": 80.0, "depth": 80.0, "scatter": 1.0, "rivers": "none"},
+                 children=[addon.plan_node("bo_house", "building", "house", transform={"x": 10.0, "y": 0.0, "z": 0.0, "rot": 0.0}), addon.plan_node("bo_tree", "building", "tree", transform={"x": -10.0, "y": 0.0, "z": 0.0, "rot": 0.0})]))
+bo_before = {o.name: [s_.material.name if s_.material else None for s_ in o.material_slots] for o in bpy.data.objects if o.type == 'MESH'}
+state_on, n_on = addon.ink_blockout(bpy.context.scene, "old")
+bo_names = {s_.material.name for o in bpy.data.objects if o.type == 'MESH' for s_ in o.material_slots if s_.material}
+check("Ink blockout: the first call turns the ink look on for the scene's meshes", state_on == "on" and n_on > 0 and any("Ink" in n_ for n_ in bo_names)
+      and not any(n_.startswith("LA_Leaf_") or n_.startswith("LA_Terrain_") for n_ in bo_names), str(sorted(bo_names)))
+state_off, n_off = addon.ink_blockout(bpy.context.scene, "old")
+bo_after = {o.name: [s_.material.name if s_.material else None for s_ in o.material_slots] for o in bpy.data.objects if o.type == 'MESH'}
+check("Ink blockout: the second call restores every original material", state_off == "off" and n_off == n_on and bo_after == bo_before)
+
 # ==============================================================================
 print()
 if failures:

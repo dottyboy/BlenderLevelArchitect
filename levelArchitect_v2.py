@@ -19447,6 +19447,86 @@ class OBJECT_OT_ExportTilemapPackage(bpy.types.Operator, ExportHelper):
         return {'FINISHED'}
 
 
+def _ink_blockout_material(mat, paper):
+    """The ink material that stands in for `mat` (None = leave it alone), judged by the material's name: leaves, water, terrain, rock, wood, roofs, metal and
+    masonry. The masonry replacements share the 2.08 m tile of the masonry textures, so existing UVs keep working."""
+    global _ACTIVE_SKIN, _INK_PAPER
+    if mat is None:
+        return None
+    n = mat.name.lower()
+    saved = (_ACTIVE_SKIN, _INK_PAPER)
+    _ACTIVE_SKIN, _INK_PAPER = "ink", paper
+    try:
+        if "ink" in n or "tilemap" in n:                              # already ink, or a map picture that is its own texture
+            return None
+        if "leaf" in n or "bush" in n:
+            return _ink_material("leaf")
+        if "cactus" in n:
+            return _ink_material("cactus")
+        if "water" in n or "river" in n or "lake" in n:
+            return _ink_material("water")
+        if "terrain" in n or "grass" in n or "open_area" in n or "ground" in n:
+            return _ink_material("terrain")
+        if "rock" in n or "cave" in n:
+            return _ink_material("rock")
+        if "gold" in n or "metal" in n:
+            return _ink_material("metal")
+        if "wood" in n or "door" in n or "plank" in n:
+            return get_style_material("INK_WOOD")
+        if "roof" in n or "shingle" in n or "thatch" in n or "tile" in n:
+            return get_style_material("INK_ROOF")
+        if "stone" in n or "trim" in n or "frame" in n:
+            return get_style_material("INK_TRIM")
+        if any(k in n for k in ("brick", "style", "wall", "tower", "masonry", "castle", "dungeon", "stair", "floor", "plain", "paving", "slab")):
+            return get_style_material("INK_WALL")
+        return None
+    finally:
+        _ACTIVE_SKIN, _INK_PAPER = saved
+
+
+def ink_blockout(scene, paper="white", only_selected=False):
+    """Toggles the ink look over the scene's meshes: the first call replaces every recognised material by an ink one (the originals' names are kept on the
+    object as `gla_ink_restore`), the next call puts the originals back. Returns ("on" | "off", number of objects changed)."""
+    objs = [o for o in (scene.objects if not only_selected else [o for o in scene.objects if o.select_get()]) if o.type == 'MESH']
+    restoring = any("gla_ink_restore" in o.keys() for o in objs)
+    changed = 0
+    for o in objs:
+        if restoring:
+            raw = o.get("gla_ink_restore")
+            if raw is None:
+                continue
+            for slot, name in zip(o.material_slots, json.loads(raw)):
+                if name:
+                    slot.material = bpy.data.materials.get(name) or slot.material
+            del o["gla_ink_restore"]
+            changed += 1
+        else:
+            names, did = [], False
+            for slot in o.material_slots:
+                names.append(slot.material.name if slot.material else None)
+                new = _ink_blockout_material(slot.material, paper)
+                if new is not None:
+                    slot.material = new
+                    did = True
+            if did:
+                o["gla_ink_restore"] = json.dumps(names)
+                changed += 1
+    return ("off" if restoring else "on"), changed
+
+
+class OBJECT_OT_InkBlockout(bpy.types.Operator):
+    """Toggles an ink-on-paper blockout look over the whole scene (or the selection): every recognised material is replaced by its ink counterpart on the chosen paper; press again to restore the originals."""
+    bl_idname = "object.gla_ink_blockout"
+    bl_label = "Ink Blockout (toggle)"
+    bl_options = {'REGISTER', 'UNDO'}
+    only_selected: BoolProperty(name="Selected only", default=False)
+
+    def execute(self, context):
+        state, n = ink_blockout(context.scene, context.scene.wfc_plan_paper, self.only_selected)
+        self.report({'INFO'}, "Ink blockout %s: %d object(s)." % (state, n))
+        return {'FINISHED'}
+
+
 class OBJECT_OT_PlanImportTilemap(bpy.types.Operator, ImportHelper):
     """Builds a 3D level from a picture of a tile map (a whole level drawn from square tiles): floor stays flat, green masses and rough grey masses are raised, and the picture itself is the pixel-sharp texture."""
     bl_idname = "object.gla_plan_import_tilemap"
@@ -20769,6 +20849,7 @@ class VIEW3D_PT_GLAPlans(bpy.types.Panel):
         if context.scene.wfc_plan_style == 'ink':
             col.prop(context.scene, "wfc_plan_paper", text="Paper")
         col.prop(context.scene, "wfc_plan_shape", text="Shape")
+        col.operator("object.gla_ink_blockout", text="Ink Blockout (toggle)", icon='GREASEPENCIL')
         col.prop(context.scene, "wfc_plan_biome", text="Biome")
         layout.menu("VIEW3D_MT_gla_plan_add", text="Add a plan at the 3D cursor", icon='ADD')
         for plan_id in plan_list_ids():
@@ -20823,6 +20904,7 @@ classes = (
     OBJECT_OT_PlanImportHouse,
     OBJECT_OT_PlanImportTilemap,
     OBJECT_OT_ExportTilemapPackage,
+    OBJECT_OT_InkBlockout,
     OBJECT_OT_GenerateLevelTower,
     OBJECT_OT_GenerateLevelCastle,
     OBJECT_OT_ExportGamePackage,
