@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Godot demo level menu**: the start screen lists every `level/*.json` + `.glb` package (Esc returns to it), `--level name` still goes straight in; `--menu --pick name` picks an entry for screenshots and tests.
+
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 

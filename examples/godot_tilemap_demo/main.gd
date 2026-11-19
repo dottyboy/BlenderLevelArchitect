@@ -3,7 +3,8 @@ extends Node3D
 ## keys. The JSON's walk rectangles are the only ground that can be stood on, so trees, walls, water and props block you without any physics. A level with
 ## two heights has a second floor (a raised platform) that can only be entered over its stairs.
 ##
-##   godot --path . -- --level ink          the ink-on-paper dungeon (default: demo, the colour map)
+##   godot --path .                         a menu of the levels found in level/ (Esc comes back to it)
+##   godot --path . -- --level ink          straight into the ink-on-paper dungeon
 ##   godot --headless --path . -- --selftest [--level ink]      prints SELFTEST OK
 ##   godot --path . -- --shot out.png [--at x z]                saves a screenshot after a few frames (needs a display, e.g. xvfb-run)
 
@@ -19,38 +20,24 @@ var level: int = 0
 var player: Node3D
 var camera: Camera3D
 var package: Dictionary = {}
+var world: Node3D
+var menu: CanvasLayer
 
 
 func _ready() -> void:
 	_add_keys()
 	var args: PackedStringArray = OS.get_cmdline_user_args()
+	if "--menu" in args or not ("--level" in args or "--selftest" in args or "--shot" in args):
+		_show_menu()
+		if "--pick" in args:                     # --pick name: choose that menu entry (as a click would), for screenshots and tests
+			_on_level_chosen(args[args.find("--pick") + 1])
+		if "--shot" in args:
+			_shot(args[args.find("--shot") + 1])
+		return
 	if "--level" in args:
 		level_name = args[args.find("--level") + 1]
-	var base: String = "res://level/" + level_name
-	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(base + ".json"))
-	if typeof(parsed) != TYPE_DICTIONARY:
-		push_error("cannot read " + base + ".json")
-		get_tree().quit(1)
+	if not _load_level(level_name):
 		return
-	package = parsed
-	var floors: Array = package["floors"]
-	rects = floors[0]["walk_rects"]
-	if floors.size() > 1:
-		rects_upper = floors[1]["walk_rects"]
-	stairs = package["stairs"]
-	tile = float(package["tile_size"])
-	var scene: PackedScene = load(base + ".glb")
-	if scene != null:
-		add_child(scene.instantiate())
-	_add_light()
-	player = _make_player()
-	add_child(player)
-	camera = Camera3D.new()
-	camera.fov = 55.0
-	add_child(camera)
-	var start: Array = package["entrance"]["pos"]
-	player.position = Vector3(float(start[0]), 0.0, float(start[2]))
-	_follow()
 	if "--selftest" in args:
 		_selftest()
 	elif "--shot" in args:
@@ -59,6 +46,104 @@ func _ready() -> void:
 			player.position = Vector3(float(args[i + 1]), 0.0, float(args[i + 2]))
 			_follow()
 		_shot(args[args.find("--shot") + 1])
+
+
+## The level packages found in res://level (a .json and a .glb of the same name).
+func _list_levels() -> Array[String]:
+	var names: Array[String] = []
+	for f: String in DirAccess.get_files_at("res://level"):
+		if f.ends_with(".json"):
+			names.append(f.get_basename())
+	names.sort()
+	return names
+
+
+func _show_menu() -> void:
+	_clear_level()
+	menu = CanvasLayer.new()
+	add_child(menu)
+	var bg: ColorRect = ColorRect.new()
+	bg.color = Color(0.85, 0.86, 0.9)
+	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
+	menu.add_child(bg)
+	var box: VBoxContainer = VBoxContainer.new()
+	box.set_anchors_preset(Control.PRESET_CENTER)
+	box.custom_minimum_size = Vector2(320.0, 0.0)
+	box.position = Vector2(-160.0, -120.0)
+	menu.add_child(box)
+	var title: Label = Label.new()
+	title.text = "Tile map levels"
+	title.add_theme_font_size_override("font_size", 28)
+	title.add_theme_color_override("font_color", Color(0.1, 0.1, 0.15))
+	box.add_child(title)
+	for n: String in _list_levels():
+		var btn: Button = Button.new()
+		btn.text = n
+		btn.custom_minimum_size = Vector2(320.0, 44.0)
+		btn.pressed.connect(_on_level_chosen.bind(n))
+		box.add_child(btn)
+	var hint: Label = Label.new()
+	hint.text = "WASD / arrows: walk    Esc: back to this menu"
+	hint.add_theme_color_override("font_color", Color(0.25, 0.25, 0.3))
+	box.add_child(hint)
+
+
+func _on_level_chosen(n: String) -> void:
+	level_name = n
+	_load_level(n)
+
+
+func _input(event: InputEvent) -> void:
+	if event is InputEventKey and (event as InputEventKey).pressed and (event as InputEventKey).keycode == KEY_ESCAPE and world != null:
+		_show_menu()
+
+
+func _clear_level() -> void:
+	if menu != null:
+		menu.queue_free()
+		menu = null
+	if world != null:
+		world.queue_free()
+		world = null
+	player = null
+	camera = null
+	rects = []
+	rects_upper = []
+	stairs = []
+	level = 0
+
+
+## Builds a level from its package; returns false when the package cannot be read.
+func _load_level(n: String) -> bool:
+	_clear_level()
+	var base: String = "res://level/" + n
+	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(base + ".json"))
+	if typeof(parsed) != TYPE_DICTIONARY:
+		push_error("cannot read " + base + ".json")
+		get_tree().quit(1)
+		return false
+	package = parsed
+	var floors: Array = package["floors"]
+	rects = floors[0]["walk_rects"]
+	if floors.size() > 1:
+		rects_upper = floors[1]["walk_rects"]
+	stairs = package["stairs"]
+	tile = float(package["tile_size"])
+	world = Node3D.new()
+	add_child(world)
+	var scene: PackedScene = load(base + ".glb")
+	if scene != null:
+		world.add_child(scene.instantiate())
+	_add_light()
+	player = _make_player()
+	world.add_child(player)
+	camera = Camera3D.new()
+	camera.fov = 55.0
+	world.add_child(camera)
+	var start: Array = package["entrance"]["pos"]
+	player.position = Vector3(float(start[0]), 0.0, float(start[2]))
+	_follow()
+	return true
 
 
 func _add_keys() -> void:
@@ -74,14 +159,14 @@ func _add_light() -> void:
 	sun.shadow_enabled = true
 	sun.shadow_bias = 0.08
 	sun.shadow_normal_bias = 2.5
-	add_child(sun)
+	world.add_child(sun)
 	var env: WorldEnvironment = WorldEnvironment.new()
 	env.environment = Environment.new()
 	env.environment.background_mode = Environment.BG_COLOR
 	env.environment.background_color = Color(0.80, 0.81, 0.85) if level_name == "ink" else Color(0.55, 0.68, 0.85)
 	env.environment.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
 	env.environment.ambient_light_color = Color(0.7, 0.7, 0.75)
-	add_child(env)
+	world.add_child(env)
 
 
 func _make_player() -> Node3D:
@@ -176,6 +261,8 @@ func _settle() -> void:
 
 
 func _process(delta: float) -> void:
+	if player == null:
+		return
 	var dir: Vector2 = Input.get_vector("ui_left", "ui_right", "ui_up", "ui_down")
 	var step: Vector2 = dir * SPEED * delta
 	try_move(step.x, step.y)
