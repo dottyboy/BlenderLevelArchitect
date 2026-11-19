@@ -3,6 +3,11 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
+## Unreleased — terrain: look and relief
+
+- **Ground look**: the terrain material multiplies the baked colour by patches (~6 m), grain and a slow warm/cool tint, and bumps the normal with fine noise; shader only, no geometry.
+- **Relief**: new `warp` (domain warp, metres) and `sharp` (broad flats, narrower crests) terrain parameters, set per biome (mountains `warp 45, sharp 1.6, ridged 0.7`); mountains now have ridges and valleys and **snow on the peaks**. Verified on Blender 5.3.0 (full suite passes).
+
 ## 0.63.0 — a house from a picture of its floor plan
 
 - **House from Floor-Plan Picture...** (Plans panel): reads an architect's drawing (black walls on a light background, thin lines for furniture and text, door swings as quarter circles) and builds a `floor_plan` building. Only thick strokes count as walls (thin lines are ignored); **a window** is a gap in an outside wall (big glazing and a garage door by width), **a door** is a swing arc in front of a gap in a wall (each with its own hinged `Door_Panel_NNN` leaf; a doorway whose arc is not recognised simply stays an open doorway), the lowest opening in the picture is the front entrance and stays open. Floor and roof slabs follow the outline, lamps hang in the rooms. The scale is set by the real width of the house (`House width`) or `mpp`.

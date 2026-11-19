@@ -16791,7 +16791,7 @@ PLAN_BUILDERS = {"tower": _plan_build_tower, "castle": _plan_build_castle,
 # Everything below the sheet's parameters stays editable in the modifier panel.
 # ------------------------------------------------------------------------------
 PLAN_BIOMES = {
-    "meadow": dict(label="Meadow", amplitude=4.0, feature=60.0, detail=3.0, rough=0.45, base=0.0, sea=-2.4, island=0.0,
+    "meadow": dict(label="Meadow", warp=18.0, amplitude=4.0, feature=60.0, detail=3.0, rough=0.45, base=0.0, sea=-2.4, island=0.0,
                    water=True, rock=(0.40, 0.38, 0.34), earth=(0.30, 0.23, 0.15),
                    ramp=[(0.0, (0.20, 0.16, 0.10)), (0.07, (0.55, 0.50, 0.32)), (0.13, (0.20, 0.34, 0.10)),
                          (0.5, (0.27, 0.42, 0.12)), (0.8, (0.36, 0.33, 0.25)), (1.0, (0.5, 0.48, 0.44))],
@@ -16806,7 +16806,7 @@ PLAN_BIOMES = {
                             dict(kind="tree", per_ha=30, crown="ROUND", leaf=["GREEN", "DARK", "AUTUMN"], height=(5.0, 9.0), slope=0.25, cluster=(55.0, 0.4)),
                             dict(kind="bush", per_ha=30, leaf=["DARK", "GREEN"], slope=0.3),
                             dict(kind="rock", per_ha=4, slope=0.6)]),
-    "desert": dict(label="Desert", ridged=0.85, amplitude=5.0, feature=90.0, detail=2.0, rough=0.35, base=0.0, sea=-6.0, island=0.0,
+    "desert": dict(label="Desert", ridged=0.85, warp=25.0, amplitude=5.0, feature=90.0, detail=2.0, rough=0.35, base=0.0, sea=-6.0, island=0.0,
                    water=False, rock=(0.52, 0.40, 0.30), earth=(0.55, 0.44, 0.28),
                    ramp=[(0.0, (0.66, 0.54, 0.34)), (0.07, (0.78, 0.64, 0.40)), (0.5, (0.84, 0.68, 0.40)),
                          (0.8, (0.72, 0.50, 0.30)), (1.0, (0.60, 0.42, 0.28))],
@@ -16818,10 +16818,10 @@ PLAN_BIOMES = {
                          (0.5, (0.72, 0.74, 0.76)), (0.8, (0.9, 0.92, 0.95)), (1.0, (0.95, 0.96, 1.0))],
                    scatter=[dict(kind="tree", per_ha=6, crown="CONE", leaf=["DARK"], height=(3.0, 5.0), slope=0.2, cluster=(50.0, 0.5)),
                             dict(kind="rock", per_ha=10, slope=0.7)]),
-    "mountain": dict(label="Mountains", ridged=0.5, amplitude=26.0, feature=110.0, detail=5.0, rough=0.5, base=0.0, sea=-20.0, island=0.0,
+    "mountain": dict(label="Mountains", ridged=0.7, warp=45.0, sharp=1.6, amplitude=30.0, feature=110.0, detail=5.0, rough=0.5, base=0.0, sea=-20.0, island=0.0,
                      water=True, rock=(0.40, 0.38, 0.36), earth=(0.30, 0.26, 0.2),
                      ramp=[(0.0, (0.20, 0.16, 0.10)), (0.06, (0.28, 0.30, 0.15)), (0.22, (0.20, 0.30, 0.12)),
-                           (0.45, (0.33, 0.30, 0.26)), (0.72, (0.44, 0.42, 0.40)), (0.92, (0.62, 0.63, 0.66)), (1.0, (0.93, 0.94, 0.97))],
+                           (0.34, (0.33, 0.30, 0.26)), (0.5, (0.44, 0.42, 0.40)), (0.62, (0.62, 0.63, 0.66)), (0.7, (0.92, 0.93, 0.96)), (1.0, (0.97, 0.98, 1.0))],
                      scatter=[dict(kind="tree", per_ha=22, crown="CONE", leaf=["DARK", "DARK", "GREEN"], height=(6.0, 10.0), slope=0.3, alt=(0.0, 0.42), cluster=(60.0, 0.4)),
                               dict(kind="rock", per_ha=14, slope=1.0, alt=(0.0, 0.85))]),
     "island": dict(label="Island", amplitude=4.0, feature=50.0, detail=3.0, rough=0.45, base=1.0, sea=-2.2, island=1.0,
@@ -16837,7 +16837,8 @@ PLAN_TERRAIN_RANGES = {"width": (40.0, 1000.0), "depth": (40.0, 1000.0), "resolu
                        "scatter": (0.0, 4.0)}
 PLAN_TERRAIN_REGION = {"region_scale": (30.0, 600.0), "region_bias": (-0.35, 0.35), "region_blend": (0.02, 0.5)}
 PLAN_TERRAIN_OPTIONAL = {"amplitude": (0.0, 120.0), "feature_size": (10.0, 400.0), "detail": (0.0, 8.0),
-                         "roughness": (0.0, 1.0), "base": (-50.0, 50.0), "sea_level": (-150.0, 150.0), "island": (0.0, 1.0)}
+                         "roughness": (0.0, 1.0), "base": (-50.0, 50.0), "sea_level": (-150.0, 150.0), "island": (0.0, 1.0),
+                         "warp": (0.0, 300.0), "sharp": (0.5, 3.0)}
 PLAN_BIOME_RIVERS = {"meadow": 1, "forest": 1, "mountain": 1}          # rivers made when params.rivers is "auto" (the default)
 PLAN_TERRAIN_SKIP_KINDS = ("tree", "barrel", "crate", "haystack", "bush", "rock", "cactus")
 
@@ -16864,6 +16865,8 @@ def plan_terrain_params(params):
     merged["base"] = float(params.get("base", spec["base"]))
     merged["sea_level"] = float(params.get("sea_level", spec["sea"]))
     merged["island"] = float(params.get("island", spec["island"]))
+    merged["warp"] = float(params.get("warp", spec.get("warp", 0.0)))          # domain warp in metres: bends ridges and valleys
+    merged["sharp"] = float(params.get("sharp", spec.get("sharp", 1.0)))       # >1: sharper crests, broader flats
     merged["water"] = bool(params.get("water", spec["water"]))
     merged["ridged"] = float(params.get("ridged", spec.get("ridged", 0.0)))
     if not 0.0 <= merged["ridged"] <= 1.0:
@@ -17375,7 +17378,7 @@ def _terrain_node_group(name, tp):
                                    ("Sea Level", tp["sea_level"], -200.0, 200.0), ("Island", tp["island"], 0.0, 1.0),
                                    ("Skirt Depth", max([tp["amplitude"]] + [e["amplitude"] for e in tp["extras"]]
                                                        + [tp["heightmap"]["height"] * tp["heightmap"]["mix"] if tp["heightmap"] else 0.0]) * 1.5 + 8.0, 0.0, 800.0),
-                                   ("Ridged", tp["ridged"], 0.0, 1.0),
+                                   ("Ridged", tp["ridged"], 0.0, 1.0), ("Warp", tp["warp"], 0.0, 300.0), ("Sharp", tp["sharp"], 0.5, 3.0),
                                    ("Heightmap Height", tp["heightmap"]["height"] if tp["heightmap"] else 0.0, 0.0, 500.0),
                                    ("Heightmap Mix", tp["heightmap"]["mix"] if tp["heightmap"] else 0.0, 0.0, 1.0)) + tuple(
             item for k, e in enumerate(tp["extras"]) for item in (
@@ -17461,12 +17464,40 @@ def _terrain_node_group(name, tp):
     noise.noise_dimensions = '4D'
     noise.location = (-1100, 250)
     _set_prop(noise, 'normalize', True)
-    links.new(pos.outputs["Position"], noise.inputs["Vector"])
+    if tp["warp"] > 0.0:                      # domain warp: the noise is read at a position pushed about by a slower vector noise
+        wn = nodes.new("ShaderNodeTexNoise")
+        wn.noise_dimensions = '3D'
+        wn.location = (-1300, 520)
+        links.new(pos.outputs["Position"], wn.inputs["Vector"])
+        links.new(math_('DIVIDE', 1.0, math_('MULTIPLY', feat, 1.7, -1450, 120), -1450, 80), wn.inputs["Scale"])
+        wn.inputs["Detail"].default_value = 2.0
+        wc = nodes.new("ShaderNodeVectorMath")
+        wc.operation = 'SUBTRACT'
+        wc.location = (-1200, 520)
+        links.new(wn.outputs["Color"], wc.inputs[0])
+        wc.inputs[1].default_value = (0.5, 0.5, 0.5)
+        ws = nodes.new("ShaderNodeVectorMath")
+        ws.operation = 'SCALE'
+        ws.location = (-1100, 520)
+        links.new(wc.outputs["Vector"], ws.inputs[0])
+        links.new(gin.outputs["Warp"], ws.inputs["Scale"])
+        wp = nodes.new("ShaderNodeVectorMath")
+        wp.operation = 'ADD'
+        wp.location = (-1000, 520)
+        links.new(pos.outputs["Position"], wp.inputs[0])
+        links.new(ws.outputs["Vector"], wp.inputs[1])
+        links.new(wp.outputs["Vector"], noise.inputs["Vector"])
+    else:
+        links.new(pos.outputs["Position"], noise.inputs["Vector"])
     links.new(gin.outputs["Seed"], noise.inputs["W"])
     links.new(inv, noise.inputs["Scale"])
     links.new(gin.outputs["Detail"], noise.inputs["Detail"])
     links.new(gin.outputs["Roughness"], noise.inputs["Roughness"])
-    smooth_c = math_('SUBTRACT', noise.outputs["Fac"], 0.5, -900, 330)
+    if tp["sharp"] != 1.0:                    # raise the noise to a power: broad low ground, narrower high crests
+        raised = math_('POWER', noise.outputs["Fac"], gin.outputs["Sharp"], -1000, 330)
+        smooth_c = math_('MULTIPLY', math_('SUBTRACT', raised, math_('POWER', 0.5, gin.outputs["Sharp"], -1000, 250), -900, 330), 1.0 / (tp["sharp"] * 0.5 ** (tp["sharp"] - 1.0)), -800, 330)
+    else:
+        smooth_c = math_('SUBTRACT', noise.outputs["Fac"], 0.5, -900, 330)
     crest = math_('SUBTRACT', math_('SUBTRACT', 1.0, math_('MULTIPLY', math_('ABSOLUTE', smooth_c, None, -1000, 420), 2.6, -900, 420), -800, 420), 0.85, -700, 420)
     centred = math_('ADD', smooth_c, math_('MULTIPLY', math_('SUBTRACT', crest, smooth_c, -700, 330), gin.outputs["Ridged"], -600, 330), -600, 250)
     doubled = math_('MULTIPLY', centred, 6.0, -750, 250)
@@ -17560,7 +17591,42 @@ def _terrain_material(name):
     attr.attribute_name = "Col"
     _set_prop(attr, 'attribute_type', 'GEOMETRY')
     attr.location = (-300, 200)
-    nt.links.new(attr.outputs["Color"], bsdf.inputs["Base Color"])
+    # ground detail made in the shader (no geometry, nothing the walk checks can see): the baked colour is multiplied by two noises
+    # (patches of ~6 m and grain of ~0.5 m, a little lighter or darker and a little warmer or cooler) and a fine noise bumps the normal
+    tc = nt.nodes.new("ShaderNodeTexCoord")
+    tc.location = (-900, 0)
+
+    def noise(scale, detail, rough, x, y):
+        n = nt.nodes.new("ShaderNodeTexNoise")
+        n.location = (x, y)
+        n.inputs["Scale"].default_value, n.inputs["Detail"].default_value, n.inputs["Roughness"].default_value = scale, detail, rough
+        nt.links.new(tc.outputs["Object"], n.inputs["Vector"])
+        return n
+
+    def mix_(blend, fac, a_out, b_val, x, y):
+        m = nt.nodes.new("ShaderNodeMix")
+        m.data_type, m.blend_type = 'RGBA', blend
+        m.location = (x, y)
+        m.inputs[0].default_value = fac
+        if b_val is not None:
+            m.inputs[7].default_value = b_val
+        nt.links.new(a_out, m.inputs[6])
+        return m
+    patches = noise(0.16, 5.0, 0.6, -700, 300)
+    grain = noise(2.0, 6.0, 0.55, -700, 100)
+    tint = noise(0.05, 3.0, 0.5, -700, -100)
+    m1 = mix_('OVERLAY', 0.55, attr.outputs["Color"], None, -450, 300)
+    nt.links.new(patches.outputs["Fac"], m1.inputs[7])
+    m2 = mix_('OVERLAY', 0.28, m1.outputs[2], None, -250, 300)
+    nt.links.new(grain.outputs["Fac"], m2.inputs[7])
+    m3 = mix_('SOFT_LIGHT', 0.35, m2.outputs[2], None, -50, 300)
+    nt.links.new(tint.outputs["Fac"], m3.inputs[7])
+    nt.links.new(m3.outputs[2], bsdf.inputs["Base Color"])
+    bump = nt.nodes.new("ShaderNodeBump")
+    bump.location = (-250, -100)
+    bump.inputs["Strength"].default_value, bump.inputs["Distance"].default_value = 0.35, 0.3
+    nt.links.new(grain.outputs["Fac"], bump.inputs["Height"])
+    nt.links.new(bump.outputs["Normal"], bsdf.inputs["Normal"])
     _set_input(bsdf, "Roughness", 1.0)
     _set_input(bsdf, "Specular IOR Level", 0.05)
     mat.diffuse_color = (0.3, 0.38, 0.2, 1.0)
