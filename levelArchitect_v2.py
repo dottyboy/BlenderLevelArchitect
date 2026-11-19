@@ -17980,6 +17980,8 @@ def generate_world(size=2000.0, res=4.0, seed=1, monuments=True, roads=True, are
     h = h - np.where(hydro["river"], np.minimum(5.0, 1.2 + 0.9 * np.log10(np.maximum(hydro["acc"], 1.0))), 0.0)      # rivers cut their bed
     h = _wg_blur(h, 1) * 0.5 + h * 0.5
     slope = wg_slope(h, res)
+    lake_label, n_lakes = _fp_label(hydro["lake"], diag=False)
+    lake_levels = [float(np.median(hydro["fill"][lake_label == k])) for k in range(1, n_lakes + 1)]
     water_dist = _wg_distance((h <= 0.0) | hydro["river"] | hydro["lake"], res)
     biome = wg_biomes(h, slope, res, seed, water_dist)
     mons = wg_place_monuments(h, slope, biome, hydro, water_dist, res, seed) if monuments else []
@@ -17994,7 +17996,7 @@ def generate_world(size=2000.0, res=4.0, seed=1, monuments=True, roads=True, are
     slope = wg_slope(h, res)
     road_list = wg_roads(h, slope, hydro, res, mons, seed) if roads else []
     return dict(size=float(size), res=float(res), seed=int(seed), height=h, slope=slope, biome=biome, river=hydro["river"], lake=hydro["lake"], acc=hydro["acc"],
-                water_dist=water_dist, monuments=mons, roads=road_list)
+                water_dist=water_dist, monuments=mons, roads=road_list, lake_label=lake_label, lake_levels=lake_levels)
 
 
 def _png_gray16(path, a):
@@ -18041,6 +18043,182 @@ def world_write(w, folder, overview_scale=2):
     _png_rgb8(os.path.join(folder, "biome.png"), (pal[w["biome"]][::-1] * 255.0))
     _png_rgb8(os.path.join(folder, "overview.png"), world_overview(w, overview_scale))
     return ["world.json", "height16.png", "biome.png", "overview.png"]
+
+
+def _wg_mesh_from_arrays(name, verts, faces):
+    mesh = bpy.data.meshes.new(name)
+    mesh.from_pydata(verts, [], faces)
+    mesh.update()
+    return mesh
+
+
+def world_build(context, w, chunk_cells=64, monuments=True, skin=""):
+    """Builds a generated world in Blender, chunk by chunk (chunk_cells x res metres square, the chunks share their edge vertices so the ground is seamless): the ground
+    with vertex colours from the biome map, the sea and each lake as depth-shaded water, river water, roads as ribbons on the ground, and every monument as its plan
+    (levelled ground, styled by biome; skin 'ink' dresses everything in the ink look). Returns {"chunks": {"c<i>_<j>": {"objects": [...], "x", "y", "size", "monuments": [ids]}}}."""
+    global _ACTIVE_SKIN
+    import numpy as np
+    res, h, n = w["res"], w["height"], w["height"].shape[0]
+    cx = (n - 1) / 2.0
+    scene = context.scene
+    saved_skin = _ACTIVE_SKIN
+    _ACTIVE_SKIN = skin
+    try:
+        mat_ground = _terrain_material("LA_Terrain_world")
+        mat_sea, mat_river = _water_shader("LA_Lake", "lake"), _water_material()
+        if skin == "ink":
+            mat_road = _ink_material("rock")
+        else:
+            mat_road = bpy.data.materials.get("LA_Road")
+            if mat_road is None:
+                mat_road = bpy.data.materials.new("LA_Road")
+                mat_road.use_nodes = True
+                bsdf = next(nd for nd in mat_road.node_tree.nodes if nd.type == 'BSDF_PRINCIPLED')
+                _set_input(bsdf, "Base Color", (0.42, 0.33, 0.22, 1.0))
+                _set_input(bsdf, "Roughness", 1.0)
+                mat_road.diffuse_color = (0.42, 0.33, 0.22, 1.0)
+    finally:
+        _ACTIVE_SKIN = saved_skin
+    pal = np.array(WG_BIOME_COLORS) ** 2.2
+    if skin == "ink":                                            # paler, less saturated baked colours: the ink terrain reads green-dominance as stipple density
+        pal = pal * 0.35 + 0.22
+    rng = np.random.default_rng(w["seed"] + 3)
+    k = int(chunk_cells)
+    n_c = int(math.ceil((n - 1) / float(k)))
+    chunks = {}
+    coll = bpy.data.collections.new("World_%d" % w["seed"])
+    scene.collection.children.link(coll)
+
+    def new_obj(name, mesh, loc):
+        o = bpy.data.objects.new(name, mesh)
+        coll.objects.link(o)
+        o.location = loc
+        return o
+    for cj in range(n_c):
+        for ci in range(n_c):
+            i0, j0 = ci * k, cj * k
+            i1, j1 = min(i0 + k, n - 1), min(j0 + k, n - 1)
+            sub = h[j0:j1 + 1, i0:i1 + 1]
+            ny, nx = sub.shape[0] - 1, sub.shape[1] - 1
+            x_c, y_c = ((i0 + i1) / 2.0 - cx) * res, ((j0 + j1) / 2.0 - cx) * res
+            cid = "c%d_%d" % (ci, cj)
+            info = {"objects": [], "x": x_c, "y": y_c, "size": k * res, "monuments": []}
+            chunks[cid] = info
+            xs = (np.arange(nx + 1) - nx / 2.0) * res
+            ys = (np.arange(ny + 1) - ny / 2.0) * res
+            X, Y = np.meshgrid(xs, ys)
+            verts = np.stack([X, Y, sub], -1).reshape(-1, 3).tolist()
+            idx = np.arange((ny + 1) * (nx + 1)).reshape(ny + 1, nx + 1)
+            faces = np.stack([idx[:-1, :-1], idx[:-1, 1:], idx[1:, 1:], idx[1:, :-1]], -1).reshape(-1, 4).tolist()
+            mesh = _wg_mesh_from_arrays("Terrain_" + cid, verts, faces)
+            for poly in mesh.polygons:
+                poly.use_smooth = True
+            bsub = w["biome"][j0:j1 + 1, i0:i1 + 1]
+            ssub = w["slope"][j0:j1 + 1, i0:i1 + 1]
+            col = pal[bsub] * (0.88 + 0.24 * rng.random(bsub.shape))[..., None]
+            rock = np.clip((ssub - 0.35) / 0.4, 0.0, 1.0)[..., None] * (bsub != WG_OCEAN)[..., None]
+            col = col * (1.0 - rock) + pal[WG_MOUNTAIN] * rock
+            attr = mesh.color_attributes.new("Col", 'FLOAT_COLOR', 'POINT')
+            attr.data.foreach_set("color", np.concatenate([col, np.ones(col.shape[:2] + (1,))], -1).reshape(-1).astype(np.float32))
+            uvl = mesh.uv_layers.new(name="UVMap")
+            uv = [(v[0] / 8.0, v[1] / 8.0) for v in verts]
+            uvl.data.foreach_set("uv", [c for lp in mesh.loops for c in uv[lp.vertex_index]])
+            mesh.materials.append(mat_ground)
+            info["objects"].append(new_obj("WG_%s_Terrain" % cid, mesh, (x_c, y_c, 0.0)))
+            if (sub <= 0.7).any():
+                wm = _terrain_water_mesh(sub, nx, ny, nx * res, ny * res, 0.0, "Sea_" + cid)
+                if wm is not None:
+                    wm.materials.append(mat_sea)
+                    info["objects"].append(new_obj("WG_%s_Sea" % cid, wm, (x_c, y_c, 0.0)))
+            lsub = w["lake_label"][j0:j1 + 1, i0:i1 + 1]
+            for lk in sorted(set(np.unique(lsub).tolist()) - {0}):
+                level = w["lake_levels"][lk - 1]
+                masked = np.where(lsub == lk, sub, 1e3)
+                wm = _terrain_water_mesh(masked, nx, ny, nx * res, ny * res, level, "Lake_%s_%d" % (cid, lk))
+                if wm is not None:
+                    wm.materials.append(mat_sea)
+                    info["objects"].append(new_obj("WG_%s_Lake%d" % (cid, lk), wm, (x_c, y_c, 0.0)))
+            rsub = w["river"][j0:j1 + 1, i0:i1 + 1] & (sub > 0.0)
+            if rsub.any():
+                rv, rf = [], []
+                for (yy, xx) in zip(*np.nonzero(rsub)):
+                    x0_, y0_, z_ = xs[xx] - res / 2.0, ys[yy] - res / 2.0, float(sub[yy, xx]) + 0.7
+                    b0 = len(rv)
+                    rv += [(x0_, y0_, z_), (x0_ + res, y0_, z_), (x0_ + res, y0_ + res, z_), (x0_, y0_ + res, z_)]
+                    rf.append((b0, b0 + 1, b0 + 2, b0 + 3))
+                rm = _wg_mesh_from_arrays("River_" + cid, rv, rf)
+                rm.materials.append(mat_river)
+                info["objects"].append(new_obj("WG_%s_River" % cid, rm, (x_c, y_c, 0.0)))
+    # roads: a ribbon per segment, collected per chunk by the segment's middle
+    road_geo = {}
+    for road in w["roads"]:
+        pts = road["points"]
+        for a, b in zip(pts, pts[1:]):
+            mx, my = (a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0
+            ci_, cj_ = min(max(int((mx / res + cx) // k), 0), n_c - 1), min(max(int((my / res + cx) // k), 0), n_c - 1)
+            dx, dy = b[0] - a[0], b[1] - a[1]
+            ln = math.hypot(dx, dy)
+            if ln < 1e-6:
+                continue
+            nx_, ny_ = -dy / ln * 2.6, dx / ln * 2.6
+            road_geo.setdefault("c%d_%d" % (ci_, cj_), []).append([(a[0] + nx_, a[1] + ny_, a[2] + 0.18), (b[0] + nx_, b[1] + ny_, b[2] + 0.18), (b[0] - nx_, b[1] - ny_, b[2] + 0.18), (a[0] - nx_, a[1] - ny_, a[2] + 0.18)])
+    for cid, quads in road_geo.items():
+        info = chunks[cid]
+        verts, faces = [], []
+        for qd in quads:
+            b0 = len(verts)
+            verts += [(v[0] - info["x"], v[1] - info["y"], v[2]) for v in qd]
+            faces.append((b0, b0 + 1, b0 + 2, b0 + 3))
+        rm = _wg_mesh_from_arrays("Road_" + cid, verts, faces)
+        rm.materials.append(mat_road)
+        info["objects"].append(new_obj("WG_%s_Roads" % cid, rm, (info["x"], info["y"], 0.0)))
+    # monuments: each is its plan, standing on its levelled ground, styled by biome
+    if monuments:
+        ids = set(plan_list_ids())
+        styles = {"desert": "egyptian", "tundra": "alpine", "snow": "alpine", "mountain": "alpine"}
+        for p in w["monuments"]:
+            plan = plan_new_example(scene, p["plan"], ids)
+            plan["id"] = "wg_" + p["id"]
+            plan["transform"] = {"x": p["x"], "y": p["y"], "z": p["z"], "rot": float(rng.uniform(0.0, 360.0))}
+            plan["style"] = "ink" if skin == "ink" else styles.get(p["biome"])
+            if skin == "ink":
+                plan["paper"] = "white"
+            plan_write_to_blend(scene, plan)
+            plan_build(context, plan)
+            ids.add(plan["id"])
+            ci_, cj_ = min(max(int((p["x"] / res + cx) // k), 0), n_c - 1), min(max(int((p["y"] / res + cx) // k), 0), n_c - 1)
+            chunks["c%d_%d" % (ci_, cj_)]["monuments"].append(plan["id"])
+    return {"chunks": chunks, "collection": coll}
+
+
+def world_export_chunks(context, w, built, folder):
+    """Exports a built world (the dict `world_build` returned) as one glTF per chunk (ground, water, rivers, roads and the monuments inside it) plus world.json, the
+    gla-worldgen/1 manifest extended with `chunks` (id, file, centre, size, monuments); the maps (height16.png, biome.png, overview.png) are written beside it.
+    Returns the manifest."""
+    os.makedirs(folder, exist_ok=True)
+    scene = context.scene
+    previous = scene.wfc_export_binary
+    scene.wfc_export_binary = True
+    chunks = []
+    try:
+        for cid in sorted(built["chunks"]):
+            info = built["chunks"][cid]
+            objs = list(info["objects"])
+            for pid in info["monuments"]:
+                objs += [o for o in scene.objects if o.type == 'MESH' and (o.name.startswith("PB_" + pid + "_") or o.name.startswith("PB_" + pid + "."))]
+            if not objs:
+                continue
+            fn = "%s.glb" % cid
+            _run_gltf_export(context, os.path.join(folder, fn), objs, False)
+            chunks.append({"id": cid, "glb": fn, "x": round(info["x"], 3), "y": round(info["y"], 3), "size": info["size"], "monuments": list(info["monuments"])})
+    finally:
+        scene.wfc_export_binary = previous
+    files = world_write(w, folder)
+    man = json.load(open(os.path.join(folder, "world.json"), encoding="utf-8"))
+    man["chunks"] = chunks
+    with open(os.path.join(folder, "world.json"), "w", encoding="utf-8") as fh:
+        json.dump(man, fh, indent=1)
+    return man
 
 
 def world_manifest(w):

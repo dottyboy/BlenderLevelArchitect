@@ -5994,6 +5994,29 @@ try:
 except addon.PlanError:
     check("World gen: a too small world is refused", True)
 
+# the world builds in Blender chunk by chunk and exports with a manifest
+for _o in list(bpy.data.objects):
+    if _o.type == 'MESH':
+        bpy.data.objects.remove(_o)
+wgs = addon.generate_world(800.0, 8.0, 3)
+wgb = addon.world_build(bpy.context, wgs, 32, monuments=False)
+check("World build: 800 m at 8 m cells in chunks of 32 cells gives 4 x 4 chunks, each with its ground", sorted(wgb["chunks"]) == ["c%d_%d" % (i_, j_) for j_ in range(4) for i_ in range(4)]
+      or len(wgb["chunks"]) == 16, str(len(wgb["chunks"])))
+check("World build: every chunk has a terrain object with vertex colours and UVs", all(any("Terrain" in o_.name and "Col" in o_.data.color_attributes and o_.data.uv_layers for o_ in c_["objects"]) for c_ in wgb["chunks"].values()))
+def _wg_edge(cid, axis):
+    o_ = [o2 for o2 in wgb["chunks"][cid]["objects"] if o2.name.endswith("_Terrain")][0]
+    vs_ = [(round(v_.co.x + o_.location.x, 3), round(v_.co.y + o_.location.y, 3), v_.co.z) for v_ in o_.data.vertices]
+    return vs_
+_a_ = {(x_, y_): z_ for x_, y_, z_ in _wg_edge("c0_0", 0)}
+_b_ = {(x_, y_): z_ for x_, y_, z_ in _wg_edge("c1_0", 0)}
+_shared = set(_a_) & set(_b_)
+check("World build: neighbouring chunks share their edge vertices at the same height (a seamless ground)", len(_shared) >= 33 and all(abs(_a_[k_] - _b_[k_]) < 1e-6 for k_ in _shared), str(len(_shared)))
+check("World build: the sea is built where the ground dips below the water line", any(o_.name.endswith("_Sea") for c_ in wgb["chunks"].values() for o_ in c_["objects"]))
+_wf = os.path.join(bpy.app.tempdir, "wg_chunks")
+_man = addon.world_export_chunks(bpy.context, wgs, wgb, _wf)
+check("World build: the export writes a glb per chunk and a manifest listing them", len(_man["chunks"]) >= 8 and all(os.path.exists(os.path.join(_wf, c_["glb"])) for c_ in _man["chunks"])
+      and json.load(open(os.path.join(_wf, "world.json")))["chunks"] == _man["chunks"], str(len(_man["chunks"])))
+
 # ==============================================================================
 print()
 if failures:

@@ -146,7 +146,11 @@ meadow, forest, desert, tundra, mountains, island — bring their own palette, r
 <p align="center"><img src="docs/img/worldgen_overview.png" alt="A generated 2 km island seen from above: biomes from tundra in the north to desert in the south, rivers running to the sea, a crater lake, roads (brown) joining the monuments (dark squares)" width="720"></p>
 
 `generate_world(size, res, seed)` makes a whole island as **maps and data** in a couple of seconds: height, **rivers by flow** (from the high ground down to the sea), lakes, biomes by latitude and altitude, **monuments** — the add-on's towns, castles, fortresses, farms, hamlets, huts, towers and rock cities placed by rules (biome, slope, height, distance to water, spacing) on levelled ground — and **roads** between them (a spanning tree plus a ring road, cheapest over gentle ground, bridges over rivers).
-`tools/generate_world.py` writes `world.json`, a 16-bit height map, a biome map and the overview above. It is the first stage of a game framework (see the *World Runtime* Godot project).
+`world_build` then builds it in Blender chunk by chunk (seamless ground, lakes, rivers, roads, every monument as its plan on levelled ground; about 30 s for 2 km) and `world_export_chunks` writes one .glb per chunk plus the manifest:
+
+<p align="center"><img src="docs/img/worldgen_aerial.png" alt="The generated island built in Blender: biomes, lakes, roads and monuments" width="900"></p>
+
+`tools/generate_world.py` writes `world.json`, a 16-bit height map, a biome map and the overview above (`--build` also builds and exports the chunks). It is the first stage of a game framework (see the *World Runtime* Godot project).
 
 ### Big worlds
 
