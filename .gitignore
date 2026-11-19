@@ -36,3 +36,6 @@ __pycache__/
 # OS cruft
 .DS_Store
 Thumbs.db
+
+# Godot import cache of the demo project
+/examples/godot_tilemap_demo/.godot/

@@ -224,6 +224,11 @@ The **Level from Tile Map** button turns a picture of a whole level made of squa
 every tile is matched exactly; without one the roles are read from colour and texture. The pictures above are an original demo tileset and a generated map ([tools/make_tileset.py](tools/make_tileset.py)).
 Use pictures you may use; none from commercial games is shipped.
 
+**Walk it in a game**: **Export Tile Map Package (glb + json)** writes the level as glTF plus a `gla-export/1` JSON (exact walk rectangles, entrance, exit, props, trees),
+and [examples/godot_tilemap_demo](examples/godot_tilemap_demo) is a small Godot 4 project that loads such a package and lets you walk through it:
+
+<p align="center"><img src="docs/img/godot_tilemap_demo.png" alt="The tile map level in Godot: a figure standing on grass among 3D trees, a lake and a brick wall" width="900"></p>
+
 ### Seven style packs and a mix
 
 <p align="center"><img src="docs/img/styles_sheet.png" alt="The same village in Medieval, Egyptian, Mexican, Chinese, Inca, Modern and Alpine styles, and a mixed street" width="900"></p>
