@@ -58,6 +58,8 @@ func _add_light() -> void:
 	var sun: DirectionalLight3D = DirectionalLight3D.new()
 	sun.rotation_degrees = Vector3(-55.0, -35.0, 0.0)
 	sun.shadow_enabled = true
+	sun.shadow_bias = 0.08
+	sun.shadow_normal_bias = 2.5
 	add_child(sun)
 	var env: WorldEnvironment = WorldEnvironment.new()
 	env.environment = Environment.new()

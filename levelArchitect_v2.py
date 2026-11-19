@@ -11937,14 +11937,22 @@ def _build_tree_mesh(p, seed):
         rows, sides = 5, 9
         r = h * 0.28
         zc = trunk_h + r * 0.75
+        lim = 0.47 * math.pi                                    # stop just short of the poles; a flat cap closes each end (no zero-width quads)
         for ri in range(rows):
-            a0, a1 = math.pi * (ri / rows - 0.5), math.pi * ((ri + 1) / rows - 0.5)
+            a0, a1 = -lim + 2 * lim * ri / rows, -lim + 2 * lim * (ri + 1) / rows
             for i in range(sides):
                 t0, t1 = 2 * math.pi * i / sides, 2 * math.pi * (i + 1) / sides
                 pts = [(r * math.cos(a) * math.cos(t), r * math.cos(a) * math.sin(t), zc + r * 0.85 * math.sin(a))
                        for a, t in ((a0, t0), (a0, t1), (a1, t1), (a1, t0))]
                 nrm = (sum(q[0] for q in pts), sum(q[1] for q in pts), sum(q[2] - zc for q in pts))
                 soup.poly('crown', pts, [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)], nrm, LEAF_SOURCE_SLOT)
+        for sign, a_ in ((1.0, lim), (-1.0, -lim)):
+            ring = [(r * math.cos(a_) * math.cos(2 * math.pi * i / sides), r * math.cos(a_) * math.sin(2 * math.pi * i / sides), zc + r * 0.85 * math.sin(a_))
+                    for i in range(sides)]
+            if sign > 0:
+                soup.poly('crown', ring, [(0.5 + 0.5 * math.cos(2 * math.pi * i / sides), 0.5 + 0.5 * math.sin(2 * math.pi * i / sides)) for i in range(sides)], (0.0, 0.0, 1.0), LEAF_SOURCE_SLOT)
+            else:
+                soup.poly('crown', ring[::-1], [(0.5 + 0.5 * math.cos(2 * math.pi * i / sides), 0.5 + 0.5 * math.sin(2 * math.pi * i / sides)) for i in range(sides)][::-1], (0.0, 0.0, -1.0), LEAF_SOURCE_SLOT)
     else:
         tiers = 3
         for ti in range(tiers):

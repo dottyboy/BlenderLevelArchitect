@@ -221,7 +221,7 @@ Press **House from Floor-Plan Picture...** and pick a picture of an architect's 
 
 The **Level from Tile Map** button turns a picture of a whole level made of square tiles — the kind 16-bit action games used — into a 3D level that keeps the pixel look. The ground is one smooth surface: **forest tiles swell into rounded mounds**,
 **water sits lower and the banks slope into it**, and **stone tiles stand up as walls** in bands one tile high with a bevelled top. The picture itself is the texture, read with nearest filtering. With a **tileset** (a sheet of tiles and a small JSON that names each tile's role: floor, canopy, stone or water)
-every tile is matched exactly; without one the roles are read from colour and texture. The pictures above are an original demo tileset and a generated map ([tools/make_tileset.py](tools/make_tileset.py)).
+every tile is matched exactly; without one the roles are read from colour and texture. The pictures above are an original demo tileset with **autotiles** (coasts, forest edges and paths pick rounded edge tiles from their neighbours) and a generated map ([tools/make_tileset.py](tools/make_tileset.py)); [tools/reskin_map.py](tools/reskin_map.py) re-skins any tile map with such a tileset.
 Use pictures you may use; none from commercial games is shipped.
 
 **Walk it in a game**: **Export Tile Map Package (glb + json)** writes the level as glTF plus a `gla-export/1` JSON (exact walk rectangles, entrance, exit, props, trees),

@@ -2,7 +2,8 @@
 
     python3 tools/make_tileset.py            # writes docs/examples/tileset_demo.png, tileset_demo.json and tilemap_demo.png
 
-The tileset is a sheet of 8 tiles per row; tileset_demo.json gives each tile's role (floor / canopy / stone / water), which the
+The tileset is a sheet of 8 tiles per row, 16 plain tiles followed by 3 x 16 autotile variants (dirt over grass, water over sand, canopy over grass,
+chosen by which of the four neighbours are the same kind: bits N=1 E=2 S=4 W=8; a set bit = closed side); tileset_demo.json gives each tile's role (floor / canopy / stone / water), which the
 tile map tool uses when the map is matched against the tileset (an exact pixel match per tile).
 """
 import json, os, struct, zlib
@@ -131,14 +132,69 @@ def rubble(seed):
     return img
 
 
+AUTO = {"dirt": ("floor", "grass"), "water": ("water", "sand"), "canopy": ("canopy", "grass")}     # kind: (role, the kind its open edges blend into)
+PLAIN_FILL = {"dirt": lambda: dirt(4), "water": lambda: water(8), "canopy": lambda: canopy(9), "grass": lambda: grass(1), "sand": lambda: sand(7)}
+
+
+def auto_tile(kind, mask, seed=0):
+    """One autotile variant: `kind` fills the tile, and each side whose bit in `mask` is clear (a different neighbour) is rounded off into the base kind
+    with a wobbly edge and a one-pixel rim (foam for water, shadow for dirt and canopy)."""
+    fill, base = PLAIN_FILL[kind](), PLAIN_FILL[AUTO[kind][1]]()
+    r = np.random.default_rng(100 + seed * 17 + mask)
+    ys, xs = np.mgrid[0:T, 0:T]
+    sides = {"n": (ys, 1), "e": (T - 1 - xs, 2), "s": (T - 1 - ys, 4), "w": (xs, 8)}
+    open_ = {k: not (mask & bit) for k, (_d, bit) in sides.items()}
+    d = np.full((T, T), 99.0)
+    for k, (dist, _bit) in sides.items():
+        if open_[k]:
+            d = np.minimum(d, dist.astype(float))
+    R = 6.0                                                          # rounded outer corners where two neighbouring sides are open
+    for (a_, b_) in (("n", "w"), ("n", "e"), ("s", "w"), ("s", "e")):
+        if open_[a_] and open_[b_]:
+            da, db = sides[a_][0].astype(float), sides[b_][0].astype(float)
+            corner = (da < R) & (db < R)
+            d = np.where(corner, np.minimum(d, R - np.hypot(R - da, R - db)), d)
+    wob = 2.0 + r.random((T, T)) * 1.6
+    inside = d >= wob
+    rim = (d >= wob - 1.1) & ~inside
+    img = np.where(inside[..., None], fill, base).astype(np.uint8)
+    rim_col = {"dirt": (0x4a, 0x35, 0x22), "water": (0xcf, 0xe8, 0xf6), "canopy": (0x12, 0x3a, 0x18)}[kind]
+    img[rim] = rim_col
+    return img
+
+
 TILES = [("grass", grass(1), "floor"), ("grass", grass(2), "floor"), ("grass", grass(3, True), "floor"), ("dirt", dirt(4), "floor"),
          ("dirt", dirt(5), "floor"), ("paving", paving(6), "floor"), ("sand", sand(7), "floor"), ("water", water(8), "water"),
          ("canopy", canopy(9), "canopy"), ("canopy", canopy(10), "canopy"), ("canopy", canopy(11), "canopy"), ("brick", brick(12), "stone"),
          ("brick", brick(13), "stone"), ("brick window", brick(14, True), "stone"), ("rubble", rubble(15), "stone"), ("paving", paving(16), "floor")]
+AUTO_FIRST = {}
+for _kind, (_role, _base) in AUTO.items():
+    AUTO_FIRST[_kind] = len(TILES)
+    for _mask in range(16):
+        TILES.append((_kind + " edge", auto_tile(_kind, _mask), _role))
 COLS = 8
 IDX = {}
 for i, (kind, _img, _role) in enumerate(TILES):
     IDX.setdefault(kind, []).append(i)
+
+
+def autotile_ids(kinds, seed=1):
+    """Tile ids for a grid of kind names: kinds with autotiles get the variant of their four-neighbour mask (the map edge counts as the same kind),
+    the others a random plain variant."""
+    h, w = kinds.shape
+    r = np.random.default_rng(seed)
+    out = np.zeros((h, w), int)
+    for y in range(h):
+        for x in range(w):
+            k = kinds[y, x]
+            if k in AUTO_FIRST:
+                same = lambda yy, xx: (not (0 <= yy < h and 0 <= xx < w)) or kinds[yy, xx] == k
+                mask = (1 if same(y - 1, x) else 0) | (2 if same(y, x + 1) else 0) | (4 if same(y + 1, x) else 0) | (8 if same(y, x - 1) else 0)
+                out[y, x] = AUTO_FIRST[k] + mask
+            else:
+                ids = IDX[k]
+                out[y, x] = ids[int(r.integers(0, len(ids)))]
+    return out
 
 
 def sheet():
@@ -170,42 +226,33 @@ def make_map(w=64, h=48, seed=3):
     r = np.random.default_rng(seed)
     elev = fbm(h, w, seed)
     wood = fbm(h, w, seed + 1, 3, 4)
-    pick = lambda kind: IDX[kind][int(r.integers(0, len(IDX[kind])))]
-    m = np.zeros((h, w), int)
-    for y in range(h):
-        for x in range(w):
-            e = elev[y, x]
-            if e < 0.40:
-                m[y, x] = pick("water")
-            elif e < 0.44:
-                m[y, x] = pick("sand")
-            elif wood[y, x] > 0.56 and e > 0.5:
-                m[y, x] = pick("canopy")
-            else:
-                m[y, x] = pick("grass")
+    k = np.full((h, w), "grass", dtype=object)
+    k[elev < 0.44] = "sand"
+    k[elev < 0.40] = "water"
+    k[(wood > 0.56) & (elev > 0.5)] = "canopy"
     # a walled yard and a small house on dry ground, joined by a dirt path
+
     def room(x0, y0, x1, y1, door):
         for y in range(y0, y1 + 1):
             for x in range(x0, x1 + 1):
                 edge = x in (x0, x1) or y in (y0, y1)
-                m[y, x] = (pick("brick") if r.random() > 0.08 else pick("brick window")) if edge else pick("paving")
-        dx, dy = door
-        m[dy, dx] = pick("paving")
+                k[y, x] = ("brick" if r.random() > 0.08 else "brick window") if edge else "paving"
+        k[door[1], door[0]] = "paving"
     room(8, 10, 22, 22, (15, 22))
     room(40, 26, 52, 36, (46, 26))
     for (x, y) in ((10, 12), (14, 18), (19, 14)):                         # fallen stones in the yard
-        m[y, x] = pick("rubble")
+        k[y, x] = "rubble"
     px, py = 15, 23
     while (px, py) != (46, 25):                                          # dirt path from one door to the other
         if r.random() < 0.55 and px != 46:
             px += 1 if px < 46 else -1
         elif py != 25:
             py += 1 if py < 25 else -1
-        m[py, px] = pick("dirt")
+        k[py, px] = "dirt"
         if py < 25 and px == 46:
-            m[py + 1, px] = pick("dirt")
-    m[25, 46] = pick("dirt")
-    return m
+            k[py + 1, px] = "dirt"
+    k[25, 46] = "dirt"
+    return autotile_ids(k, seed)
 
 
 def render_map(m):
@@ -220,6 +267,6 @@ if __name__ == "__main__":
     d = os.path.join(ROOT, "docs", "examples")
     write_png(os.path.join(d, "tileset_demo.png"), sheet())
     with open(os.path.join(d, "tileset_demo.json"), "w") as f:
-        json.dump({"tile": T, "cols": COLS, "roles": [t[2] for t in TILES], "names": [t[0] for t in TILES]}, f, indent=1)
+        json.dump({"tile": T, "cols": COLS, "roles": [t[2] for t in TILES], "names": [t[0] for t in TILES], "autotiles": {k: {"first": v, "base": AUTO[k][1]} for k, v in AUTO_FIRST.items()}}, f, indent=1)
     write_png(os.path.join(d, "tilemap_demo.png"), render_map(make_map()))
     print("wrote tileset_demo.png, tileset_demo.json and tilemap_demo.png in", d)
