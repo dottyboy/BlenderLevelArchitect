@@ -17611,6 +17611,38 @@ def _plan_build_tilemap(context, node, world, seed, path):
     return made
 
 
+def plan_world(plan_id="world", biome="meadow", chunks=(3, 3), chunk_size=160.0, resolution=2.0, seed=7, **terrain):
+    """A world bigger than one terrain sheet: a grid of `chunks` = (columns, rows) terrain sheets of `chunk_size` metres under one plan. Every sheet reads the same noise at its
+    world position (`offset`, one shared `world_seed`), so heights meet exactly along the seams, and only the outer sides keep a skirt. Extra keyword arguments go to every
+    terrain (amplitude, scatter, regions, ...). Chunk nodes are called c<column>_<row>, row 0 is the southern one."""
+    cx, cy = int(chunks[0]), int(chunks[1])
+    if not (1 <= cx <= 16 and 1 <= cy <= 16):
+        raise PlanError("a world has 1..16 chunks in each direction")
+    children = []
+    for j in range(cy):
+        for i in range(cx):
+            x, y = (i - (cx - 1) / 2.0) * chunk_size, (j - (cy - 1) / 2.0) * chunk_size
+            sides = "".join(sd for sd, outer in (("w", i == 0), ("e", i == cx - 1), ("s", j == 0), ("n", j == cy - 1)) if outer)
+            params = {"biome": biome, "width": float(chunk_size), "depth": float(chunk_size), "resolution": float(resolution), "offset": [x, y], "world_seed": int(seed) % 997,
+                      "skirt_sides": sides, "island": 0.0, "rivers": "none", **terrain}
+            children.append(plan_node("c%d_%d" % (i, j), "terrain", "terrain", transform={"x": x, "y": y, "z": 0.0, "rot": 0.0}, params=params))
+    half = max(cx, cy) * chunk_size / 2.0 + 10.0
+    return plan_node(plan_id, "compound", "yard", footprint=[[-half, -half], [half, -half], [half, half], [-half, half]], params={"fence": "none"}, children=children)
+
+
+def world_chunk_groups(scene, plan_id):
+    """{chunk id: [mesh objects]} of a built world plan: every object adopted under the chunk's plan path (PB_<plan>.<chunk>...)."""
+    groups = {}
+    for o in scene.objects:
+        if o.type != 'MESH' or not o.name.startswith("PB_" + plan_id + "."):
+            continue
+        rest = o.name[len("PB_" + plan_id + "."):]
+        cid = re.match(r"(c\d+_\d+)(?=[._])", rest)
+        if cid:
+            groups.setdefault(cid.group(1), []).append(o)
+    return groups
+
+
 def plan_from_tilemap_picture(path, plan_id="tilemap", tile=16, tile_m=1.0, **extra):
     """A plan tree (one `tilemap` building) from a picture of a tile map."""
     return plan_node(plan_id, "building", "tilemap", transform={"x": 0.0, "y": 0.0, "z": 0.0, "rot": 0.0},
@@ -17699,7 +17731,8 @@ def plan_terrain_params(params):
     """Terrain defaults + the biome's numbers + the node's own params, validated. Raises PlanError."""
     params = dict(params or {})
     merged = {**PLAN_TERRAIN_DEFAULTS, **{k: v for k, v in params.items() if k in PLAN_TERRAIN_DEFAULTS or k in PLAN_TERRAIN_OPTIONAL
-                                          or k in ("water", "rivers", "ridged", "regions", "heightmap", "pad_mode", "region_polygons", "region_noise", "region_biome", "region_scale", "region_bias", "region_blend")}}
+                                          or k in ("water", "rivers", "ridged", "regions", "heightmap", "pad_mode", "region_polygons", "region_noise", "region_biome", "region_scale", "region_bias", "region_blend",
+                                                   "offset", "world_seed", "skirt_sides")}}
     if merged["biome"] not in PLAN_BIOMES:
         raise PlanError("params.biome = %r is not one of %s" % (merged["biome"], ", ".join(PLAN_BIOMES)))
     for key, (lo, hi) in {**PLAN_TERRAIN_RANGES, **{k: v for k, v in PLAN_TERRAIN_OPTIONAL.items() if k in params}}.items():
@@ -17717,6 +17750,20 @@ def plan_terrain_params(params):
     merged["base"] = float(params.get("base", spec["base"]))
     merged["sea_level"] = float(params.get("sea_level", spec["sea"]))
     merged["island"] = float(params.get("island", spec["island"]))
+    # world chunks: `offset` = where this sheet's centre lies in the world (the noise is read there, so neighbouring sheets continue each other), `world_seed` replaces the
+    # per-node noise seed (equal for all chunks of a world), `skirt_sides` = the sides of the sheet that keep their skirt (inner sides of a chunk grid drop it)
+    off = params.get("offset", [0.0, 0.0])
+    if not (isinstance(off, (list, tuple)) and len(off) == 2 and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in off)):
+        raise PlanError("params.offset must be [x, y] in metres")
+    merged["offset"] = (float(off[0]), float(off[1]))
+    ws = params.get("world_seed")
+    if ws is not None and (isinstance(ws, bool) or not isinstance(ws, int) or not 0 <= ws <= 996):
+        raise PlanError("params.world_seed must be an integer 0..996")
+    merged["world_seed"] = ws
+    sides = params.get("skirt_sides", "nsew")
+    if not isinstance(sides, str) or set(sides) - set("nsew"):
+        raise PlanError("params.skirt_sides must be a string of n, s, e, w")
+    merged["skirt_sides"] = sides
     merged["warp"] = float(params.get("warp", spec.get("warp", 0.0)))          # domain warp in metres: bends ridges and valleys
     merged["sharp"] = float(params.get("sharp", spec.get("sharp", 1.0)))       # >1: sharper crests, broader flats
     merged["water"] = bool(params.get("water", spec["water"]))
@@ -18005,7 +18052,8 @@ def _terrain_masks(tp, X, Y):
         if e["noise"]:
             sc = e["scale"]
             seed = tp.get("noise_seed", 0) + 311 + 97 * k
-            n = np.array([plan_fbm2(x / sc, y / sc, seed, 3) for x, y in zip(X.tolist(), Y.tolist())]) + e["bias"]
+            ox_, oy_ = tp.get("offset", (0.0, 0.0))
+            n = np.array([plan_fbm2((x + ox_) / sc, (y + oy_) / sc, seed, 3) for x, y in zip(X.tolist(), Y.tolist())]) + e["bias"]
             n = 0.5 + (n - 0.5) * 2.2                     # fbm clusters near 0.5; stretch it so the biomes get comparable shares
             lo, hi = 0.5 - e["blend"], 0.5 + e["blend"]
             t = np.clip((n - lo) / (hi - lo), 0.0, 1.0)
@@ -18073,7 +18121,16 @@ def _terrain_write_attributes(mesh, nx, ny, pad_w, pad_h, edge, masks, hm):
     for attr, top in named_arrays:
         a = mesh.attributes.get(attr) or mesh.attributes.new(attr, 'FLOAT', 'POINT')
         if top is None:
-            vals = np.concatenate([np.zeros(n_top), np.full(k, 0.002), np.ones(k)])
+            keep = np.ones(k)                                      # the skirt of a side that is not listed in `gla_skirt_sides` (the inner side of a chunk) stays flat
+            sides = mesh.get("gla_skirt_sides", "nsew")
+            if sides != "nsew":
+                xs_ = np.array([mesh.vertices[n_top + q].co.x for q in range(k)])
+                ys_ = np.array([mesh.vertices[n_top + q].co.y for q in range(k)])
+                hx_, hy_ = max(abs(xs_).max(), 1e-9), max(abs(ys_).max(), 1e-9)
+                for side, mask_ in (("e", xs_ > hx_ - 1e-3), ("w", xs_ < -hx_ + 1e-3), ("n", ys_ > hy_ - 1e-3), ("s", ys_ < -hy_ + 1e-3)):
+                    if side not in sides:
+                        keep[mask_] = 0.0
+            vals = np.concatenate([np.zeros(n_top), 0.002 * keep, keep])
         else:
             vals = np.concatenate([top, top[ring_idx], top[ring_idx]])
         a.data.foreach_set("value", vals.astype(np.float32))
@@ -18093,6 +18150,7 @@ def _terrain_grid_mesh(tp, pads, name):
     mesh = bpy.data.meshes.new(name + "_Mesh")
     mesh.from_pydata(verts, [], faces)
     mesh.update()
+    mesh["gla_skirt_sides"] = tp.get("skirt_sides", "nsew")
     for poly in mesh.polygons:
         poly.use_smooth = True
     uvl = mesh.uv_layers.new(name="UVMap")                          # planar, one repeat per 8 m: image-textured (exportable) ground materials need it
@@ -18234,6 +18292,7 @@ def _terrain_node_group(name, tp):
                                    ("Skirt Depth", max([tp["amplitude"]] + [e["amplitude"] for e in tp["extras"]]
                                                        + [tp["heightmap"]["height"] * tp["heightmap"]["mix"] if tp["heightmap"] else 0.0]) * 1.5 + 8.0, 0.0, 800.0),
                                    ("Ridged", tp["ridged"], 0.0, 1.0), ("Warp", tp["warp"], 0.0, 300.0), ("Sharp", tp["sharp"], 0.5, 3.0),
+                                   ("Offset X", tp["offset"][0], -1e6, 1e6), ("Offset Y", tp["offset"][1], -1e6, 1e6),
                                    ("Heightmap Height", tp["heightmap"]["height"] if tp["heightmap"] else 0.0, 0.0, 500.0),
                                    ("Heightmap Mix", tp["heightmap"]["mix"] if tp["heightmap"] else 0.0, 0.0, 1.0)) + tuple(
             item for k, e in enumerate(tp["extras"]) for item in (
@@ -18312,8 +18371,17 @@ def _terrain_node_group(name, tp):
     region = None
     for reg in regs:                           # how much any extra biome rules here
         region = reg if region is None else math_('MAXIMUM', region, reg, -1100, 700)
-    pos = nodes.new("GeometryNodeInputPosition")
+    pos0 = nodes.new("GeometryNodeInputPosition")
+    pos0.location = (-1500, 300)
+    offv = nodes.new("ShaderNodeCombineXYZ")                  # the noise is read at the world position (the sheet's position plus its offset), so chunks of a world join up
+    offv.location = (-1500, 450)
+    links.new(gin.outputs["Offset X"], offv.inputs["X"])
+    links.new(gin.outputs["Offset Y"], offv.inputs["Y"])
+    pos = nodes.new("ShaderNodeVectorMath")
+    pos.operation = 'ADD'
     pos.location = (-1300, 300)
+    links.new(pos0.outputs["Position"], pos.inputs[0])
+    links.new(offv.outputs["Vector"], pos.inputs[1])
     inv = math_('DIVIDE', 1.0, feat, -1300, 150)
     noise = nodes.new("ShaderNodeTexNoise")
     noise.noise_dimensions = '4D'
@@ -18323,7 +18391,7 @@ def _terrain_node_group(name, tp):
         wn = nodes.new("ShaderNodeTexNoise")
         wn.noise_dimensions = '3D'
         wn.location = (-1300, 520)
-        links.new(pos.outputs["Position"], wn.inputs["Vector"])
+        links.new(pos.outputs["Vector"], wn.inputs["Vector"])
         links.new(math_('DIVIDE', 1.0, math_('MULTIPLY', feat, 1.7, -1450, 120), -1450, 80), wn.inputs["Scale"])
         wn.inputs["Detail"].default_value = 2.0
         wc = nodes.new("ShaderNodeVectorMath")
@@ -18339,11 +18407,11 @@ def _terrain_node_group(name, tp):
         wp = nodes.new("ShaderNodeVectorMath")
         wp.operation = 'ADD'
         wp.location = (-1000, 520)
-        links.new(pos.outputs["Position"], wp.inputs[0])
+        links.new(pos.outputs["Vector"], wp.inputs[0])
         links.new(ws.outputs["Vector"], wp.inputs[1])
         links.new(wp.outputs["Vector"], noise.inputs["Vector"])
     else:
-        links.new(pos.outputs["Position"], noise.inputs["Vector"])
+        links.new(pos.outputs["Vector"], noise.inputs["Vector"])
     links.new(gin.outputs["Seed"], noise.inputs["W"])
     links.new(inv, noise.inputs["Scale"])
     links.new(gin.outputs["Detail"], noise.inputs["Detail"])
@@ -18889,7 +18957,7 @@ def _plan_build_terrain(context, root, resolved, node, path):
     except PlanError as exc:
         raise PlanError("%s: %s" % ("/".join(path), exc))
     info = resolved[path]
-    tp["noise_seed"] = info["seed"] % 997
+    tp["noise_seed"] = tp["world_seed"] if tp.get("world_seed") is not None else info["seed"] % 997
     pads, owners = _terrain_pads(root, resolved, path, with_owners=True)
     name = "Terrain_" + node["id"]
     mesh, (nx, ny) = _terrain_grid_mesh(tp, [] if tp["pad_mode"] == "terrain" else pads, name)
@@ -19128,6 +19196,10 @@ def plan_new_example(scene, kind, existing_ids):
         return plan_node(unique("mansion"), "building", "mansion", transform=transform, params={})
     if kind == 'ROCK':
         return plan_node(unique("rock_city"), "building", "rock_city", transform=transform, params={})
+    if kind == 'WORLD':
+        world = plan_world(unique("world"), scene.wfc_plan_biome, (3, 3), 160.0, 2.0, random.randint(1, 996))
+        world["transform"] = transform
+        return world
     if kind == 'VILLA':
         return plan_node(unique("villa"), "building", "mansion", transform=transform,
                          params={"plan": "random", "plan_shape": "random", "plan_seed": random.randint(1, 99999), "floors": random.choice((2, 3)), "wing": float(random.choice((30, 36, 44)))})
@@ -19296,7 +19368,7 @@ class OBJECT_OT_PlanCreate(bpy.types.Operator):
                               ('HOUSE', "House", ""), ('CHAPEL', "Chapel", ""), ('STABLE', "Stable", ""),
                               ('FORTRESS', "Fortress", ""), ('FARM', "Farm", ""), ('HAMLET', "Hamlet", ""),
                               ('STREET', "Street", ""), ('BLOCK', "Block", ""),
-                              ('HUT', "Hut", ""), ('HUTS', "Hut cluster", ""), ('TERRAIN', "Terrain", ""), ('TOWN', "Walled town", ""), ('CITY', "City", ""), ('TERRACES', "Terrace city", ""), ('TWIN', "Twin peaks", ""), ('LAND', "City on land", ""), ('SWAN', "Swan castle", ""), ('MANSION', "Mansion", ""), ('VILLA', "Villa (random plan)", ""), ('ROCK', "Rock city", "")])
+                              ('HUT', "Hut", ""), ('HUTS', "Hut cluster", ""), ('TERRAIN', "Terrain", ""), ('TOWN', "Walled town", ""), ('CITY', "City", ""), ('TERRACES', "Terrace city", ""), ('TWIN', "Twin peaks", ""), ('LAND', "City on land", ""), ('SWAN', "Swan castle", ""), ('MANSION', "Mansion", ""), ('VILLA', "Villa (random plan)", ""), ('ROCK', "Rock city", ""), ('WORLD', "World (chunks)", "")])
 
     def execute(self, context):
         plan = plan_new_example(context.scene, self.kind, set(plan_list_ids()))
@@ -19640,6 +19712,49 @@ class OBJECT_OT_InkBlockout(bpy.types.Operator):
     def execute(self, context):
         state, n = ink_blockout(context.scene, context.scene.wfc_plan_paper, self.only_selected, context.scene.wfc_ink_images)
         self.report({'INFO'}, "Ink blockout %s: %d object(s)." % (state, n))
+        return {'FINISHED'}
+
+
+class OBJECT_OT_ExportWorldChunks(bpy.types.Operator, ExportHelper):
+    """Exports a built world plan (a grid of terrain chunks) as one glTF per chunk plus a manifest (gla-world/1: the chunks, their centres and size), so an engine can stream the pieces."""
+    bl_idname = "object.export_world_chunks"
+    bl_label = "Export World Chunks (glb + manifest)"
+    bl_options = {'REGISTER'}
+    filename_ext = ".world.json"
+    filter_glob: StringProperty(default="*.world.json", options={'HIDDEN'})
+    plan_id: StringProperty(name="Plan", default="", description="The world plan to export (empty: the first built world in the file)")
+
+    def execute(self, context):
+        scene = context.scene
+        if not hasattr(bpy.ops.export_scene, "gltf"):
+            self.report({'ERROR'}, "glTF exporter isn't available -- enable Import-Export: glTF 2.0.")
+            return {'CANCELLED'}
+        pid = self.plan_id or next((i for i in plan_list_ids() if world_chunk_groups(scene, i)), "")
+        groups = world_chunk_groups(scene, pid) if pid else {}
+        if not groups:
+            self.report({'ERROR'}, "Build a world plan first (Plans panel: Add a plan > World).")
+            return {'CANCELLED'}
+        root = plan_read_from_blend(pid)
+        nodes = {c["id"]: c for c in root.get("children", [])}
+        stem = self.filepath[:-len(".world.json")] if self.filepath.endswith(".world.json") else os.path.splitext(self.filepath)[0]
+        previous = scene.wfc_export_binary
+        scene.wfc_export_binary = True
+        chunks = []
+        try:
+            for cid in sorted(groups):
+                glb = "%s_%s.glb" % (stem, cid)
+                _run_gltf_export(context, glb, groups[cid], False)
+                n = nodes.get(cid, {})
+                tr = n.get("transform", {})
+                chunks.append({"id": cid, "glb": os.path.basename(glb), "x": tr.get("x", 0.0), "y": tr.get("y", 0.0),
+                               "size": (n.get("params") or {}).get("width", 0.0)})
+        finally:
+            scene.wfc_export_binary = previous
+        manifest = {"format": "gla-world/1", "generator": "Game Level Architect " + ".".join(str(v) for v in bl_info["version"]), "plan": pid,
+                    "coordinates": "blender: x east, y north (z up), chunk centres in metres", "chunks": chunks}
+        with open(stem + ".world.json", "w", encoding="utf-8") as fh:
+            json.dump(manifest, fh, indent=1)
+        self.report({'INFO'}, "Exported %d chunk(s) and '%s.world.json'." % (len(chunks), stem))
         return {'FINISHED'}
 
 
@@ -20932,7 +21047,7 @@ PLAN_ADD_GROUPS = (
     ("Places", (('GROUNDS', "Grounds"), ('FARM', "Farm"), ('HAMLET', "Hamlet"), ('STREET', "Street"), ('BLOCK', "Block"), ('HUTS', "Hut cluster"),
                 ('TOWN', "Walled town"), ('CITY', "City"))),
     ("Cities on hills and in rock", (('TERRACES', "Terrace city"), ('TWIN', "Twin peaks"), ('LAND', "City on land"), ('ROCK', "Rock city"))),
-    ("Ground", (('TERRAIN', "Terrain"),)),
+    ("Ground", (('TERRAIN', "Terrain"), ('WORLD', "World (3 x 3 chunks)"))),
 )
 
 
@@ -20995,6 +21110,7 @@ class VIEW3D_PT_GLAPlans(bpy.types.Panel):
         layout.operator("object.gla_plan_import_house", text="House from Floor-Plan Picture...", icon='HOME')
         layout.operator("object.gla_plan_import_tilemap", text="Level from Tile Map...", icon='MESH_GRID')
         layout.operator("object.export_tilemap_package", text="Export Tile Map Package (glb + json)", icon='PACKAGE')
+        layout.operator("object.export_world_chunks", text="Export World Chunks (glb + manifest)", icon='PACKAGE')
 
 
 # ==============================================================================
@@ -21021,6 +21137,7 @@ classes = (
     OBJECT_OT_PlanImportHouse,
     OBJECT_OT_PlanImportTilemap,
     OBJECT_OT_ExportTilemapPackage,
+    OBJECT_OT_ExportWorldChunks,
     OBJECT_OT_InkBlockout,
     OBJECT_OT_GenerateLevelTower,
     OBJECT_OT_GenerateLevelCastle,

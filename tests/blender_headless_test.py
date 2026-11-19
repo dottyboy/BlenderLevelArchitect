@@ -5905,6 +5905,43 @@ _meta = json.loads(_d[20:20 + _struct.unpack("<I", _d[12:16])[0]])
 check("Ink images: the glTF export carries the ink pictures", len(_meta.get("images", [])) >= 3, str(len(_meta.get("images", []))))
 check("Ink images: the flags are switched off after the build", addon._INK_IMAGES is False and addon._INK_PAPER == "white")
 
+# --- Big worlds: a grid of terrain chunks that meet exactly
+print("\n--- Plans: a world of chunks ---")
+for _o in list(bpy.data.objects):
+    if _o.type == 'MESH':
+        bpy.data.objects.remove(_o)
+wd = addon.plan_world("wd", "meadow", (2, 2), 60.0, 2.0, 5, scatter=0.0)
+check("World: a 2 x 2 world is four terrain chunks under one plan, named c<column>_<row>, each with its offset and the shared world seed",
+      [c["id"] for c in wd["children"]] == ["c0_0", "c1_0", "c0_1", "c1_1"] and wd["children"][1]["params"]["offset"] == [30.0, -30.0]
+      and len({c["params"]["world_seed"] for c in wd["children"]}) == 1)
+check("World: only the outer sides of a chunk keep their skirt", wd["children"][0]["params"]["skirt_sides"] == "ws" and wd["children"][3]["params"]["skirt_sides"] == "en")
+addon.plan_write_to_blend(bpy.context.scene, wd)
+addon.plan_build(bpy.context, wd)
+wd_groups = addon.world_chunk_groups(bpy.context.scene, "wd")
+check("World: every chunk builds its terrain (and water where it dips below the sea level) as its own group of objects", sorted(wd_groups) == ["c0_0", "c0_1", "c1_0", "c1_1"] and all(any("Terrain" in o_.name for o_ in v) for v in wd_groups.values()), str({k: len(v) for k, v in wd_groups.items()}))
+_dg = bpy.context.evaluated_depsgraph_get()
+def _wd_edge(cid, east):
+    o = [o_ for o_ in wd_groups[cid] if "Terrain" in o_.name][0]
+    ev = o.evaluated_get(_dg).to_mesh()
+    n_top = 31 * 31
+    pts = [(v.co.x, v.co.y, v.co.z) for v in list(ev.vertices)[:n_top]]
+    xs_ = sorted({round(p_[0], 3) for p_ in pts})
+    edge_x = xs_[-1] if east else xs_[0]
+    return sorted((round(p_[1], 3), p_[2]) for p_ in pts if abs(p_[0] - edge_x) < 1e-3)
+_ea, _eb = _wd_edge("c0_0", True), _wd_edge("c1_0", False)
+check("World: neighbouring chunks meet exactly - the heights along the shared seam are equal", len(_ea) == len(_eb) == 31 and max(abs(p_[1] - q_[1]) for p_, q_ in zip(_ea, _eb)) < 1e-5
+      and max(abs(p_[1]) for p_ in _ea) > 0.01, "")
+for bad in ({"offset": [1.0]}, {"world_seed": 5000}, {"skirt_sides": "x"}):
+    try:
+        addon.plan_terrain_params(bad)
+        check("World: bad terrain params are refused (%s)" % list(bad), False)
+    except addon.PlanError:
+        check("World: bad terrain params are refused (%s)" % list(bad), True)
+_wm = os.path.join(bpy.app.tempdir, "wd.world.json")
+check("World: the export writes a glb per chunk and a gla-world/1 manifest", bpy.ops.object.export_world_chunks(filepath=_wm, plan_id="wd") == {'FINISHED'}
+      and json.load(open(_wm))["format"] == "gla-world/1" and len(json.load(open(_wm))["chunks"]) == 4
+      and all(os.path.exists(os.path.join(bpy.app.tempdir, c_["glb"])) for c_ in json.load(open(_wm))["chunks"]))
+
 # ==============================================================================
 print()
 if failures:

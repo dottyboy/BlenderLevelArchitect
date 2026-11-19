@@ -141,6 +141,13 @@ meadow, forest, desert, tundra, mountains, island — bring their own palette, r
 
 <p align="center"><img src="docs/img/biomes_sheet.png" alt="The same hamlet, farm and watchtower in the meadow, forest, desert, tundra, mountains and island biomes" width="900"></p>
 
+### Big worlds
+
+<p align="center"><img src="docs/img/world_chunks.png" alt="A mountain world of 4 x 3 terrain chunks, 640 by 480 metres, snow on the ridges and lakes in the valleys, no seams between the chunks" width="900"></p>
+
+*Add a plan > World* builds a grid of terrain **chunks** (up to 16 x 16, 160 m each by default). Every chunk reads the same noise at its place in the world, so ridges, valleys and the water line **continue exactly across the seams**; each chunk is also an ordinary terrain node
+you can put villages and towns under. **Export World Chunks** writes one .glb per chunk plus a `gla-world/1` manifest, so an engine can stream the pieces. The picture is 640 x 480 m of the Mountains biome ([tools/render_world.py](tools/render_world.py)).
+
 ### Heightmaps and mixed biomes
 
 <p align="center"><img src="docs/img/heightmap_terrain.png" alt="A terrain shaped by a greyscale heightmap, with desert, mountain and forest regions and a hamlet standing on the ground" width="900"></p>

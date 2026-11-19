@@ -317,6 +317,10 @@ With a **tileset** (`params.tileset` = `{"image": sheet.png, "json": roles.json}
 
 Choose **Ink on paper** as the Plans panel's **Style** (and a **Paper**: white, old, grey or cream) before pressing **Build**. Buildings get pale blocks outlined in black, and the whole scene is drawn in ink: the ground and leaves in stipple (green where there is grass), water in wave lines on blue paper, rock in cracks. The ink look is also a good blockout. Tick **Image textures (export-ready)** when the level is going to a game engine: the ink materials then use tileable pictures instead of shaders (glTF cannot carry shaders), so the exported .glb keeps the look. The **Ink Blockout (toggle)** button in the Plans panel gives the same look to anything already in the scene, whatever style it was built in (also the Structures tab's towers, castles and dungeons, and imported tile maps are left alone): every recognised material is swapped for its ink counterpart, and a second click restores the originals. A plan *built* in the Ink style gets the look from the start, with the paper of your choice.
 
+### Big worlds
+
+*Add a plan > World (3 x 3 chunks)* makes a world of nine terrain sheets (160 m each, so about 480 m across; `plan_world(chunks=(n, m), chunk_size=...)` makes others, up to 16 x 16). Every chunk reads the same noise at its place in the world, so the ground and the water line continue across the seams; only the outer edge of the world has a skirt. Build it like any plan, then **Export World Chunks (glb + manifest)** writes one .glb per chunk and a `.world.json` listing them (id, file, centre, size) for an engine that streams the pieces. Each chunk is also an ordinary terrain node: put plans (towns, villages) under it to flatten pads and place them.
+
 ### Walled towns
 
 The **Town** button makes a round town: a stone wall with towers (none in the gateway) and a gate with an approach road, and inside

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Big worlds** (`plan_world`, Plans panel *Add a plan > World (3 x 3 chunks)*, **Export World Chunks (glb + manifest)**): a world bigger than one terrain sheet is a grid of up to 16 x 16 terrain **chunks** under one plan (`c<column>_<row>`, each with `offset`, the shared `world_seed`, only its outer sides keeping a skirt). The terrain's Geometry Nodes tree reads its noise at the world position (new `Offset X / Y` inputs), so **heights meet exactly along the seams** (tested: the seam vertices are equal to 1e-5); the region noise masks use the offset too. New terrain params `offset`, `world_seed`, `skirt_sides`. The export writes one glb per chunk plus a `gla-world/1` manifest (chunk ids, files, centres, size) so an engine can stream the pieces. Limits: heightmaps and explicit rivers are per chunk (rivers default to none), trees are not shared across a seam.
 - **House from a picture: guessed doors**: a door-width gap (0.7-1.4 m) between two rooms whose swing arc is not found (the arc touches other lines) now gets a door hung in it, hinged at its start end, instead of staying an open doorway; the trace reports `door_guesses`. Wider openings stay open archways, exterior gaps stay windows.
 - **Godot demo level menu**: the start screen lists every `level/*.json` + `.glb` package (Esc returns to it), `--level name` still goes straight in; `--menu --pick name` picks an entry for screenshots and tests.
 
