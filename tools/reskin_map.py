@@ -1,10 +1,13 @@
 """Re-skins a tile map: every tile of the old map is looked up in its old tileset (exact match), takes that tile's role (floor / canopy / stone / water,
 from the old roles json) and is replaced by a tile of the same role from a new tileset. The result is a new map picture with the same layout and a new look.
 
-    python3 tools/reskin_map.py OLD_MAP.png OLD_SHEET.png OLD_ROLES.json NEW_SHEET.png NEW_ROLES.json OUT.png [floor=dirt,paving] [stone=brick] [canopy=canopy] [water=water]
+    python3 tools/reskin_map.py OLD_MAP.png OLD_SHEET.png OLD_ROLES.json NEW_SHEET.png NEW_ROLES.json OUT.png
+(OLD_SHEET and OLD_ROLES may each be several files, comma separated, when a map uses several sheets.) [floor=dirt,paving] [stone=brick] [canopy=canopy] [water=water]
 
 NEW_ROLES.json also needs a "names" list (as tileset_demo.json has); the optional role=name,name arguments choose which new tiles stand for a role.
 Tiles of the old map that match no old tile (sprites of items and enemies) become floor. numpy + Pillow.
+
+With an ink-style tileset (tiles named rock and wall, see tools/make_ink_tileset.py) forest and stone become solid rock, rock beside open ground becomes brick wall and water a chasm.
 
 If NEW_ROLES.json has "autotiles" ({kind: {"first": id, "base": kind}}, 16 variants each, bit N=1 E=2 S=4 W=8 = that neighbour is the same kind; tools/make_tileset.py
 writes such a tileset) the new map uses them: floor becomes grass with dirt patches, canopy, water and dirt get rounded, blended edges.
@@ -30,14 +33,16 @@ def main():
     for arg in sys.argv[7:]:
         role, names = arg.split("=", 1)
         prefer[role] = names.split(",")
-    om, nm = json.load(open(old_json)), json.load(open(new_json))
-    otiles, T = sheet_tiles(old_sheet, om)
+    nm = json.load(open(new_json))
     ntiles, T2 = sheet_tiles(new_sheet, nm)
-    if T != T2:
-        raise SystemExit("tile sizes differ: %d vs %d" % (T, T2))
     lut = {}
-    for i, t in enumerate(otiles):
-        lut.setdefault(t.tobytes(), om["roles"][i])
+    for sheet_path, json_path in zip(old_sheet.split(","), old_json.split(",")):          # several old sheets may be given, comma separated
+        om = json.load(open(json_path))
+        otiles, T = sheet_tiles(sheet_path, om)
+        if T != T2:
+            raise SystemExit("tile sizes differ: %d vs %d" % (T, T2))
+        for i, t in enumerate(otiles):
+            lut.setdefault(t.tobytes(), om["roles"][i])
     pool = {}
     for role in ("floor", "canopy", "stone", "water"):
         names = prefer.get(role)
@@ -53,7 +58,49 @@ def main():
             roles[y, x] = "stone" if role == "prop" else role
     auto = nm.get("autotiles")
     ids = np.zeros((ty, tx), int)
-    if auto:
+    if "wall" in nm.get("names", []) and "rock" in nm["names"]:      # an ink / dungeon tileset: forest and stone both become solid rock, rock next to open ground becomes wall, water a chasm
+        names = nm["names"]
+        kinds = np.full((ty, tx), "floor", dtype=object)
+        solid = (roles == "stone") | (roles == "canopy")
+        kinds[solid] = "rock"
+        kinds[roles == "water"] = "chasm"
+        near = np.zeros((ty, tx), bool)
+        open_ = ~solid
+        near[1:, :] |= open_[:-1, :]
+        near[:-1, :] |= open_[1:, :]
+        near[:, 1:] |= open_[:, :-1]
+        near[:, :-1] |= open_[:, 1:]
+        kinds[solid & near] = "wall"
+        # tidy up: small loose bits of the old map (statues, bushes, decorations) become pillars; tiny pockets of floor inside rock are filled
+        def components(mask):
+            seen = np.zeros_like(mask)
+            for y0 in range(ty):
+                for x0 in range(tx):
+                    if mask[y0, x0] and not seen[y0, x0]:
+                        comp, stack = [], [(y0, x0)]
+                        seen[y0, x0] = True
+                        while stack:
+                            cy, cx = stack.pop()
+                            comp.append((cy, cx))
+                            for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                                yy, xx = cy + dy, cx + dx
+                                if 0 <= yy < ty and 0 <= xx < tx and mask[yy, xx] and not seen[yy, xx]:
+                                    seen[yy, xx] = True
+                                    stack.append((yy, xx))
+                        yield comp
+        for comp in components(solid):
+            if len(comp) <= 4 and all(0 < y < ty - 1 and 0 < x < tx - 1 for y, x in comp):
+                for y, x in comp:
+                    kinds[y, x] = "pillar"
+        for comp in components(~solid & (roles != "water")):
+            if len(comp) <= 2 and all(0 < y < ty - 1 and 0 < x < tx - 1 for y, x in comp):
+                for y, x in comp:
+                    kinds[y, x] = "wall"
+        for y in range(ty):
+            for x in range(tx):
+                c = [i for i, n in enumerate(names) if n == kinds[y, x]]
+                ids[y, x] = c[int(rng.integers(0, len(c)))]
+    elif auto:
         names = nm["names"]
         plain = lambda kind: [i for i, n in enumerate(names) if n == kind]
         patch = rng.random((ty // 4 + 3, tx // 4 + 3))                    # dirt patches on the open ground: a slow noise, upsampled
