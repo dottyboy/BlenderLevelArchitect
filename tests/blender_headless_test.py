@@ -5942,6 +5942,58 @@ check("World: the export writes a glb per chunk and a gla-world/1 manifest", bpy
       and json.load(open(_wm))["format"] == "gla-world/1" and len(json.load(open(_wm))["chunks"]) == 4
       and all(os.path.exists(os.path.join(bpy.app.tempdir, c_["glb"])) for c_ in json.load(open(_wm))["chunks"]))
 
+# --- World generator (M0): maps first, then monuments and roads
+print("\n--- World generator ---")
+import numpy as _np3
+wgw = addon.generate_world(1600.0, 8.0, 5)
+wgw2 = addon.generate_world(1600.0, 8.0, 5)
+wgw3 = addon.generate_world(1600.0, 8.0, 6)
+check("World gen: the same seed gives the same world, another seed a different one", _np3.array_equal(wgw["height"], wgw2["height"]) and wgw["monuments"] == wgw2["monuments"]
+      and not _np3.array_equal(wgw["height"], wgw3["height"]))
+_hh = wgw["height"]
+check("World gen: an island - the middle is land, the border is sea", _hh[_hh.shape[0] // 2, _hh.shape[1] // 2] > 3.0 and (_hh[0, :] <= 0).all() and (_hh[:, 0] <= 0).all() and 0.15 < (_hh > 0).mean() < 0.75,
+      "land %.2f" % (_hh > 0).mean())
+hy = addon.wg_hydrology(_hh, 8.0, 0.03)
+_rng_ids = _np3.nonzero(hy["river"].ravel())[0][:: max(1, int(hy["river"].sum() // 25))]
+_ok_rivers = len(_rng_ids) > 0
+for _i in _rng_ids.tolist():
+    _c, _steps = _i, 0
+    while hy["down"].ravel()[_c] >= 0 and _steps < _hh.size:
+        _c = int(hy["down"].ravel()[_c]); _steps += 1
+    _ok_rivers = _ok_rivers and _hh.ravel()[_c] <= 0.0 and _steps < _hh.size
+check("World gen: every sampled river flows down to the sea", _ok_rivers, str(len(_rng_ids)))
+_specs = {s_["kind"]: s_ for s_ in addon.WG_MONUMENTS}
+_okm = len(wgw["monuments"]) >= 3
+for _p in wgw["monuments"]:
+    _s = _specs[_p["kind"]]
+    _okm = _okm and _p["biome"] in [addon.WG_BIOMES[b_] for b_ in _s["biomes"]]
+check("World gen: monuments stand in a biome their rule allows", _okm, str([(p_["kind"], p_["biome"]) for p_ in wgw["monuments"]][:8]))
+check("World gen: monuments keep their distance (radii plus margin)", all(
+    ((a_["x"] - b_["x"]) ** 2 + (a_["y"] - b_["y"]) ** 2) ** 0.5 >= a_["radius"] + b_["radius"] + 24.9
+    for i_, a_ in enumerate(wgw["monuments"]) for b_ in wgw["monuments"][i_ + 1:]))
+_n3 = _hh.shape[0]; _c3 = (_n3 - 1) / 2.0
+check("World gen: the ground under a monument is levelled to its pad height", all(
+    abs(float(wgw["height"][int(round(p_["y"] / 8.0 + _c3)), int(round(p_["x"] / 8.0 + _c3))]) - p_["pad"]) < 0.6 for p_ in wgw["monuments"]))
+_par = {p_["id"]: p_["id"] for p_ in wgw["monuments"]}
+def _find(a_):
+    while _par[a_] != a_:
+        a_ = _par[a_]
+    return a_
+for _r in wgw["roads"]:
+    _par[_find(_r["from"])] = _find(_r["to"])
+check("World gen: the roads join all monuments into one network", len({_find(p_["id"]) for p_ in wgw["monuments"]}) == 1 and len(wgw["roads"]) >= len(wgw["monuments"]) - 1)
+check("World gen: roads stay on land (bridges only over rivers)", all(q_[2] > 0.0 for r_ in wgw["roads"] for q_ in r_["points"]))
+_man = addon.world_manifest(wgw)
+check("World gen: the manifest is JSON and lists every monument and road", json.loads(json.dumps(_man))["format"] == "gla-worldgen/1" and len(_man["monuments"]) == len(wgw["monuments"]) and len(_man["roads"]) == len(wgw["roads"]))
+_wd = os.path.join(bpy.app.tempdir, "wg_out")
+_files = addon.world_write(wgw, _wd)
+check("World gen: the maps and the manifest are written (16-bit height, biome colours, overview)", all(os.path.getsize(os.path.join(_wd, f_)) > 100 for f_ in _files) and len(_files) == 4)
+try:
+    addon.generate_world(100.0, 4.0, 1)
+    check("World gen: a too small world is refused", False)
+except addon.PlanError:
+    check("World gen: a too small world is refused", True)
+
 # ==============================================================================
 print()
 if failures:

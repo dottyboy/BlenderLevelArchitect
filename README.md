@@ -141,6 +141,13 @@ meadow, forest, desert, tundra, mountains, island — bring their own palette, r
 
 <p align="center"><img src="docs/img/biomes_sheet.png" alt="The same hamlet, farm and watchtower in the meadow, forest, desert, tundra, mountains and island biomes" width="900"></p>
 
+### A world generator
+
+<p align="center"><img src="docs/img/worldgen_overview.png" alt="A generated 2 km island seen from above: biomes from tundra in the north to desert in the south, rivers running to the sea, a crater lake, roads (brown) joining the monuments (dark squares)" width="720"></p>
+
+`generate_world(size, res, seed)` makes a whole island as **maps and data** in a couple of seconds: height, **rivers by flow** (from the high ground down to the sea), lakes, biomes by latitude and altitude, **monuments** — the add-on's towns, castles, fortresses, farms, hamlets, huts, towers and rock cities placed by rules (biome, slope, height, distance to water, spacing) on levelled ground — and **roads** between them (a spanning tree plus a ring road, cheapest over gentle ground, bridges over rivers).
+`tools/generate_world.py` writes `world.json`, a 16-bit height map, a biome map and the overview above. It is the first stage of a game framework (see the *World Runtime* Godot project).
+
 ### Big worlds
 
 <p align="center"><img src="docs/img/world_chunks.png" alt="A mountain world of 4 x 3 terrain chunks, 640 by 480 metres, snow on the ridges and lakes in the valleys, no seams between the chunks" width="900"></p>

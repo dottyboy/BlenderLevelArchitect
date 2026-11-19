@@ -17643,6 +17643,442 @@ def world_chunk_groups(scene, plan_id):
     return groups
 
 
+# ==============================================================================
+# World generator (M0): an island world made as maps first -- height, biome, rivers by flow, lakes -- then monuments placed by rules and roads between them.
+# numpy only, no Blender calls, so it is deterministic and testable; `generate_world` returns a dict that the chunk builder, the map exporter and the manifest use.
+# ==============================================================================
+WG_BIOMES = ("ocean", "beach", "meadow", "forest", "desert", "tundra", "snow", "mountain")
+WG_OCEAN, WG_BEACH, WG_MEADOW, WG_FOREST, WG_DESERT, WG_TUNDRA, WG_SNOW, WG_MOUNTAIN = range(8)
+# monuments: the plans of the add-on as places in the world. count is for a 2 km world (scaled by area); radius = the footprint reserved;
+# biomes = allowed biome ids; slope = the largest allowed slope (rise/run) over the footprint; height = allowed ground height (m); water = (min, max) distance to a river, lake or the sea in metres.
+WG_MONUMENTS = (
+    dict(kind="town", plan="TOWN", count=1, radius=70.0, biomes=(WG_MEADOW, WG_FOREST), slope=0.10, height=(3.0, 45.0), water=(20.0, 900.0)),
+    dict(kind="castle", plan="CASTLE", count=2, radius=45.0, biomes=(WG_MEADOW, WG_FOREST, WG_TUNDRA), slope=0.16, height=(25.0, 75.0), water=(0.0, 9999.0)),
+    dict(kind="fortress", plan="FORTRESS", count=2, radius=50.0, biomes=(WG_MEADOW, WG_FOREST, WG_DESERT, WG_TUNDRA), slope=0.14, height=(8.0, 70.0), water=(0.0, 9999.0)),
+    dict(kind="rock_city", plan="ROCK", count=1, radius=65.0, biomes=(WG_MOUNTAIN, WG_FOREST, WG_TUNDRA), slope=0.55, height=(45.0, 120.0), water=(0.0, 9999.0), min_slope=0.18),
+    dict(kind="mansion", plan="MANSION", count=1, radius=55.0, biomes=(WG_MEADOW, WG_FOREST), slope=0.10, height=(2.5, 30.0), water=(0.0, 300.0)),
+    dict(kind="hamlet", plan="HAMLET", count=4, radius=38.0, biomes=(WG_MEADOW, WG_FOREST, WG_TUNDRA), slope=0.12, height=(2.5, 50.0), water=(0.0, 9999.0)),
+    dict(kind="farm", plan="FARM", count=5, radius=32.0, biomes=(WG_MEADOW, WG_FOREST), slope=0.10, height=(2.5, 40.0), water=(0.0, 600.0)),
+    dict(kind="huts", plan="HUTS", count=4, radius=26.0, biomes=(WG_FOREST, WG_TUNDRA, WG_DESERT, WG_BEACH), slope=0.14, height=(1.5, 60.0), water=(0.0, 9999.0)),
+    dict(kind="tower", plan="TOWER", count=4, radius=14.0, biomes=(WG_MEADOW, WG_FOREST, WG_DESERT, WG_TUNDRA, WG_MOUNTAIN), slope=0.2, height=(10.0, 100.0), water=(0.0, 9999.0)),
+)
+
+
+def _wg_noise(n, cells, seed):
+    """Smooth value noise on an n x n grid (0..1): a random lattice of `cells` x `cells` interpolated with smoothstep."""
+    import numpy as np
+    r = np.random.default_rng(seed)
+    g = r.random((cells + 2, cells + 2))
+    ts = np.linspace(0, cells, n, endpoint=False)
+    i0 = ts.astype(int)
+    f = ts - i0
+    f = f * f * (3 - 2 * f)
+    fy, fx = f[:, None], f[None, :]
+    top = g[i0][:, i0] * (1 - fx) + g[i0][:, i0 + 1] * fx
+    bot = g[i0 + 1][:, i0] * (1 - fx) + g[i0 + 1][:, i0 + 1] * fx
+    return top * (1 - fy) + bot * fy
+
+
+def _wg_fbm(n, base_cells, seed, octaves=5, persistence=0.5):
+    import numpy as np
+    total, amp, norm = np.zeros((n, n)), 1.0, 0.0
+    for o in range(octaves):
+        total += _wg_noise(n, max(2, int(base_cells * 2 ** o)), seed + 101 * o) * amp
+        norm += amp
+        amp *= persistence
+    return total / norm
+
+
+def _wg_blur(a, rounds=1):
+    import numpy as np
+    for _ in range(rounds):
+        a = (a + np.roll(a, 1, 0) + np.roll(a, -1, 0) + np.roll(a, 1, 1) + np.roll(a, -1, 1)) / 5.0
+    return a
+
+
+def wg_height(size, res, seed):
+    """The ground of an island of `size` metres (n x n heights, sea level 0): a radial mask with a ragged coast, rolling base noise and ridged mountains inland."""
+    import numpy as np
+    n = int(round(size / res)) + 1
+    yy, xx = np.mgrid[0:n, 0:n].astype(float)
+    cx = (n - 1) / 2.0
+    r = np.hypot(xx - cx, yy - cx) / cx                                   # 0 at the middle, 1 at the middle of an edge
+    coast = _wg_fbm(n, 3, seed + 5, 4)
+    m = np.clip((0.97 - r + 0.34 * (coast - 0.5)) / 0.32, 0.0, 1.0)       # 1 inland, 0 out at sea
+    m = m * m * (3 - 2 * m)
+    base = _wg_fbm(n, 4, seed + 11, 5)
+    ridge = 1.0 - np.abs(2.0 * _wg_fbm(n, 5, seed + 23, 5) - 1.0)
+    ridge = ridge ** 2.2
+    inland = np.clip((m - 0.35) / 0.65, 0.0, 1.0)
+    dome = np.clip(1.0 - r, 0.0, 1.0) ** 1.1                                   # the island rises towards its middle, so every valley drains to the sea
+    h = m * (3.0 + 28.0 * dome + 7.0 * base) + inland ** 1.3 * ridge * 58.0 * (0.25 + base * 0.8) * (0.3 + dome) - (1.0 - m) * 40.0
+    return h
+
+
+def wg_slope(h, res):
+    import numpy as np
+    gy, gx = np.gradient(h, res)
+    return np.hypot(gx, gy)
+
+
+def _wg_distance(mask, res):
+    """Distance in metres from every cell to the nearest True cell of `mask` (two-pass chamfer transform)."""
+    import numpy as np
+    n, m = mask.shape
+    inf = 1e9
+    d = np.where(mask, 0.0, inf)
+    diag = res * 1.41421356
+    for y in range(n):
+        row = d[y]
+        if y > 0:
+            row = np.minimum(row, d[y - 1] + res)
+            row = np.minimum(row, np.concatenate([[inf], d[y - 1][:-1]]) + diag)
+            row = np.minimum(row, np.concatenate([d[y - 1][1:], [inf]]) + diag)
+        for x in range(1, m):
+            if row[x - 1] + res < row[x]:
+                row[x] = row[x - 1] + res
+        d[y] = row
+    for y in range(n - 1, -1, -1):
+        row = d[y]
+        if y < n - 1:
+            row = np.minimum(row, d[y + 1] + res)
+            row = np.minimum(row, np.concatenate([[inf], d[y + 1][:-1]]) + diag)
+            row = np.minimum(row, np.concatenate([d[y + 1][1:], [inf]]) + diag)
+        for x in range(m - 2, -1, -1):
+            if row[x + 1] + res < row[x]:
+                row[x] = row[x + 1] + res
+        d[y] = row
+    return d
+
+
+def wg_hydrology(h, res, area_km2=0.05):
+    """Rivers by flow: the land is filled so water can leave it (priority flood, an epsilon slope across flats), every cell drains to its steepest neighbour, flow
+    accumulates from the high cells down, and cells that collect more than `area_km2` of drainage are rivers. Lakes are the depressions the fill had to raise.
+    Returns dict(acc, river (bool), lake (bool), fill (the filled surface), down (flat index each cell drains to, -1 at the sea))."""
+    import heapq
+    import numpy as np
+    n = h.shape[0]
+    flat = h.ravel()
+    sea = flat <= 0.0
+    fill = np.where(sea, flat, 1e9)
+    heap = [(float(flat[i]), i) for i in np.nonzero(sea)[0].tolist()]
+    heapq.heapify(heap)
+    done = sea.copy()
+    nbrs = ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1))
+    eps = 1e-3
+    while heap:
+        z, i = heapq.heappop(heap)
+        y, x = divmod(i, n)
+        for dy, dx in nbrs:
+            yy, xx = y + dy, x + dx
+            if 0 <= yy < n and 0 <= xx < n:
+                j = yy * n + xx
+                if not done[j]:
+                    done[j] = True
+                    fill[j] = max(float(flat[j]), z + eps)
+                    heapq.heappush(heap, (fill[j], j))
+    F = fill.reshape(n, n)
+    best = np.zeros((n, n))
+    down = np.full((n, n), -1, dtype=np.int64)
+    idx = np.arange(n * n).reshape(n, n)
+    for dy, dx in nbrs:
+        dist = res * (1.41421356 if dy and dx else 1.0)
+        sh = np.full((n, n), 1e9)
+        sh_idx = np.full((n, n), -1, dtype=np.int64)
+        ys, ye = max(dy, 0), n + min(dy, 0)
+        xs, xe = max(dx, 0), n + min(dx, 0)
+        sh[ys - dy:ye - dy, xs - dx:xe - dx] = F[ys:ye, xs:xe]
+        sh_idx[ys - dy:ye - dy, xs - dx:xe - dx] = idx[ys:ye, xs:xe]
+        drop = (F - sh) / dist
+        better = drop > best
+        best = np.where(better, drop, best)
+        down = np.where(better, sh_idx, down)
+    down[F <= 0.0] = -1
+    order = np.argsort(-fill)
+    acc = np.ones(n * n)
+    dn = down.ravel()
+    for i in order.tolist():
+        j = dn[i]
+        if j >= 0:
+            acc[j] += acc[i]
+    acc = acc.reshape(n, n)
+    thr = area_km2 * 1e6 / (res * res)
+    land = h > 0.0
+    river = (acc >= thr) & land
+    lake = (F - h > 3.0) & land
+    return dict(acc=acc, river=river, lake=lake, fill=F, down=down)
+
+
+def wg_biomes(h, slope, res, seed, water_dist):
+    """Biome ids: cold toward the north (+y) and with altitude, dry in the south; beaches along the coast, bare rock on steep ground."""
+    import numpy as np
+    n = h.shape[0]
+    v = np.linspace(-1.0, 1.0, n)[:, None] * np.ones((1, n))                   # row index grows to the north
+    temp = 0.5 - 0.42 * v + 0.18 * (_wg_fbm(n, 3, seed + 41, 3) - 0.5) - 0.40 * np.clip((h - 35.0) / 90.0, 0.0, 1.0)
+    moist = _wg_fbm(n, 4, seed + 53, 4) + 0.22 * np.exp(-water_dist / 200.0) - 0.45 * np.clip(temp - 0.55, 0.0, 1.0)
+    b = np.full(h.shape, WG_MEADOW, dtype=np.int8)
+    b[(moist > 0.66) & (temp > 0.28)] = WG_FOREST
+    b[(temp > 0.62) & (moist < 0.52)] = WG_DESERT
+    b[temp < 0.30] = WG_TUNDRA
+    b[(temp < 0.15) | (h > 100.0)] = WG_SNOW
+    b[(slope > 0.62) & (h > 25.0)] = WG_MOUNTAIN
+    b[(h <= 2.2) & (h > 0.0)] = WG_BEACH
+    b[h <= 0.0] = WG_OCEAN
+    return b
+
+
+def _wg_flatten(h, res, x, y, radius, pad_h):
+    """Smoothly levels the ground round (x, y) metres to pad_h: fully inside 0.6 radius, blending out to 1.6 radius."""
+    import numpy as np
+    n = h.shape[0]
+    cx = (n - 1) / 2.0
+    gx, gy = x / res + cx, y / res + cx
+    r_cells = radius * 1.7 / res
+    y0, y1 = int(max(0, gy - r_cells)), int(min(n, gy + r_cells + 2))
+    x0, x1 = int(max(0, gx - r_cells)), int(min(n, gx + r_cells + 2))
+    yy, xx = np.mgrid[y0:y1, x0:x1].astype(float)
+    d = np.hypot(xx - gx, yy - gy) * res
+    t = np.clip((d - radius * 0.6) / (radius), 0.0, 1.0)
+    w = 1.0 - t * t * (3 - 2 * t)
+    h[y0:y1, x0:x1] = h[y0:y1, x0:x1] * (1 - w) + pad_h * w
+
+
+def wg_place_monuments(h, slope, biome, hydro, water_dist, res, seed, monuments=WG_MONUMENTS):
+    """Monuments by rejection sampling: for each kind (the important ones first) random cells are tried until `count` (scaled by area) fit: allowed biome, ground height,
+    distance to water, a slope that stays under the limit over the whole footprint, and clear of the monuments already placed (their radii plus a margin).
+    Returns a list of dicts (kind, plan, id, x, y, z, radius, biome) -- x, y in metres from the middle of the world."""
+    import numpy as np
+    n = h.shape[0]
+    cx = (n - 1) / 2.0
+    rng = np.random.default_rng(seed + 997)
+    size = (n - 1) * res
+    scale = (size / 2000.0) ** 2
+    water = hydro["river"] | hydro["lake"]
+    placed = []
+    max_slope_at = np.zeros_like(slope)                                      # the steepest slope in a 3 x 3 neighbourhood, to be safe at the footprint's edge
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            max_slope_at = np.maximum(max_slope_at, np.roll(np.roll(slope, dy, 0), dx, 1))
+    counts = {}
+    for spec in monuments:
+        want = max(1, int(round(spec["count"] * scale))) if spec["count"] > 0 else 0
+        got, tries = 0, 0
+        while got < want and tries < 4000:
+            tries += 1
+            gx, gy = int(rng.integers(8, n - 8)), int(rng.integers(8, n - 8))
+            if int(biome[gy, gx]) not in spec["biomes"]:
+                continue
+            z = float(h[gy, gx])
+            if not spec["height"][0] <= z <= spec["height"][1]:
+                continue
+            wd = float(water_dist[gy, gx])
+            if not spec["water"][0] <= wd <= spec["water"][1]:
+                continue
+            r_c = int(spec["radius"] / res) + 1
+            y0, y1, x0, x1 = max(0, gy - r_c), min(n, gy + r_c + 1), max(0, gx - r_c), min(n, gx + r_c + 1)
+            win = max_slope_at[y0:y1, x0:x1]
+            if float(win.max()) > spec["slope"] * 1.8 or float(win.mean()) < spec.get("min_slope", 0.0) or bool(water[y0:y1, x0:x1].any()) or float(h[y0:y1, x0:x1].min()) <= 0.8:
+                continue
+            x_m, y_m = (gx - cx) * res, (gy - cx) * res
+            if any(math.hypot(x_m - p["x"], y_m - p["y"]) < spec["radius"] + p["radius"] + 25.0 for p in placed):
+                continue
+            counts[spec["kind"]] = counts.get(spec["kind"], 0) + 1
+            placed.append(dict(kind=spec["kind"], plan=spec["plan"], id="%s_%d" % (spec["kind"], counts[spec["kind"]]), x=x_m, y=y_m, z=z, radius=spec["radius"], biome=WG_BIOMES[int(biome[gy, gx])]))
+            got += 1
+    return placed
+
+
+def wg_roads(h, slope, hydro, res, monuments, seed, ring=True):
+    """Roads between monuments: a minimum spanning tree plus a ring road round the world, each edge an A* path on a coarser grid. The cost grows with slope, the sea
+    and lakes cannot be crossed, a river costs extra and is crossed by a bridge, and cells already on a road are cheap, so roads share their way.
+    Returns [{from, to, points: [[x, y, z]], bridges: [[x, y, z]]}]."""
+    import heapq
+    import numpy as np
+    if len(monuments) < 2:
+        return []
+    n = h.shape[0]
+    cx = (n - 1) / 2.0
+    k = 2                                                                  # path grid: every k-th cell
+    m = (n - 1) // k + 1
+    hs, ss = h[::k, ::k][:m, :m], slope[::k, ::k][:m, :m]
+    river = hydro["river"][::k, ::k][:m, :m]
+    block = (hs <= 0.5) | hydro["lake"][::k, ::k][:m, :m]
+    cost = 1.0 + 60.0 * ss * ss + np.where(river, 25.0, 0.0)
+    used = np.zeros((m, m), dtype=bool)
+    to_cell = lambda x, y: (int(round((y / res + cx) / k)), int(round((x / res + cx) / k)))
+    pts = [(p["x"], p["y"]) for p in monuments]
+    # minimum spanning tree (Prim) by straight distance, then the ring: monuments sorted by angle round the middle, consecutive ones joined
+    edges = set()
+    in_tree = {0}
+    while len(in_tree) < len(pts):
+        best = min(((math.hypot(pts[a][0] - pts[b][0], pts[a][1] - pts[b][1]), a, b) for a in in_tree for b in range(len(pts)) if b not in in_tree))
+        edges.add((min(best[1], best[2]), max(best[1], best[2])))
+        in_tree.add(best[2])
+    if ring and len(pts) >= 4:
+        order = sorted(range(len(pts)), key=lambda i: math.atan2(pts[i][1], pts[i][0]))
+        for a, b in zip(order, order[1:] + order[:1]):
+            edges.add((min(a, b), max(a, b)))
+    roads = []
+    nbrs = ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1))
+    for a, b in sorted(edges):
+        sy, sx = to_cell(*pts[a])
+        gy, gx = to_cell(*pts[b])
+        sy, sx, gy, gx = (min(max(v, 0), m - 1) for v in (sy, sx, gy, gx))
+        openset = [(0.0, 0.0, sy, sx)]
+        gcost = {(sy, sx): 0.0}
+        prev = {}
+        found = False
+        while openset:
+            _f, g, y, x = heapq.heappop(openset)
+            if (y, x) == (gy, gx):
+                found = True
+                break
+            if g > gcost.get((y, x), 1e18) + 1e-9:
+                continue
+            for dy, dx in nbrs:
+                yy, xx = y + dy, x + dx
+                if 0 <= yy < m and 0 <= xx < m and not block[yy, xx]:
+                    step = 1.41421356 if dy and dx else 1.0
+                    c = g + step * float(cost[yy, xx]) * (0.35 if used[yy, xx] else 1.0)
+                    if c < gcost.get((yy, xx), 1e18):
+                        gcost[(yy, xx)] = c
+                        prev[(yy, xx)] = (y, x)
+                        heapq.heappush(openset, (c + math.hypot(gy - yy, gx - xx), c, yy, xx))
+        if not found:
+            continue
+        path, cur = [], (gy, gx)
+        while cur != (sy, sx):
+            path.append(cur)
+            cur = prev[cur]
+        path.append((sy, sx))
+        path.reverse()
+        for (y, x) in path:
+            used[y, x] = True
+        xy = [((x * k - cx) * res, (y * k - cx) * res) for (y, x) in path]
+        xy = [(q[0], q[1]) for q in _chaikin(xy, 2)] if len(xy) > 2 else xy
+        def height_at(x_, y_):
+            gi, gj = min(max(int(round(y_ / res + cx)), 0), n - 1), min(max(int(round(x_ / res + cx)), 0), n - 1)
+            return float(h[gi, gj])
+        bridges = []
+        for (y, x) in path:
+            if river[y, x]:
+                bx, by = (x * k - cx) * res, (y * k - cx) * res
+                if not bridges or math.hypot(bx - bridges[-1][0], by - bridges[-1][1]) > 30.0:
+                    bridges.append([bx, by, height_at(bx, by)])
+        roads.append(dict(**{"from": monuments[a]["id"], "to": monuments[b]["id"]}, points=[[px, py, height_at(px, py)] for px, py in xy], bridges=bridges))
+    return roads
+
+
+def generate_world(size=2000.0, res=4.0, seed=1, monuments=True, roads=True, area_km2=0.05):
+    """A whole island as data. size in metres (a square), res = metres per map cell. Returns dict(size, res, seed, height, slope, biome, river, lake, acc, water_dist,
+    monuments, roads). Deterministic for a seed. The ground under every monument is levelled (`pad` height stored on it)."""
+    import numpy as np
+    if not 400.0 <= size <= 8000.0 or not 1.0 <= res <= 16.0:
+        raise PlanError("world size must be 400..8000 m and res 1..16 m")
+    h = wg_height(size, res, seed)
+    hydro = wg_hydrology(h, res, area_km2)
+    h = h - np.where(hydro["river"], np.minimum(5.0, 1.2 + 0.9 * np.log10(np.maximum(hydro["acc"], 1.0))), 0.0)      # rivers cut their bed
+    h = _wg_blur(h, 1) * 0.5 + h * 0.5
+    slope = wg_slope(h, res)
+    water_dist = _wg_distance((h <= 0.0) | hydro["river"] | hydro["lake"], res)
+    biome = wg_biomes(h, slope, res, seed, water_dist)
+    mons = wg_place_monuments(h, slope, biome, hydro, water_dist, res, seed) if monuments else []
+    for p in mons:
+        n = h.shape[0]
+        cx = (n - 1) / 2.0
+        gi, gj = int(round(p["y"] / res + cx)), int(round(p["x"] / res + cx))
+        r_c = max(1, int(p["radius"] * 0.6 / res))
+        p["pad"] = float(np.median(h[max(0, gi - r_c):gi + r_c + 1, max(0, gj - r_c):gj + r_c + 1]))
+        _wg_flatten(h, res, p["x"], p["y"], p["radius"], p["pad"])
+        p["z"] = p["pad"]
+    slope = wg_slope(h, res)
+    road_list = wg_roads(h, slope, hydro, res, mons, seed) if roads else []
+    return dict(size=float(size), res=float(res), seed=int(seed), height=h, slope=slope, biome=biome, river=hydro["river"], lake=hydro["lake"], acc=hydro["acc"],
+                water_dist=water_dist, monuments=mons, roads=road_list)
+
+
+def _png_gray16(path, a):
+    """Writes a 2D uint16 array as a 16-bit greyscale PNG (no libraries)."""
+    import struct
+    import zlib
+    import numpy as np
+    a = np.ascontiguousarray(a.astype(">u2"))
+    raw = b"".join(b"\x00" + row.tobytes() for row in a)
+
+    def chunk(t, d):
+        c = struct.pack(">I", len(d)) + t + d
+        return c + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+    with open(path, "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", a.shape[1], a.shape[0], 16, 0, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
+
+
+def _png_rgb8(path, a):
+    import struct
+    import zlib
+    import numpy as np
+    a = np.ascontiguousarray(a.astype(np.uint8))
+    raw = b"".join(b"\x00" + row.tobytes() for row in a)
+
+    def chunk(t, d):
+        c = struct.pack(">I", len(d)) + t + d
+        return c + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+    with open(path, "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", a.shape[1], a.shape[0], 8, 2, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
+
+
+def world_write(w, folder, overview_scale=2):
+    """Writes a generated world to a folder: world.json (the manifest), height16.png (16-bit, metres = value / 65535 * 250 - 50), biome.png (biome colours, north up) and
+    overview.png. Returns the list of files."""
+    import numpy as np
+    os.makedirs(folder, exist_ok=True)
+    man = world_manifest(w)
+    man["height_encoding"] = {"file": "height16.png", "offset": -50.0, "range": 250.0, "north_up": True}
+    with open(os.path.join(folder, "world.json"), "w", encoding="utf-8") as fh:
+        json.dump(man, fh, indent=1)
+    h16 = np.clip((w["height"] + 50.0) / 250.0, 0.0, 1.0) * 65535.0
+    _png_gray16(os.path.join(folder, "height16.png"), h16[::-1])
+    pal = np.array(WG_BIOME_COLORS)
+    _png_rgb8(os.path.join(folder, "biome.png"), (pal[w["biome"]][::-1] * 255.0))
+    _png_rgb8(os.path.join(folder, "overview.png"), world_overview(w, overview_scale))
+    return ["world.json", "height16.png", "biome.png", "overview.png"]
+
+
+def world_manifest(w):
+    """The JSON description of a generated world (gla-worldgen/1): everything except the big arrays."""
+    return {"format": "gla-worldgen/1", "generator": "Game Level Architect " + ".".join(str(v) for v in bl_info["version"]), "size": w["size"], "res": w["res"],
+            "seed": w["seed"], "sea_level": 0.0, "coordinates": "x east, y north, z up, metres from the middle of the world", "biomes": list(WG_BIOMES),
+            "monuments": [{k: (round(v, 3) if isinstance(v, float) else v) for k, v in p.items()} for p in w["monuments"]],
+            "roads": [{"from": r["from"], "to": r["to"], "points": [[round(v, 2) for v in q] for q in r["points"]], "bridges": [[round(v, 2) for v in q] for q in r["bridges"]]} for r in w["roads"]]}
+
+
+WG_BIOME_COLORS = ((0.10, 0.25, 0.55), (0.88, 0.82, 0.55), (0.35, 0.58, 0.22), (0.14, 0.38, 0.16), (0.82, 0.66, 0.38), (0.55, 0.58, 0.50), (0.95, 0.97, 1.0), (0.45, 0.42, 0.40))
+
+
+def world_overview(w, upscale=1):
+    """A top-down picture of the world: shaded relief in biome colours, rivers and lakes blue, roads brown, monuments as dark squares. RGB uint8, north up."""
+    import numpy as np
+    h, b = w["height"], w["biome"]
+    n = h.shape[0]
+    pal = np.array(WG_BIOME_COLORS)
+    img = pal[b]
+    gy, gx = np.gradient(h, w["res"])
+    shade = np.clip(0.75 + 1.8 * (-gx * 0.7 + gy * 0.7), 0.45, 1.25)
+    img = img * shade[..., None]
+    img[w["river"] | w["lake"]] = (0.15, 0.35, 0.75)
+    cx = (n - 1) / 2.0
+    for r in w["roads"]:
+        for (x, y, _z) in r["points"]:
+            i, j = int(round(y / w["res"] + cx)), int(round(x / w["res"] + cx))
+            if 0 <= i < n and 0 <= j < n:
+                img[i, j] = (0.55, 0.32, 0.12)
+    for p in w["monuments"]:
+        i, j = int(round(p["y"] / w["res"] + cx)), int(round(p["x"] / w["res"] + cx))
+        s = max(2, int(p["radius"] / w["res"] * 0.35))
+        img[max(0, i - s):i + s + 1, max(0, j - s):j + s + 1] = (0.08, 0.06, 0.08)
+    img = np.clip(img[::-1] * 255.0, 0, 255).astype(np.uint8)                   # flip: row 0 of the array is the southern edge
+    return np.kron(img, np.ones((upscale, upscale, 1), dtype=np.uint8)) if upscale > 1 else img
+
+
 def plan_from_tilemap_picture(path, plan_id="tilemap", tile=16, tile_m=1.0, **extra):
     """A plan tree (one `tilemap` building) from a picture of a tile map."""
     return plan_node(plan_id, "building", "tilemap", transform={"x": 0.0, "y": 0.0, "z": 0.0, "rot": 0.0},
