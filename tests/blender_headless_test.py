@@ -5675,6 +5675,10 @@ check("House picture: the walls are read (thick strokes only), the furniture out
 check("House picture: the window gap in the north wall is found as a window, the swing arc as a door",
       any(w[4] == "window" and w[3] > 2.5 for w in fpd["windows"]) and len(fpd["doors"]) == 1, str(fpd["windows"]) + str(fpd["doors"]))
 check("House picture: the lowest opening is the front entrance and stays open", fpd["entrance"] is not None and fpd["entrance"][1] < -2.5, str(fpd["entrance"]))
+fpd2_img = _fp_drawing(); fpd2_img[480:572, 595:606] = 255.0                                                    # a second doorway in the inner wall, with no swing arc drawn
+fpd2 = addon.floorplan_trace(fpd2_img, width=10.22)
+check("House picture: a door-width doorway between two rooms without a drawn arc gets a guessed door (and is counted)", len(fpd2["doors"]) == 2 and fpd2["door_guesses"] == 1, str((len(fpd2["doors"]), fpd2.get("door_guesses"))))
+check("House picture: the drawn arc is still a recognised door, not a guess", fpd["door_guesses"] == 0 and len(fpd["doors"]) == 1, str(fpd.get("door_guesses")))
 fp_node = addon.plan_node("fp_test", "building", "floor_plan", params={"floors": [fpd, fpd], "heights": [2.7, 2.6], "stairs": [{"floor": 0, "x": -3.5, "y": 2.4, "dir": "-y", "width": 1.0}]})
 fp_made = addon.plan_build(bpy.context, fp_node)
 fp_obj = [o for o in bpy.data.objects if o.type == "MESH" and o.data.name.startswith("FloorPlan_fp_test")]

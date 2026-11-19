@@ -16612,7 +16612,7 @@ def _fp_gaps(W, minrun, lmin, lmax, minthick, strict=True):
 def floorplan_trace(rgb, mpp=None, width=12.0, dark=110):
     """Reads an architect's floor plan from an RGB / grey image array (rows top to bottom, 0..255).
     Walls are the thick dark strokes (thin lines — furniture, text — are ignored); a window is a gap in an outside wall, a door is a drawn swing arc
-    (a quarter circle with its leaf; a door whose arc is not found is just an open doorway), the opening lowest in the picture is the front entrance.
+    (a quarter circle with its leaf; a door-width gap between two rooms whose arc is not found gets a guessed door, hinged at its start end), the opening lowest in the picture is the front entrance.
     `mpp` = metres per pixel, or `width` = the width in metres of the whole drawing (walls only). Returns a floor dict:
     walls [[x0, y0, x1, y1]], windows [[x0, y0, x1, y1, kind]] (kind window / wide / garage), doors [[x0, y0, x1, y1, hinge_x, hinge_y]],
     slab [[x0, y0, x1, y1]] (the floor area, walls included), entrance (index into doors or None), size [width, depth]. Metres, y up, origin in the middle."""
@@ -16709,6 +16709,7 @@ def floorplan_trace(rgb, mpp=None, width=12.0, dark=110):
         return bool(out[y, x])
     d = int(px(0.3)) + 3
     windows_px, used = [], []
+    guessed = 0
     for x0, y0, x1, y1, ax in gaps:
         cx, cy = (x0 + x1) // 2, (y0 + y1) // 2
         if any(abs(cx - (u[0] + u[2]) / 2) < (u[2] - u[0]) / 2 + 4 and abs(cy - (u[1] + u[3]) / 2) < (u[3] - u[1]) / 2 + 4 for u in used):
@@ -16718,6 +16719,11 @@ def floorplan_trace(rgb, mpp=None, width=12.0, dark=110):
         a_out = is_out(cx, y0 - d) if ax == "h" else is_out(x0 - d, cy)
         b_out = is_out(cx, y1 + d) if ax == "h" else is_out(x1 + d, cy)
         if a_out == b_out:
+            gap_m = (x1 - x0 if ax == "h" else y1 - y0) * mpp
+            if not a_out and 0.7 <= gap_m <= 1.4:     # a doorway of door width between two rooms whose swing arc was not found: hang a door in it (hinge at the start end)
+                doors_px.append((x0, y0, x1, y1, x0 if ax == "h" else (x0 + x1) // 2, (y0 + y1) // 2 if ax == "h" else y0, ax))
+                used.append((x0, y0, x1, y1))
+                guessed += 1
             continue
         used.append((x0, y0, x1, y1))
         L = (x1 - x0 if ax == "h" else y1 - y0) * mpp
@@ -16747,7 +16753,7 @@ def floorplan_trace(rgb, mpp=None, width=12.0, dark=110):
     doors = [rect_m(dd[:4]) + [X(dd[4]), Y(dd[5])] for dd in doors_px]
     entrance = [X(entrance[0]), Y(entrance[1])] if entrance else None
     return dict(walls=walls, windows=windows, doors=doors, slab=slab, entrance=entrance,
-                size=[round((x_hi - x_lo) * mpp, 2), round((y_hi - y_lo) * mpp, 2)], mpp=round(mpp, 5))
+                size=[round((x_hi - x_lo) * mpp, 2), round((y_hi - y_lo) * mpp, 2)], mpp=round(mpp, 5), door_guesses=guessed)
 
 
 def _fp_floors(p):

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **House from a picture: guessed doors**: a door-width gap (0.7-1.4 m) between two rooms whose swing arc is not found (the arc touches other lines) now gets a door hung in it, hinged at its start end, instead of staying an open doorway; the trace reports `door_guesses`. Wider openings stay open archways, exterior gaps stay windows.
 - **Godot demo level menu**: the start screen lists every `level/*.json` + `.glb` package (Esc returns to it), `--level name` still goes straight in; `--menu --pick name` picks an entry for screenshots and tests.
 
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
