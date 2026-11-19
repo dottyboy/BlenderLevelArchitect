@@ -16886,6 +16886,11 @@ def _tilemap_props(roles, p):
     if not p.get("props", True):
         return roles, props
     ty, tx = roles.shape
+    labels, n = _fp_label(roles == 4, diag=False)               # tiles a tileset already calls props (role 4): single ones are pillars
+    for k in range(1, n + 1):
+        ys, xs = np.nonzero(labels == k)
+        props.append({"kind": "pillar" if len(ys) == 1 else "object", "tiles": [[int(x), int(y)] for y, x in zip(ys.tolist(), xs.tolist())],
+                      "rect": [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())]})
     for role, kind in ((2, "statue"), (1, "bush")):
         labels, n = _fp_label(roles == role, diag=True)
         for k in range(1, n + 1):
@@ -17077,6 +17082,18 @@ def _tilemap_material(path):
     return mat
 
 
+def _tilemap_stone_material():
+    mat = bpy.data.materials.get("LA_Tilemap_Stone")
+    if mat is None:
+        mat = bpy.data.materials.new("LA_Tilemap_Stone")
+        mat.use_nodes = True
+        bsdf = next(n for n in mat.node_tree.nodes if n.type == 'BSDF_PRINCIPLED')
+        _set_input(bsdf, "Base Color", (0.52, 0.52, 0.56, 1.0))
+        _set_input(bsdf, "Roughness", 0.9)
+        mat.diffuse_color = (0.52, 0.52, 0.56, 1.0)
+    return mat
+
+
 def _plan_build_tilemap(context, node, world, seed, path):
     where = "/".join(path)
     p = {**PLAN_TILEMAP_DEFAULTS, **(node.get("params") or {})}
@@ -17111,6 +17128,29 @@ def _plan_build_tilemap(context, node, world, seed, path):
         h = float(p["prop_height"]) * (0.55 if pr["kind"] == "bush" else 1.0) * tm
         u0, u1 = x0 * p["tile"] / iw, (x1 + 1) * p["tile"] / iw
         v1, v0 = 1.0 - y0 * p["tile"] / ih, 1.0 - (y1 + 1) * p["tile"] / ih
+        if pr["kind"] == "pillar":                                # a round pillar: a plain stone shaft and a cap that shows the tile's own picture
+            cx, cy, rad, sides_ = (bx0 + bx1) / 2.0, (by0 + by1) / 2.0, (bx1 - bx0) / 2.0, 14
+            h = float(p["prop_height"]) * 1.3 * tm
+            ring0 = [(cx + rad * math.cos(2 * math.pi * i / sides_), cy + rad * math.sin(2 * math.pi * i / sides_), 0.0) for i in range(sides_)]
+            ring1 = [(x_, y_, h) for x_, y_, _z in ring0]
+            v_ = ring0 + ring1
+            quads = [(i, (i + 1) % sides_, sides_ + (i + 1) % sides_, sides_ + i) for i in range(sides_)] + [tuple(range(sides_, 2 * sides_))]
+            uvs_ = [(u0, v0)] * (4 * sides_) + [(u0 + (u1 - u0) * (0.5 + 0.5 * math.cos(2 * math.pi * i / sides_)), v0 + (v1 - v0) * (0.5 + 0.5 * math.sin(2 * math.pi * i / sides_))) for i in range(sides_)]
+            pm = bpy.data.meshes.new("TilemapProp_%s_%03d" % (node["id"], k))
+            pm.from_pydata(v_, [], quads)
+            uvl = pm.uv_layers.new(name="UVMap")
+            uvl.data.foreach_set("uv", [c for uv_ in uvs_ for c in uv_])
+            pm.update()
+            pm.materials.append(_tilemap_stone_material())
+            pm.materials.append(mat)
+            for poly_ in pm.polygons:
+                poly_.material_index = 1 if poly_.index == sides_ else 0
+                poly_.use_smooth = poly_.index != sides_
+            pobj = bpy.data.objects.new(pm.name, pm)
+            pobj["gla_prop"] = json.dumps({"kind": pr["kind"], "rect": pr["rect"]})
+            context.scene.collection.objects.link(pobj)
+            made.append(pobj)
+            continue
         v_ = [(bx0, by0, 0), (bx1, by0, 0), (bx1, by1, 0), (bx0, by1, 0), (bx0, by0, h), (bx1, by0, h), (bx1, by1, h), (bx0, by1, h)]
         quads = [(4, 5, 6, 7), (0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)]
         pm = bpy.data.meshes.new("TilemapProp_%s_%03d" % (node["id"], k))

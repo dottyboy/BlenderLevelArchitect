@@ -5753,6 +5753,23 @@ _forest[:16 * 4] = (104, 104, 88)
 _fm = addon.tilemap_analyze(_forest, 16)
 _fl = addon._build_tilemap({**addon.PLAN_TILEMAP_DEFAULTS, "image": _tm_path})[2]                      # a normal map still builds with trees off the fringe
 check("Tile map: a layout carries props, trees and the walk check", all(k in _fl for k in ("props", "trees", "walk")))
+# tiles a tileset calls props (role 4): a single one is a pillar and becomes a cylinder object with its own stone shaft and a picture cap
+_pl = _np2.zeros((160, 160), dtype=_np2.uint8); _pl[3, 3] = 4; _pl[6, 6] = 4; _pl[6, 7] = 4
+_pr2, _props2 = addon._tilemap_props(_pl, {"props": True, "prop_max": 6})
+check("Tile map: role-4 tiles from a tileset become props (a single tile is a pillar, a pair an object)", sorted(p_["kind"] for p_ in _props2) == ["object", "pillar"], str(_props2))
+_ik = _np2.zeros((96, 96, 3)); _ik[:] = (200, 200, 205); _ik[32:48, 32:48] = (30, 30, 40)
+_ik_im = bpy.data.images.new("gla_ik_test.png", 96, 96); _ik_px = _np2.ones((96, 96, 4)); _ik_px[..., :3] = _ik[::-1] / 255.0
+_ik_im.pixels.foreach_set(_ik_px.ravel().astype(_np2.float32)); _ik_path = os.path.join(bpy.app.tempdir, "gla_ik_test.png")
+_ik_im.filepath_raw = _ik_path; _ik_im.file_format = 'PNG'; _ik_im.save()
+_ik_ts = _np2.zeros((16, 32, 3)); _ik_ts[:, :16] = (200, 200, 205); _ik_ts[:, 16:] = (30, 30, 40)
+_ikt_im = bpy.data.images.new("gla_ikt_test.png", 32, 16); _ikt_px = _np2.ones((16, 32, 4)); _ikt_px[..., :3] = _ik_ts[::-1] / 255.0
+_ikt_im.pixels.foreach_set(_ikt_px.ravel().astype(_np2.float32)); _ikt_path = os.path.join(bpy.app.tempdir, "gla_ikt_test.png")
+_ikt_im.filepath_raw = _ikt_path; _ikt_im.file_format = 'PNG'; _ikt_im.save()
+with open(os.path.join(bpy.app.tempdir, "gla_ikt_test.json"), "w") as _f:
+    json.dump({"tile": 16, "cols": 2, "roles": ["floor", "prop"]}, _f)
+addon.plan_build(bpy.context, addon.plan_from_tilemap_picture(_ik_path, "tm_pillar", 16, 1.0, tileset={"image": _ikt_path, "json": os.path.join(bpy.app.tempdir, "gla_ikt_test.json")}))
+_pil = [o for o in bpy.data.objects if o.type == "MESH" and o.get("gla_prop") and json.loads(o["gla_prop"])["kind"] == "pillar" and o.get("gla_tilemap_id") == "tm_pillar"]
+check("Tile map: a pillar tile builds a cylinder with two materials (stone shaft, picture cap)", len(_pil) == 1 and len(_pil[0].data.materials) == 2 and len(_pil[0].data.polygons) == 15, str([len(o.data.polygons) for o in _pil]))
 # the game package of a tile-map level: floor tiles as exact walk rectangles, entrance and exit on the floor, props and trees listed
 _pk_root = addon.plan_from_tilemap_picture(_tm_path, "tm_pkg", 16, 1.0)
 addon.plan_build(bpy.context, _pk_root)

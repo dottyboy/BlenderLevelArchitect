@@ -224,6 +224,11 @@ The **Level from Tile Map** button turns a picture of a whole level made of squa
 every tile is matched exactly; without one the roles are read from colour and texture. The pictures above are an original demo tileset with **autotiles** (coasts, forest edges and paths pick rounded edge tiles from their neighbours) and a generated map ([tools/make_tileset.py](tools/make_tileset.py)); [tools/reskin_map.py](tools/reskin_map.py) re-skins any tile map with such a tileset.
 Use pictures you may use; none from commercial games is shipped.
 
+**A dungeon from scratch, in an ink style**: [tools/make_ink_tileset.py](tools/make_ink_tileset.py) draws an original *ink on paper* tileset (pale floors with a dotted grid, brick walls in black outline, stippled rock with small stones, round pillars, a chasm) and generates a dungeon map from nothing: rooms and corridors carved out of rock, a pillared hall, a ring of pillars and a chasm.
+Walls are the rock tiles next to floor, pillars come from the tileset's `prop` role and become real cylinders:
+
+<p align="center"><img src="docs/img/ink_dungeon.png" alt="A generated ink-style dungeon built in 3D: brick-lined walls rising from stippled rock, pillared halls, a chasm" width="900"></p>
+
 **Walk it in a game**: **Export Tile Map Package (glb + json)** writes the level as glTF plus a `gla-export/1` JSON (exact walk rectangles, entrance, exit, props, trees),
 and [examples/godot_tilemap_demo](examples/godot_tilemap_demo) is a small Godot 4 project that loads such a package and lets you walk through it:
 

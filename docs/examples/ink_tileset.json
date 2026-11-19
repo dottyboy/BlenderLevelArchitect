@@ -1,0 +1,34 @@
+{
+ "tile": 16,
+ "cols": 8,
+ "roles": [
+  "floor",
+  "floor",
+  "floor",
+  "floor",
+  "stone",
+  "stone",
+  "stone",
+  "stone",
+  "stone",
+  "stone",
+  "prop",
+  "water",
+  "water"
+ ],
+ "names": [
+  "floor",
+  "floor",
+  "floor",
+  "floor",
+  "rock",
+  "rock",
+  "rock",
+  "rock",
+  "wall",
+  "wall",
+  "pillar",
+  "chasm",
+  "chasm"
+ ]
+}

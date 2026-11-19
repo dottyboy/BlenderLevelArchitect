@@ -24,9 +24,10 @@ cam.data.lens = 38
 cam.location = (w * 0.08, -d * 0.82, max(w, d) * 0.62); tgt = Vector((0, 0, 0))
 cam.rotation_euler = (tgt - cam.location).to_track_quat('-Z', 'Y').to_euler(); cam.data.clip_end = 5000; sc.camera = cam
 sun = bpy.data.objects.new("sun", bpy.data.lights.new("sun", 'SUN')); sc.collection.objects.link(sun)
-sun.rotation_euler = (math.radians(55), 0, math.radians(-40)); sun.data.energy = 3.0
+sun.rotation_euler = (math.radians(55), 0, math.radians(-40)); sun.data.energy = 3.0 if os.environ.get("BG") != "paper" else 4.0
 sc.world = bpy.data.worlds.new("w"); sc.world.use_nodes = True
-sc.world.node_tree.nodes["Background"].inputs[0].default_value = (0.55, 0.68, 0.85, 1)
+bg = {"paper": (0.80, 0.81, 0.85, 1)}.get(os.environ.get("BG", ""), (0.55, 0.68, 0.85, 1))
+sc.world.node_tree.nodes["Background"].inputs[0].default_value = bg
 sc.render.resolution_x, sc.render.resolution_y = 1280, 800
 sc.view_settings.view_transform = 'Standard'
 sc.render.engine = 'BLENDER_EEVEE'; sc.render.filepath = out
