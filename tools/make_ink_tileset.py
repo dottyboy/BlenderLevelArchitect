@@ -85,6 +85,39 @@ def wall_tile(seed, rim=None):
     return img
 
 
+def wall_rim_tile(mask, diag=None, seed=0):
+    """A wall seen from above, like the walls of a hand-inked plan: only a band of bricks along the sides that face the floor (mask bits N=1 E=2 S=4 W=8),
+    the rest is solid rock stipple. `diag` (0 NE, 1 SE, 2 SW, 3 NW) draws a small brick corner where only the diagonal neighbour is open."""
+    img = rock_tile(seed + 40)
+    B = 5                                                         # width of the brick band in px
+
+    def band(y0, y1, x0, x1, outer):
+        img[y0:y1, x0:x1] = PAPER
+        for by in range(y0, y1, 2):
+            img[by, x0:x1] = INK
+            off = 0 if ((by - y0) // 2) % 2 == 0 else 3
+            for bx in range(x0 + off, x1, 6):
+                img[by:by + 2, bx] = INK
+        o0, o1 = outer
+        img[o0[0]:o1[0], o0[1]:o1[1]] = INK                      # the thick outline on the floor side
+    if mask & 1:
+        band(0, B, 0, T, ((0, 0), (2, T)))
+    if mask & 4:
+        band(T - B, T, 0, T, ((T - 2, 0), (T, T)))
+    if mask & 8:
+        band(0, T, 0, B, ((0, 0), (T, 2)))
+    if mask & 2:
+        band(0, T, T - B, T, ((0, T - 2), (T, T)))
+    if diag is not None:
+        ys, xs = {0: (0, T - B), 1: (T - B, T - B), 2: (T - B, 0), 3: (0, 0)}[diag]
+        img[ys:ys + B, xs:xs + B] = PAPER
+        for by in range(ys, ys + B, 2):
+            img[by, xs:xs + B] = INK
+        img[ys:ys + B, xs] = INK
+        img[ys, xs:xs + B] = INK
+    return img
+
+
 def pillar_tile(seed):
     """A round pillar seen from above: a thick outlined circle with a stippled top, on paper."""
     img = floor_tile(seed)
@@ -116,7 +149,13 @@ for i in range(4):
 for i in range(4):
     TILES.append(("rock", rock_tile(i), "stone"))
 for i in range(2):
-    TILES.append(("wall", wall_tile(i), "stone"))
+    TILES.append(("wall", wall_tile(i), "stone"))                # a full brick tile: also the picture wall faces show (json wall_side)
+WALL_SIDE = len(TILES) - 1
+WALL_FIRST = len(TILES)                                        # 15 side-mask variants (mask 1..15) then 4 corner variants
+for _m in range(1, 16):
+    TILES.append(("wallrim", wall_rim_tile(_m, None, _m), "stone"))
+for _d in range(4):
+    TILES.append(("wallrim", wall_rim_tile(0, _d, 20 + _d), "stone"))
 TILES.append(("pillar", pillar_tile(1), "prop"))
 for i in range(2):
     TILES.append(("chasm", chasm_tile(i), "water"))
@@ -185,12 +224,36 @@ def make_dungeon(w=72, h=54, seed=4):
     return k
 
 
+def wall_tile_id(solid, y, x):
+    """Index of the wall tile for the solid tile (y, x): bricks only on the sides that face open ground, a corner variant when only a diagonal is open,
+    None for deep rock."""
+    h, w = solid.shape
+    op = lambda yy, xx: 0 <= yy < h and 0 <= xx < w and not solid[yy, xx]
+    mask = (1 if op(y - 1, x) else 0) | (2 if op(y, x + 1) else 0) | (4 if op(y + 1, x) else 0) | (8 if op(y, x - 1) else 0)
+    if mask:
+        return WALL_FIRST + mask - 1
+    for d, (dy, dx) in enumerate(((-1, 1), (1, 1), (1, -1), (-1, -1))):
+        if op(y + dy, x + dx):
+            return WALL_FIRST + 15 + d
+    return None
+
+
 def to_ids(kinds, seed=2):
+    """Tile ids for a kind grid: rock and wall tiles together are the solid ground; a solid tile with open ground beside it gets the brick-rimmed wall tile
+    that matches, other solid tiles stipple rock."""
     r = np.random.default_rng(seed)
+    solid = np.isin(kinds, ("rock", "wall"))
     out = np.zeros(kinds.shape, int)
     for y in range(kinds.shape[0]):
         for x in range(kinds.shape[1]):
-            ids = IDX[kinds[y, x]]
+            if solid[y, x]:
+                wid = wall_tile_id(solid, y, x)
+                if wid is not None:
+                    out[y, x] = wid
+                    continue
+                ids = IDX["rock"]
+            else:
+                ids = IDX[kinds[y, x]]
             out[y, x] = ids[int(r.integers(0, len(ids)))]
     return out
 
@@ -209,6 +272,7 @@ if __name__ == "__main__":
     d = os.path.join(ROOT, "docs", "examples")
     write_png(os.path.join(d, "ink_tileset.png"), sheet())
     with open(os.path.join(d, "ink_tileset.json"), "w") as f:
-        json.dump({"tile": T, "cols": COLS, "roles": [t[2] for t in TILES], "names": [t[0] for t in TILES]}, f, indent=1)
+        json.dump({"tile": T, "cols": COLS, "roles": [t[2] for t in TILES], "names": [t[0] for t in TILES], "wall_side": WALL_SIDE,
+                   "walltiles": {"first": WALL_FIRST, "note": "15 side-mask variants (N=1 E=2 S=4 W=8, mask 1..15) then 4 corner variants NE SE SW NW"}}, f, indent=1)
     write_png(os.path.join(d, "ink_map.png"), render_map(to_ids(make_dungeon(seed=seed))))
     print("wrote ink_tileset.png, ink_tileset.json and ink_map.png in", d)

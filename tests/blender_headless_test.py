@@ -5770,6 +5770,19 @@ with open(os.path.join(bpy.app.tempdir, "gla_ikt_test.json"), "w") as _f:
 addon.plan_build(bpy.context, addon.plan_from_tilemap_picture(_ik_path, "tm_pillar", 16, 1.0, tileset={"image": _ikt_path, "json": os.path.join(bpy.app.tempdir, "gla_ikt_test.json")}))
 _pil = [o for o in bpy.data.objects if o.type == "MESH" and o.get("gla_prop") and json.loads(o["gla_prop"])["kind"] == "pillar" and o.get("gla_tilemap_id") == "tm_pillar"]
 check("Tile map: a pillar tile builds a cylinder with two materials (stone shaft, picture cap)", len(_pil) == 1 and len(_pil[0].data.materials) == 2 and len(_pil[0].data.polygons) == 15, str([len(o.data.polygons) for o in _pil]))
+# a tileset with `wall_side`: the map and the sheet become one atlas picture and wall faces show the named tile
+with open(os.path.join(bpy.app.tempdir, "gla_ikt_test.json"), "w") as _f:
+    json.dump({"tile": 16, "cols": 2, "roles": ["floor", "stone"], "wall_side": 1}, _f)
+_wmap = _np2.zeros((64, 64, 3)); _wmap[:] = (200, 200, 205); _wmap[16:48, 16:48] = (30, 30, 40)
+_wm_im = bpy.data.images.new("gla_wm_test.png", 64, 64); _wm_px = _np2.ones((64, 64, 4)); _wm_px[..., :3] = _wmap[::-1] / 255.0
+_wm_im.pixels.foreach_set(_wm_px.ravel().astype(_np2.float32)); _wm_path = os.path.join(bpy.app.tempdir, "gla_wm_test.png")
+_wm_im.filepath_raw = _wm_path; _wm_im.file_format = 'PNG'; _wm_im.save()
+addon.plan_build(bpy.context, addon.plan_from_tilemap_picture(_wm_path, "tm_side", 16, 1.0, tileset={"image": _ikt_path, "json": os.path.join(bpy.app.tempdir, "gla_ikt_test.json")}))
+_sd = [o for o in bpy.data.objects if o.type == "MESH" and o.data.name.startswith("Tilemap_tm_side")]
+_img = _sd[0].data.materials[0].node_tree.nodes["Image Texture"].image if _sd else None
+check("Tile map: wall_side builds an atlas picture (map + tileset sheet) as the texture", len(_sd) == 1 and _img is not None and _img.name.startswith("LA_TilemapAtlas_") and _img.size[1] == 64 + 16 and _img.size[0] == 64, str(_img.size[:] if _img else None))
+_uvs = [c for d_ in _sd[0].data.uv_layers[0].data for c in d_.uv]
+check("Tile map: with an atlas the UVs stay inside 0..1", all(-1e-4 <= c <= 1 + 1e-4 for c in _uvs))
 # the game package of a tile-map level: floor tiles as exact walk rectangles, entrance and exit on the floor, props and trees listed
 _pk_root = addon.plan_from_tilemap_picture(_tm_path, "tm_pkg", 16, 1.0)
 addon.plan_build(bpy.context, _pk_root)

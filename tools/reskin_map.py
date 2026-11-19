@@ -70,6 +70,27 @@ def main():
         near[:-1, :] |= open_[1:, :]
         near[:, 1:] |= open_[:, :-1]
         near[:, :-1] |= open_[:, 1:]
+        # simplify: the old maps are full of 1-tile spurs and dead-end nubs; a solid tile with three open neighbours is removed, a floor tile with three solid
+        # neighbours (a dead-end tip of a 1-tile passage) is filled, twice
+        for _ in range(2):
+            sol = solid.copy()
+            cnt = np.zeros((ty, tx), int)
+            cnt[1:, :] += sol[:-1, :]
+            cnt[:-1, :] += sol[1:, :]
+            cnt[:, 1:] += sol[:, :-1]
+            cnt[:, :-1] += sol[:, 1:]
+            inner = np.zeros((ty, tx), bool)
+            inner[1:-1, 1:-1] = True
+            solid = np.where(inner & sol & (cnt <= 1), False, np.where(inner & ~sol & (roles != "water") & (cnt >= 3), True, sol))
+        kinds = np.full((ty, tx), "floor", dtype=object)
+        kinds[solid] = "rock"
+        kinds[roles == "water"] = "chasm"
+        near = np.zeros((ty, tx), bool)
+        open_ = ~solid
+        near[1:, :] |= open_[:-1, :]
+        near[:-1, :] |= open_[1:, :]
+        near[:, 1:] |= open_[:, :-1]
+        near[:, :-1] |= open_[:, 1:]
         kinds[solid & near] = "wall"
         # tidy up: small loose bits of the old map (statues, bushes, decorations) become pillars; tiny pockets of floor inside rock are filled
         def components(mask):
@@ -96,9 +117,23 @@ def main():
             if len(comp) <= 2 and all(0 < y < ty - 1 and 0 < x < tx - 1 for y, x in comp):
                 for y, x in comp:
                     kinds[y, x] = "wall"
+        first = nm.get("walltiles", {}).get("first")
+        solid_now = np.isin(kinds, ("rock", "wall"))
         for y in range(ty):
             for x in range(tx):
-                c = [i for i, n in enumerate(names) if n == kinds[y, x]]
+                if first is not None and solid_now[y, x]:                    # brick rim only on the sides that face open ground (see make_ink_tileset.wall_tile_id)
+                    op = lambda yy, xx: 0 <= yy < ty and 0 <= xx < tx and not solid_now[yy, xx]
+                    mask = (1 if op(y - 1, x) else 0) | (2 if op(y, x + 1) else 0) | (4 if op(y + 1, x) else 0) | (8 if op(y, x - 1) else 0)
+                    if mask:
+                        ids[y, x] = first + mask - 1
+                        continue
+                    diag = next((d for d, (dy, dx) in enumerate(((-1, 1), (1, 1), (1, -1), (-1, -1))) if op(y + dy, x + dx)), None)
+                    if diag is not None:
+                        ids[y, x] = first + 15 + diag
+                        continue
+                    c = [i for i, n in enumerate(names) if n == "rock"]
+                else:
+                    c = [i for i, n in enumerate(names) if n == kinds[y, x]]
                 ids[y, x] = c[int(rng.integers(0, len(c)))]
     elif auto:
         names = nm["names"]

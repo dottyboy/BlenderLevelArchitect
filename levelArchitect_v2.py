@@ -16821,6 +16821,21 @@ def _tilemap_tileset(spec, tile):
     return lut
 
 
+def _tilemap_side(spec, tile):
+    """(sheet pixels, x, y) of the tile a tileset names `wall_side` (the picture wall faces show instead of the map's own tile), or None."""
+    if not spec:
+        return None
+    path = bpy.path.abspath(spec["image"])
+    jp = bpy.path.abspath(spec.get("json") or os.path.splitext(path)[0] + ".json")
+    with open(jp) as f:
+        meta = json.load(f)
+    if "wall_side" not in meta:
+        return None
+    t, cols, margin, gutter = int(meta.get("tile", tile)), int(meta["cols"]), int(meta.get("margin", 0)), int(meta.get("gutter", 0))
+    i = int(meta["wall_side"])
+    return _plan_image_pixels(path=path), margin + (i % cols) * (t + gutter), margin + (i // cols) * (t + gutter)
+
+
 def tilemap_analyze(rgb, tile=16, green=0.375, rough=22.0, roles=None, lut=None):
     """Roles of the tiles of a map picture: an int array (rows top to bottom, tile columns), 0 floor, 1 canopy, 2 stone, 3 water, 4 prop (an object standing on the floor; see `_tilemap_props`).
     With a tileset (`lut`: tile pixels -> role) every tile that matches a tileset tile exactly takes that tile's role; the others (and every tile
@@ -16980,6 +16995,19 @@ def _build_tilemap(p):
     if ty * tx > 90000:
         raise PlanError("the map has %d tiles (at most 90000)" % (ty * tx))
     iw, ih = rgb.shape[1], rgb.shape[0]
+    side = _tilemap_side(p.get("tileset"), tile)
+    atlas = None
+    if side is not None:                                        # the map and the tileset sheet in one picture, so wall faces can show a tile that is not on the map
+        sheet_px, sx, sy = side
+        width = max(iw, sheet_px.shape[1])
+        atlas = np.zeros((ih + sheet_px.shape[0], width, 3))
+        atlas[:ih, :iw] = rgb[..., :3]
+        atlas[ih:, :sheet_px.shape[1]] = sheet_px[..., :3]
+        iw, ih_total = width, atlas.shape[0]
+        su0, su1 = sx / iw, (sx + tile) / iw
+        sv1, sv0 = 1.0 - (ih + sy) / ih_total, 1.0 - (ih + sy + tile) / ih_total
+        ih = ih_total
+        side_uv = [(su0, sv0), (su1, sv0), (su1, sv1), (su0, sv1)]
     tz = _tilemap_heights(roles, p)
     pad = np.pad(tz, 1, mode="edge")
     corner = (pad[:-1, :-1] + pad[:-1, 1:] + pad[1:, :-1] + pad[1:, 1:]) / 4.0          # (ty+1, tx+1) heights at tile corners
@@ -17035,7 +17063,7 @@ def _build_tilemap(p):
                         pts = [(x1, y1, za), (x0, y1, za), (x0, y1, zb), (x1, y1, zb)]
                     else:
                         pts = [(x0, y0, za), (x1, y0, za), (x1, y0, zb), (x0, y0, zb)]
-                    quad(pts, uv, False)
+                    quad(pts, side_uv if atlas is not None else uv, False)
                 if edge == "e":
                     pts = [(x1, y0, zb2), (x1, y1, zb2), (x1 - E, y1 - N, zt), (x1 - E, y0 + S, zt)]
                 elif edge == "w":
@@ -17044,7 +17072,7 @@ def _build_tilemap(p):
                     pts = [(x1, y1, zb2), (x0, y1, zb2), (x0 + W, y1 - N, zt), (x1 - E, y1 - N, zt)]
                 else:
                     pts = [(x0, y0, zb2), (x1, y0, zb2), (x1 - E, y0 + S, zt), (x0 + W, y0 + S, zt)]
-                quad(pts, uv, False)
+                quad(pts, side_uv if atlas is not None else uv, False)
             quad([(x0 + W, y0 + S, zt), (x1 - E, y0 + S, zt), (x1 - E, y1 - N, zt), (x0 + W, y1 - N, zt)], uv, False)
     floor = int((roles == 0).sum())
     trees = []
@@ -17059,12 +17087,13 @@ def _build_tilemap(p):
                 if 0 <= ci < tx and 0 <= cj < ty and roles[cj, ci] == 1 and depth[cj, ci] >= 1.5:
                     trees.append([fx * tm - ox, oy - fy * tm, float(tz[cj, ci])])
     layout = {"name": "tilemap", "tile_m": tm, "tiles": [tx, ty], "floor_share": floor / float(tx * ty), "size": [tx * tm, ty * tm],
-              "roles": roles.tolist(), "props": props, "trees": trees, "walk": tilemap_walk_check(roles)}
+              "roles": roles.tolist(), "props": props, "trees": trees, "walk": tilemap_walk_check(roles),
+              "uvdims": [iw, ih], "atlas": atlas}
     return (verts, faces, uvs, smooth), roles, layout
 
 
-def _tilemap_material(path):
-    name = "LA_Tilemap_" + os.path.basename(path)
+def _tilemap_material(path, image=None, name=None):
+    name = name or "LA_Tilemap_" + os.path.basename(path)
     mat = bpy.data.materials.get(name)
     if mat is not None:
         return mat
@@ -17073,7 +17102,7 @@ def _tilemap_material(path):
     nt = mat.node_tree
     bsdf = next(n for n in nt.nodes if n.type == 'BSDF_PRINCIPLED')
     tex = nt.nodes.new("ShaderNodeTexImage")
-    tex.image = bpy.data.images.load(path, check_existing=True)
+    tex.image = image or bpy.data.images.load(path, check_existing=True)
     tex.interpolation = 'Closest'
     tex.location = (-400, 0)
     nt.links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
@@ -17095,6 +17124,7 @@ def _tilemap_stone_material():
 
 
 def _plan_build_tilemap(context, node, world, seed, path):
+    import numpy as np
     where = "/".join(path)
     p = {**PLAN_TILEMAP_DEFAULTS, **(node.get("params") or {})}
     try:
@@ -17110,16 +17140,28 @@ def _plan_build_tilemap(context, node, world, seed, path):
     mesh.update()
     for poly, sm in zip(mesh.polygons, smooth):
         poly.use_smooth = sm
-    mesh.materials.append(_tilemap_material(bpy.path.abspath(p["image"])))
+    atlas = layout.pop("atlas", None)
+    if atlas is not None:                                          # the map + the tileset sheet as one picture (wall faces show a tile of the sheet)
+        h_, w_ = atlas.shape[:2]
+        img = bpy.data.images.new("LA_TilemapAtlas_" + node["id"], w_, h_)
+        px = np.ones((h_, w_, 4), dtype=np.float32)
+        px[..., :3] = np.clip(atlas[::-1] / 255.0, 0.0, 1.0)
+        _set_prop(img.colorspace_settings, 'name', 'sRGB')
+        img.pixels.foreach_set(px.ravel())
+        img.update()
+        img.pack()
+        mat = _tilemap_material("", img, "LA_TilemapAtlas_" + node["id"])
+    else:
+        mat = _tilemap_material(bpy.path.abspath(p["image"]))
+    mesh.materials.append(mat)
     obj = bpy.data.objects.new(mesh.name, mesh)
     context.scene.collection.objects.link(obj)
     obj["gla_walk_layout"] = json.dumps({k: v for k, v in layout.items() if k not in ("roles", "trees", "props")})
     obj["gla_tilemap"] = json.dumps({"id": node["id"], "tile_m": layout["tile_m"], "tiles": layout["tiles"], "rows": ["".join(str(v) for v in row) for row in layout["roles"]],
                                      "props": layout["props"], "trees": [[round(v, 3) for v in t_] for t_ in layout["trees"]], "walk": layout["walk"]})
     made = [obj]
-    mat = _tilemap_material(bpy.path.abspath(p["image"]))
     tm, (tx, ty) = layout["tile_m"], layout["tiles"]
-    iw, ih = _tilemap_image_size(p)
+    iw, ih = layout["uvdims"]
     ox, oy = tx * tm / 2.0, ty * tm / 2.0
     for k, pr in enumerate(layout["props"]):                      # every prop is its own object (a short box carrying its sprite), ready to be swapped for a model
         x0, y0, x1, y1 = pr["rect"]
