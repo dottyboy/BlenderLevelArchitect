@@ -16821,6 +16821,27 @@ def _tilemap_tileset(spec, tile):
     return lut
 
 
+def _tilemap_prop_kinds(spec, tile):
+    """{tile bytes: kind} for the tiles a tileset's json lists under `prop_kinds` ({tile index: "apse"}); {} without any."""
+    if not spec:
+        return {}
+    path = bpy.path.abspath(spec["image"])
+    jp = bpy.path.abspath(spec.get("json") or os.path.splitext(path)[0] + ".json")
+    with open(jp) as f:
+        meta = json.load(f)
+    kinds = meta.get("prop_kinds") or {}
+    if not kinds:
+        return {}
+    sheet = _plan_image_pixels(path=path)
+    t, cols, margin, gutter = int(meta.get("tile", tile)), int(meta["cols"]), int(meta.get("margin", 0)), int(meta.get("gutter", 0))
+    out = {}
+    for idx, kind in kinds.items():
+        i = int(idx)
+        y, x = margin + (i // cols) * (t + gutter), margin + (i % cols) * (t + gutter)
+        out[sheet[y:y + t, x:x + t, :3].round().astype("uint8").tobytes()] = kind
+    return out
+
+
 def _tilemap_side(spec, tile):
     """(sheet pixels, x, y) of the tile a tileset names `wall_side` (the picture wall faces show instead of the map's own tile), or None."""
     if not spec:
@@ -16992,6 +17013,17 @@ def _build_tilemap(p):
     roles = tilemap_analyze(rgb, tile, p["green"], p["rough"], p.get("roles"), _tilemap_tileset(p.get("tileset"), tile))
     roles, props = _tilemap_props(roles, p)
     ty, tx = roles.shape
+    kinds_lut = _tilemap_prop_kinds(p.get("tileset"), tile)
+    for pr in props:                                            # a tileset can name the kind of a prop tile (an apse: a half column built into a wall, facing the room)
+        if len(pr["tiles"]) == 1:
+            i, j = pr["tiles"][0]
+            kind = kinds_lut.get(rgb[j * tile:(j + 1) * tile, i * tile:(i + 1) * tile, :3].round().astype("uint8").tobytes())
+            if kind:
+                pr["kind"] = kind
+                if kind == "apse":
+                    wall = [d for d, (di, dj) in {"n": (0, -1), "e": (1, 0), "s": (0, 1), "w": (-1, 0)}.items()
+                            if 0 <= i + di < tx and 0 <= j + dj < ty and roles[j + dj, i + di] == 2]
+                    pr["facing"] = wall[0] if wall else "n"          # the side the wall is on
     if ty * tx > 90000:
         raise PlanError("the map has %d tiles (at most 90000)" % (ty * tx))
     iw, ih = rgb.shape[1], rgb.shape[0]
@@ -17170,6 +17202,39 @@ def _plan_build_tilemap(context, node, world, seed, path):
         h = float(p["prop_height"]) * (0.55 if pr["kind"] == "bush" else 1.0) * tm
         u0, u1 = x0 * p["tile"] / iw, (x1 + 1) * p["tile"] / iw
         v1, v0 = 1.0 - y0 * p["tile"] / ih, 1.0 - (y1 + 1) * p["tile"] / ih
+        if pr["kind"] == "apse":                                  # a half column against a wall: a semicircular shaft bulging into the room, its flat side on the wall
+            cx_, cy_ = (bx0 + bx1) / 2.0, (by0 + by1) / 2.0
+            rad = tm * 0.5
+            wx, wy = {"n": (0.0, 1.0), "s": (0.0, -1.0), "e": (1.0, 0.0), "w": (-1.0, 0.0)}[pr.get("facing", "n")]
+            ctr = (cx_ + wx * tm / 2.0, cy_ + wy * tm / 2.0)               # middle of the wall edge of the tile
+            ux, uy = -wx, -wy                                              # into the room
+            vx, vy = -wy, wx                                               # along the wall
+            h = float(p["stone"]) * 0.97
+            n_arc = 10
+            ring0 = [(ctr[0] + rad * (math.cos(math.pi * i / n_arc) * vx + math.sin(math.pi * i / n_arc) * ux),
+                      ctr[1] + rad * (math.cos(math.pi * i / n_arc) * vy + math.sin(math.pi * i / n_arc) * uy), 0.0) for i in range(n_arc + 1)]
+            ring1 = [(x_, y_, h) for x_, y_, _z in ring0]
+            v_ = ring0 + ring1
+            m_ = n_arc + 1
+            quads = [(i, i + 1, m_ + i + 1, m_ + i) for i in range(n_arc)] + [tuple(range(m_, 2 * m_))]
+            tu0, tv0, tu1, tv1 = (x0 * p["tile"] / iw), 1.0 - (y1 + 1) * p["tile"] / ih, (x0 + 1) * p["tile"] / iw, 1.0 - y0 * p["tile"] / ih
+            cap_uv = [(tu0 + (px_ - (cx_ - tm / 2.0)) / tm * (tu1 - tu0), tv0 + (py_ - (cy_ - tm / 2.0)) / tm * (tv1 - tv0)) for px_, py_, _z in ring1]
+            uvs_ = [(tu0, tv0)] * (4 * n_arc) + cap_uv
+            pm = bpy.data.meshes.new("TilemapProp_%s_%03d" % (node["id"], k))
+            pm.from_pydata(v_, [], quads)
+            uvl = pm.uv_layers.new(name="UVMap")
+            uvl.data.foreach_set("uv", [c for uv_ in uvs_ for c in uv_])
+            pm.update()
+            pm.materials.append(_tilemap_stone_material())
+            pm.materials.append(mat)
+            for poly_ in pm.polygons:
+                poly_.material_index = 1 if poly_.index == n_arc else 0
+                poly_.use_smooth = poly_.index != n_arc
+            pobj = bpy.data.objects.new(pm.name, pm)
+            pobj["gla_prop"] = json.dumps({"kind": "apse", "rect": pr["rect"], "facing": pr.get("facing", "n")})
+            context.scene.collection.objects.link(pobj)
+            made.append(pobj)
+            continue
         if pr["kind"] == "pillar":                                # a round pillar: a plain stone shaft and a cap that shows the tile's own picture
             cx, cy, rad, sides_ = (bx0 + bx1) / 2.0, (by0 + by1) / 2.0, (bx1 - bx0) / 2.0, 14
             h = float(p["prop_height"]) * 1.3 * tm

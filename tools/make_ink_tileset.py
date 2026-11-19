@@ -130,6 +130,19 @@ def pillar_tile(seed):
     return img
 
 
+def apse_tile(side, seed=0):
+    """A half column built into a wall (an apse) seen from above: a semicircle of brick rings bulging out of the wall at `side` (n, e, s, w) on a floor tile."""
+    img = floor_tile(seed)
+    ys, xs = np.mgrid[0:T, 0:T]
+    d = np.hypot(xs - 7.5, ys + 0.5)                              # centred on the top edge: the wall is at the north
+    img[d < 7.6] = PAPER
+    img[(d >= 6.1) & (d < 7.6)] = INK
+    img[(d >= 3.6) & (d < 4.5)] = INK
+    ang = np.arctan2(ys + 0.5, xs - 7.5)
+    img[(d >= 4.5) & (d < 6.1) & (np.abs(np.sin(ang * 5.0)) < 0.18)] = INK      # radial joints between the bricks of the ring
+    return np.rot90(img, k={"n": 0, "e": 3, "s": 2, "w": 1}[side]).copy()
+
+
 def chasm_tile(seed):
     img = np.empty((T, T, 3), np.uint8)
     img[:] = (0x3a, 0x3c, 0x4e)
@@ -159,6 +172,10 @@ for _d in range(4):
 TILES.append(("pillar", pillar_tile(1), "prop"))
 for i in range(2):
     TILES.append(("chasm", chasm_tile(i), "water"))
+PROP_KINDS = {}
+for _side in ("n", "e", "s", "w"):
+    PROP_KINDS[len(TILES)] = "apse"
+    TILES.append(("apse_" + _side, apse_tile(_side), "prop"))
 COLS = 8
 IDX = {}
 for _i, (_k, _img, _r) in enumerate(TILES):
@@ -213,6 +230,16 @@ def make_dungeon(w=72, h=54, seed=4):
         yy = (y0 + y1) // 2
         for x in range(x0 + 1, x1 - 1):
             k[yy + int(round(np.sin(x * 0.7))), x] = "chasm"
+    free = [b for b in rooms if b not in (big[0], big[1] if len(big) > 1 else None, big[2] if len(big) > 2 else None)]      # apses: half columns along a wall of two other rooms
+    for n_, (x0, y0, x1, y1) in enumerate(free[:2]):
+        if n_ == 0:
+            for x in range(x0 + 1, x1 - 1, 2):
+                if k[y0, x] == "floor":
+                    k[y0, x] = "apse_n"
+        else:
+            for y in range(y0 + 1, y1 - 1, 2):
+                if k[y, x0] == "floor":
+                    k[y, x0] = "apse_w"
     rock = k == "rock"                                            # the rock tiles next to floor (4-neighbour) become wall
     near = np.zeros_like(rock)
     solid = ~rock
@@ -272,7 +299,7 @@ if __name__ == "__main__":
     d = os.path.join(ROOT, "docs", "examples")
     write_png(os.path.join(d, "ink_tileset.png"), sheet())
     with open(os.path.join(d, "ink_tileset.json"), "w") as f:
-        json.dump({"tile": T, "cols": COLS, "roles": [t[2] for t in TILES], "names": [t[0] for t in TILES], "wall_side": WALL_SIDE,
+        json.dump({"tile": T, "cols": COLS, "roles": [t[2] for t in TILES], "names": [t[0] for t in TILES], "wall_side": WALL_SIDE, "prop_kinds": {str(k): v for k, v in PROP_KINDS.items()},
                    "walltiles": {"first": WALL_FIRST, "note": "15 side-mask variants (N=1 E=2 S=4 W=8, mask 1..15) then 4 corner variants NE SE SW NW"}}, f, indent=1)
     write_png(os.path.join(d, "ink_map.png"), render_map(to_ids(make_dungeon(seed=seed))))
     print("wrote ink_tileset.png, ink_tileset.json and ink_map.png in", d)

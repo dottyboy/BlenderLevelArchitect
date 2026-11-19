@@ -5783,6 +5783,23 @@ _img = _sd[0].data.materials[0].node_tree.nodes["Image Texture"].image if _sd el
 check("Tile map: wall_side builds an atlas picture (map + tileset sheet) as the texture", len(_sd) == 1 and _img is not None and _img.name.startswith("LA_TilemapAtlas_") and _img.size[1] == 64 + 16 and _img.size[0] == 64, str(_img.size[:] if _img else None))
 _uvs = [c for d_ in _sd[0].data.uv_layers[0].data for c in d_.uv]
 check("Tile map: with an atlas the UVs stay inside 0..1", all(-1e-4 <= c <= 1 + 1e-4 for c in _uvs))
+# an apse: a tile the tileset lists under prop_kinds becomes a half column that faces away from the wall it stands against
+_ap_ts = _np2.zeros((16, 48, 3)); _ap_ts[:, :16] = (200, 200, 205); _ap_ts[:, 16:32] = (150, 60, 60); _ap_ts[:, 32:] = (30, 30, 40)
+_apt_im = bpy.data.images.new("gla_apt_test.png", 48, 16); _apt_px = _np2.ones((16, 48, 4)); _apt_px[..., :3] = _ap_ts[::-1] / 255.0
+_apt_im.pixels.foreach_set(_apt_px.ravel().astype(_np2.float32)); _apt_path = os.path.join(bpy.app.tempdir, "gla_apt_test.png")
+_apt_im.filepath_raw = _apt_path; _apt_im.file_format = 'PNG'; _apt_im.save()
+with open(os.path.join(bpy.app.tempdir, "gla_apt_test.json"), "w") as _f:
+    json.dump({"tile": 16, "cols": 3, "roles": ["floor", "prop", "stone"], "prop_kinds": {"1": "apse"}}, _f)
+_apm = _np2.zeros((80, 80, 3)); _apm[:] = (200, 200, 205); _apm[:16, :] = (30, 30, 40); _apm[16:32, 32:48] = (150, 60, 60)      # a wall along the top, an apse just below it
+_ap_im = bpy.data.images.new("gla_apm_test.png", 80, 80); _ap_px = _np2.ones((80, 80, 4)); _ap_px[..., :3] = _apm[::-1] / 255.0
+_ap_im.pixels.foreach_set(_ap_px.ravel().astype(_np2.float32)); _apm_path = os.path.join(bpy.app.tempdir, "gla_apm_test.png")
+_ap_im.filepath_raw = _apm_path; _ap_im.file_format = 'PNG'; _ap_im.save()
+_apq = {**addon.PLAN_TILEMAP_DEFAULTS, "image": _apm_path, "tileset": {"image": _apt_path, "json": os.path.join(bpy.app.tempdir, "gla_apt_test.json")}}
+_aplay = addon._build_tilemap(_apq)[2]
+check("Tile map: a prop tile named apse in prop_kinds is an apse facing away from its wall (wall on the north side)", len(_aplay["props"]) == 1 and _aplay["props"][0]["kind"] == "apse" and _aplay["props"][0].get("facing") == "n", str(_aplay["props"]))
+addon.plan_build(bpy.context, addon.plan_node("tm_apse", "building", "tilemap", params=_apq))
+_apo = [o for o in bpy.data.objects if o.type == "MESH" and o.get("gla_prop") and json.loads(o["gla_prop"])["kind"] == "apse" and o.get("gla_tilemap_id") == "tm_apse"]
+check("Tile map: the apse is its own half-cylinder object with a stone shaft and a picture cap", len(_apo) == 1 and len(_apo[0].data.polygons) == 11 and len(_apo[0].data.materials) == 2, str([len(o.data.polygons) for o in _apo]))
 # the game package of a tile-map level: floor tiles as exact walk rectangles, entrance and exit on the floor, props and trees listed
 _pk_root = addon.plan_from_tilemap_picture(_tm_path, "tm_pkg", 16, 1.0)
 addon.plan_build(bpy.context, _pk_root)

@@ -33,7 +33,11 @@
   "stone",
   "prop",
   "water",
-  "water"
+  "water",
+  "prop",
+  "prop",
+  "prop",
+  "prop"
  ],
  "names": [
   "floor",
@@ -67,9 +71,19 @@
   "wallrim",
   "pillar",
   "chasm",
-  "chasm"
+  "chasm",
+  "apse_n",
+  "apse_e",
+  "apse_s",
+  "apse_w"
  ],
  "wall_side": 9,
+ "prop_kinds": {
+  "32": "apse",
+  "33": "apse",
+  "34": "apse",
+  "35": "apse"
+ },
  "walltiles": {
   "first": 10,
   "note": "15 side-mask variants (N=1 E=2 S=4 W=8, mask 1..15) then 4 corner variants NE SE SW NW"
