@@ -3,8 +3,9 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
-## Unreleased — terrain: look, relief and water
+## Unreleased — terrain: look, relief, water and ground cover
 
+- **Ground cover**: scatter kinds `grass` (tufts of blades, up to 900/ha) and `flower` (five colours) in meadow, forest, tundra, mountain and island biomes (capped at 6000 per kind); rules may carry `wet` (0-1) so trees prefer low, damp ground near water.
 - **Water**: lakes are a sheet only over the wet grid cells with a baked `depth` attribute, shaded from turquoise shallows to deep blue with growing opacity, shore foam and ripples (`LA_Lake`); rivers get edge foam and flow streaks from their ribbon UVs (`LA_River`). Shader only.
 - **Ground look**: the terrain material multiplies the baked colour by patches (~6 m), grain and a slow warm/cool tint, and bumps the normal with fine noise; shader only, no geometry.
 - **Relief**: new `warp` (domain warp, metres) and `sharp` (broad flats, narrower crests) terrain parameters, set per biome (mountains `warp 45, sharp 1.6, ridged 0.7`); mountains now have ridges and valleys and **snow on the peaks**. Verified on Blender 5.3.0 (full suite passes).

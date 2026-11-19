@@ -4773,7 +4773,7 @@ check("Terrain: biome colours are stored on the evaluated mesh", col is not None
 check("Terrain: the ground has its biome material", terrain.data.materials[0].name == "LA_Terrain_meadow")
 check("Terrain: a skirt closes the sides (more vertices than the grid)", len(terrain.data.vertices) > (160 // 4 + 1) ** 2)
 scatter = [o for o in bpy.data.objects if o.name.startswith("PB_land.scatter_Scatter_")]
-check("Terrain: scatter makes a few merged objects (not one per tree)", 1 <= len(scatter) <= 4, str([o.name for o in scatter]))
+check("Terrain: scatter makes a few merged objects (not one per tree)", 1 <= len(scatter) <= 7, str([o.name for o in scatter]))
 check("Terrain: the meadow gets trees", any("tree" in o.name for o in scatter))
 house_poly = [(20.0 + p[0], 10.0 + p[1]) for p in addon.plan_footprint(plan["children"][0])]
 bad = 0

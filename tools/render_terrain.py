@@ -12,7 +12,7 @@ node = gla.plan_node("land", "terrain", "terrain", params={"biome": biome, "widt
 gla.plan_write_to_blend(sc, node); gla.plan_build(bpy.context, node)
 cam = bpy.data.objects.new("cam", bpy.data.cameras.new("cam")); sc.collection.objects.link(cam)
 cam.data.lens = 30
-cam.location, tgt = ((0, -190, 120), Vector((0, 10, 0))) if "aerial" in args else ((0, -150, 45), Vector((0, 10, 0)))
+cam.location, tgt = ((0, -190, 120), Vector((0, 10, 0))) if "aerial" in args else ((10, -20, 5.5), Vector((10, 5, 1.5))) if "close" in args else ((0, -150, 45), Vector((0, 10, 0)))
 cam.rotation_euler = (tgt - cam.location).to_track_quat('-Z', 'Y').to_euler(); cam.data.clip_end = 2000; sc.camera = cam
 sun = bpy.data.objects.new("sun", bpy.data.lights.new("sun", 'SUN')); sc.collection.objects.link(sun)
 sun.rotation_euler = (math.radians(55), 0, math.radians(-40)); sun.data.energy = 3.5

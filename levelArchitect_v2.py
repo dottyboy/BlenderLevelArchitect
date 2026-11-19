@@ -16795,8 +16795,10 @@ PLAN_BIOMES = {
                    water=True, rock=(0.40, 0.38, 0.34), earth=(0.30, 0.23, 0.15),
                    ramp=[(0.0, (0.20, 0.16, 0.10)), (0.07, (0.55, 0.50, 0.32)), (0.13, (0.20, 0.34, 0.10)),
                          (0.5, (0.27, 0.42, 0.12)), (0.8, (0.36, 0.33, 0.25)), (1.0, (0.5, 0.48, 0.44))],
-                   scatter=[dict(kind="tree", per_ha=7, crown="ROUND", leaf=["GREEN", "GREEN", "AUTUMN"], height=(5.0, 8.0), slope=0.2, cluster=(45.0, 0.45)),
+                   scatter=[dict(kind="tree", per_ha=7, crown="ROUND", leaf=["GREEN", "GREEN", "AUTUMN"], height=(5.0, 8.0), slope=0.2, wet=0.5, cluster=(45.0, 0.45)),
                             dict(kind="bush", per_ha=16, leaf=["GREEN", "DARK"], slope=0.25, cluster=(30.0, 0.4)),
+                            dict(kind="grass", per_ha=900, leaf=["GREEN", "GREEN", "DARK"], slope=0.3, cluster=(22.0, 0.25)),
+                            dict(kind="flower", per_ha=160, colors=["YELLOW", "WHITE", "VIOLET", "PINK"], leaf=["DARK"], slope=0.25, cluster=(16.0, 0.5)),
                             dict(kind="rock", per_ha=3, slope=0.6)]),
     "forest": dict(label="Forest", amplitude=6.0, feature=55.0, detail=4.0, rough=0.5, base=0.0, sea=-4.5, island=0.0,
                    water=True, rock=(0.33, 0.32, 0.29), earth=(0.26, 0.2, 0.12),
@@ -16805,6 +16807,8 @@ PLAN_BIOMES = {
                    scatter=[dict(kind="tree", per_ha=70, crown="CONE", leaf=["DARK", "DARK", "GREEN"], height=(6.0, 11.0), slope=0.25, cluster=(40.0, 0.35)),
                             dict(kind="tree", per_ha=30, crown="ROUND", leaf=["GREEN", "DARK", "AUTUMN"], height=(5.0, 9.0), slope=0.25, cluster=(55.0, 0.4)),
                             dict(kind="bush", per_ha=30, leaf=["DARK", "GREEN"], slope=0.3),
+                            dict(kind="grass", per_ha=160, leaf=["DARK", "GREEN"], slope=0.35, cluster=(20.0, 0.4)),
+                            dict(kind="flower", per_ha=20, colors=["WHITE", "VIOLET", "RED"], leaf=["DARK"], slope=0.3, cluster=(14.0, 0.6)),
                             dict(kind="rock", per_ha=4, slope=0.6)]),
     "desert": dict(label="Desert", ridged=0.85, warp=25.0, amplitude=5.0, feature=90.0, detail=2.0, rough=0.35, base=0.0, sea=-6.0, island=0.0,
                    water=False, rock=(0.52, 0.40, 0.30), earth=(0.55, 0.44, 0.28),
@@ -16817,12 +16821,14 @@ PLAN_BIOMES = {
                    ramp=[(0.0, (0.18, 0.20, 0.20)), (0.07, (0.45, 0.45, 0.40)), (0.15, (0.50, 0.52, 0.45)),
                          (0.5, (0.72, 0.74, 0.76)), (0.8, (0.9, 0.92, 0.95)), (1.0, (0.95, 0.96, 1.0))],
                    scatter=[dict(kind="tree", per_ha=6, crown="CONE", leaf=["DARK"], height=(3.0, 5.0), slope=0.2, cluster=(50.0, 0.5)),
+                            dict(kind="grass", per_ha=70, leaf=["DARK"], slope=0.3, cluster=(25.0, 0.4)),
                             dict(kind="rock", per_ha=10, slope=0.7)]),
     "mountain": dict(label="Mountains", ridged=0.7, warp=45.0, sharp=1.6, amplitude=30.0, feature=110.0, detail=5.0, rough=0.5, base=0.0, sea=-20.0, island=0.0,
                      water=True, rock=(0.40, 0.38, 0.36), earth=(0.30, 0.26, 0.2),
                      ramp=[(0.0, (0.20, 0.16, 0.10)), (0.06, (0.28, 0.30, 0.15)), (0.22, (0.20, 0.30, 0.12)),
                            (0.34, (0.33, 0.30, 0.26)), (0.5, (0.44, 0.42, 0.40)), (0.62, (0.62, 0.63, 0.66)), (0.7, (0.92, 0.93, 0.96)), (1.0, (0.97, 0.98, 1.0))],
                      scatter=[dict(kind="tree", per_ha=22, crown="CONE", leaf=["DARK", "DARK", "GREEN"], height=(6.0, 10.0), slope=0.3, alt=(0.0, 0.42), cluster=(60.0, 0.4)),
+                              dict(kind="grass", per_ha=60, leaf=["DARK", "GREEN"], slope=0.4, alt=(0.0, 0.3), cluster=(30.0, 0.4)),
                               dict(kind="rock", per_ha=14, slope=1.0, alt=(0.0, 0.85))]),
     "island": dict(label="Island", amplitude=4.0, feature=50.0, detail=3.0, rough=0.45, base=1.0, sea=-2.2, island=1.0,
                    water=True, rock=(0.40, 0.38, 0.34), earth=(0.45, 0.38, 0.24),
@@ -16830,6 +16836,8 @@ PLAN_BIOMES = {
                          (0.6, (0.15, 0.30, 0.10)), (1.0, (0.4, 0.38, 0.3))],
                    scatter=[dict(kind="tree", per_ha=35, crown="ROUND", leaf=["GREEN", "GREEN", "DARK"], height=(5.0, 8.0), slope=0.25, alt=(0.04, 0.6), cluster=(40.0, 0.35)),
                             dict(kind="bush", per_ha=20, leaf=["GREEN"], slope=0.3, alt=(0.03, 0.6)),
+                            dict(kind="grass", per_ha=120, leaf=["GREEN"], slope=0.35, alt=(0.04, 0.6), cluster=(20.0, 0.4)),
+                            dict(kind="flower", per_ha=25, colors=["YELLOW", "RED", "WHITE"], leaf=["GREEN"], slope=0.3, alt=(0.04, 0.5), cluster=(14.0, 0.55)),
                             dict(kind="rock", per_ha=5, slope=0.7)]),
 }
 PLAN_TERRAIN_DEFAULTS = dict(biome="meadow", width=240.0, depth=240.0, resolution=2.0, pad_margin=10.0, scatter=1.0)
@@ -17829,6 +17837,57 @@ def _build_bush_mesh(seed):
     return soup
 
 
+FLOWER_COLORS = {"YELLOW": (0.95, 0.78, 0.12), "WHITE": (0.93, 0.93, 0.88), "VIOLET": (0.55, 0.3, 0.8), "RED": (0.82, 0.12, 0.1), "PINK": (0.93, 0.5, 0.65)}
+
+
+def _flower_material(color):
+    name = "LA_Flower_" + color.title()
+    mat = bpy.data.materials.get(name)
+    if mat is not None:
+        return mat
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    bsdf = next((n for n in mat.node_tree.nodes if n.type == 'BSDF_PRINCIPLED'), None)
+    rgb = FLOWER_COLORS[color]
+    if bsdf is not None:
+        _set_input(bsdf, 'Base Color', (*rgb, 1.0))
+        _set_input(bsdf, 'Roughness', 0.8)
+    mat.diffuse_color = (*rgb, 1.0)
+    return mat
+
+
+def _build_grass_mesh(seed):
+    """A tuft: five thin blades that lean out, a handful of triangles."""
+    rng = random.Random(seed)
+    soup = _TowerMesh()
+    for _ in range(5):
+        a = rng.uniform(0.0, 2 * math.pi)
+        h, lean, wd = rng.uniform(0.4, 0.8), rng.uniform(0.05, 0.28), 0.07
+        c, sn = math.cos(a), math.sin(a)
+        tip = (c * lean, sn * lean, h)
+        soup.poly('blade', [(-sn * wd, c * wd, 0.0), (sn * wd, -c * wd, 0.0), tip], [(0.0, 0.0), (1.0, 0.0), (0.5, 1.0)], (c, sn, 0.3), LEAF_SOURCE_SLOT)
+        soup.poly('blade', [(sn * wd, -c * wd, 0.0), (-sn * wd, c * wd, 0.0), tip], [(0.0, 0.0), (1.0, 0.0), (0.5, 1.0)], (-c, -sn, 0.3), LEAF_SOURCE_SLOT)
+    return soup
+
+
+def _build_flower_mesh(seed):
+    """A stem and a flat six-petal head (source slot 1 is the petal colour, LEAF_SOURCE_SLOT the stem)."""
+    rng = random.Random(seed)
+    soup = _TowerMesh()
+    h = rng.uniform(0.25, 0.45)
+    lean = rng.uniform(-0.05, 0.05)
+    soup.poly('stem', [(-0.012, 0.0, 0.0), (0.012, 0.0, 0.0), (lean, 0.0, h)], [(0.0, 0.0), (1.0, 0.0), (0.5, 1.0)], (0.0, -1.0, 0.0), LEAF_SOURCE_SLOT)
+    soup.poly('stem', [(0.012, 0.0, 0.0), (-0.012, 0.0, 0.0), (lean, 0.0, h)], [(0.0, 0.0), (1.0, 0.0), (0.5, 1.0)], (0.0, 1.0, 0.0), LEAF_SOURCE_SLOT)
+    r = rng.uniform(0.07, 0.11)
+    for i in range(6):
+        t0, t1 = 2 * math.pi * i / 6, 2 * math.pi * (i + 1) / 6
+        soup.poly('petal', [(lean, 0.0, h), (lean + r * math.cos(t0), r * math.sin(t0), h + 0.03), (lean + r * math.cos(t1), r * math.sin(t1), h + 0.03)],
+                  [(0.5, 0.0), (0.0, 1.0), (1.0, 1.0)], (0.0, 0.0, 1.0), 1)
+        soup.poly('petal', [(lean, 0.0, h), (lean + r * math.cos(t1), r * math.sin(t1), h + 0.03), (lean + r * math.cos(t0), r * math.sin(t0), h + 0.03)],
+                  [(0.5, 0.0), (0.0, 1.0), (1.0, 1.0)], (0.0, 0.0, -1.0), 1)
+    return soup
+
+
 def _terrain_scatter(context, tp, sampler, pads, seed, path, world, sea_level, weights_at=None, shares=None):
     """Trees, bushes, rocks and cacti of the biome: one merged mesh per kind, so a forest is a handful of objects."""
     import numpy as np
@@ -17859,11 +17918,15 @@ def _terrain_scatter(context, tp, sampler, pads, seed, path, world, sea_level, w
         kind = rule["kind"]
         share = shares[side] if shares else 1.0
         n_want = int(round(rule["per_ha"] * area_ha * tp["scatter"] * share))
+        if kind in ("grass", "flower"):
+            n_want = min(n_want, 6000)                                   # ground cover is plentiful; keep big terrains buildable
         if n_want <= 0:
             continue
         leaves = list(rule.get("leaf", ["GREEN"]))
-        slots = [wood_mat, rock_mat, cactus_mat] + [get_or_create_leaf_material(c) for c in sorted(set(leaves))]
+        flowers = sorted(set(rule.get("colors", ["YELLOW"]))) if kind == "flower" else []
+        slots = [wood_mat, rock_mat, cactus_mat] + [get_or_create_leaf_material(c) for c in sorted(set(leaves))] + [_flower_material(c) for c in flowers]
         leaf_slot = {c: 3 + i for i, c in enumerate(sorted(set(leaves)))}
+        flower_slot = {c: 3 + len(leaf_slot) + i for i, c in enumerate(flowers)}
         merged = _TowerMesh()
         variants = {}
         placed = 0
@@ -17884,6 +17947,8 @@ def _terrain_scatter(context, tp, sampler, pads, seed, path, world, sea_level, w
             z, slope = sampler(x, y)
             if z < sea_level + 0.5 or slope > rule.get("slope", 0.3):
                 continue
+            if rule.get("wet") and rng.random() > (1.0 - rule["wet"]) + rule["wet"] * math.exp(-(z - sea_level) / 7.0):
+                continue                                                   # this kind likes low, damp ground (near water)
             amp_l = wts[0] * tp["amplitude"] + sum(wk * e["amplitude"] for wk, e in zip(wts[1:], tp["extras"]))
             sea_l = wts[0] * tp["sea_level"] + sum(wk * e["sea"] for wk, e in zip(wts[1:], tp["extras"]))
             if tp["heightmap"]:
@@ -17894,7 +17959,7 @@ def _terrain_scatter(context, tp, sampler, pads, seed, path, world, sea_level, w
                 continue
             key = (int(x // cell), int(y // cell))
             if any((key[0] + dx, key[1] + dy) in taken for dx in (-1, 0, 1) for dy in (-1, 0, 1)
-                   if any(math.hypot(x - q[0], y - q[1]) < (1.6 if kind != "tree" else 2.6) for q in taken.get((key[0] + dx, key[1] + dy), ()))):
+                   if any(math.hypot(x - q[0], y - q[1]) < (2.6 if kind == "tree" else 0.45 if kind in ("grass", "flower") else 1.6) for q in taken.get((key[0] + dx, key[1] + dy), ()))):
                 continue
             if pads:
                 px, py = np.array([x]), np.array([y])
@@ -17914,6 +17979,16 @@ def _terrain_scatter(context, tp, sampler, pads, seed, path, world, sea_level, w
                 vkey = ("bush", leaf, rng.randrange(4))
                 if vkey not in variants:
                     variants[vkey] = (_build_bush_mesh(seed + vkey[2] * 31), {LEAF_SOURCE_SLOT: leaf_slot[leaf]})
+            elif kind == "grass":
+                leaf = rng.choice(leaves)
+                vkey = ("grass", leaf, rng.randrange(6))
+                if vkey not in variants:
+                    variants[vkey] = (_build_grass_mesh(seed + vkey[2] * 29), {LEAF_SOURCE_SLOT: leaf_slot[leaf]})
+            elif kind == "flower":
+                leaf, col = rng.choice(leaves), rng.choice(flowers)
+                vkey = ("flower", leaf, col, rng.randrange(4))
+                if vkey not in variants:
+                    variants[vkey] = (_build_flower_mesh(seed + vkey[3] * 17), {LEAF_SOURCE_SLOT: leaf_slot[leaf], 1: flower_slot[col]})
             elif kind == "cactus":
                 vkey = ("cactus", rng.randrange(5))
                 if vkey not in variants:
@@ -17923,7 +17998,7 @@ def _terrain_scatter(context, tp, sampler, pads, seed, path, world, sea_level, w
                 if vkey not in variants:
                     variants[vkey] = (_build_rock_mesh(seed + vkey[1] * 7), {1: 1})
             soup, mat_map = variants[vkey]
-            scale = rng.uniform(0.85, 1.25) if kind in ("rock", "bush") else 1.0
+            scale = rng.uniform(0.85, 1.25) if kind in ("rock", "bush") else rng.uniform(0.7, 1.4) if kind in ("grass", "flower") else 1.0
             merged.append(soup, rot=rng.uniform(0.0, 2 * math.pi), sx=scale, sy=scale, offset=(x, y, z - 0.15), mat_map=mat_map)
             placed += 1
         if placed:
