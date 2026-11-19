@@ -5727,6 +5727,15 @@ with open(os.path.join(bpy.app.tempdir, "gla_ts_test.json"), "w") as _f:
     json.dump({"tile": 16, "cols": 2, "roles": ["floor", "water"]}, _f)
 _lut = addon._tilemap_tileset({"image": _ts_path, "json": os.path.join(bpy.app.tempdir, "gla_ts_test.json")}, 16)
 _mp = _np2.zeros((64, 64, 3)); _mp[:] = (30, 200, 30); _mp[16:48, 16:48] = (200, 30, 30)
+# a sheet with a border and 1-px lines between the tiles (margin / gutter in the json)
+_gs = _np2.zeros((18, 35, 3)); _gs[:] = (255, 0, 255); _gs[1:17, 1:17] = (30, 200, 30); _gs[1:17, 18:34] = (200, 30, 30)
+_gs_im = bpy.data.images.new("gla_gs_test.png", 35, 18); _gs_px = _np2.ones((18, 35, 4)); _gs_px[..., :3] = _gs[::-1] / 255.0
+_gs_im.pixels.foreach_set(_gs_px.ravel().astype(_np2.float32)); _gs_path = os.path.join(bpy.app.tempdir, "gla_gs_test.png")
+_gs_im.filepath_raw = _gs_path; _gs_im.file_format = 'PNG'; _gs_im.save()
+with open(os.path.join(bpy.app.tempdir, "gla_gs_test.json"), "w") as _f:
+    json.dump({"tile": 16, "cols": 2, "margin": 1, "gutter": 1, "roles": ["canopy", "stone"]}, _f)
+_glut = addon._tilemap_tileset({"image": _gs_path, "json": os.path.join(bpy.app.tempdir, "gla_gs_test.json")}, 16)
+check("Tile map: a tileset sheet with margin and gutter is read tile by tile", sorted(_glut.values()) == [1, 2], str(sorted(_glut.values())))
 _rl = addon.tilemap_analyze(_mp, 16, lut=_lut)
 check("Tile map: a tileset gives the roles by exact tile match (green here is floor, not canopy)", (_rl[1:3, 1:3] == 3).all() and (_rl[0] == 0).all() and (_rl[:, 0] == 0).all(), str(_rl.tolist()))
 

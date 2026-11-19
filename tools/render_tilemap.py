@@ -15,7 +15,7 @@ for o in list(bpy.data.objects):
 extra = {}
 ts = os.environ.get("TILESET")
 if ts:
-    extra["tileset"] = {"image": ts, "json": os.path.splitext(ts)[0] + ".json"}
+    extra["tileset"] = {"image": ts, "json": os.environ.get("TILESET_JSON") or os.path.splitext(ts)[0] + ".json"}
 root = gla.plan_from_tilemap_picture(img, "tilemap", tile, tm, **extra)
 gla.plan_write_to_blend(sc, root); gla.plan_build(bpy.context, root)
 w, d = gla.tilemap_size(root["params"])

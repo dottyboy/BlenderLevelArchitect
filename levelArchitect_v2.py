@@ -16788,7 +16788,7 @@ TILEMAP_ROLES = ("floor", "canopy", "stone", "water", "prop")
 
 
 def _tilemap_tileset(spec, tile):
-    """{tile bytes: role code} of a tileset: spec = {"image": sheet path, "json": roles file} (json: {"tile", "cols", "roles": [...]}); None without one."""
+    """{tile bytes: role code} of a tileset: spec = {"image": sheet path, "json": roles file} (json: {"tile", "cols", "roles": [...], optional "margin" and "gutter" in px for sheets with a border and lines between the tiles}); None without one."""
     if not spec:
         return None
     path = bpy.path.abspath(spec["image"])
@@ -16807,7 +16807,8 @@ def _tilemap_tileset(spec, tile):
     for i, role in enumerate(meta["roles"]):
         if role not in TILEMAP_ROLES:
             raise PlanError("params.tileset: role %r of tile %d is not one of %s" % (role, i, ", ".join(TILEMAP_ROLES)))
-        y, x = (i // cols) * t, (i % cols) * t
+        margin, gutter = int(meta.get("margin", 0)), int(meta.get("gutter", 0))
+        y, x = margin + (i // cols) * (t + gutter), margin + (i % cols) * (t + gutter)
         lut.setdefault(sheet[y:y + t, x:x + t, :3].round().astype("uint8").tobytes(), TILEMAP_ROLES.index(role))
     return lut
 
