@@ -17703,6 +17703,20 @@ def _water_shader(name, kind):
     L.new(froth.outputs["Fac"], thr.inputs[0])
     thr.inputs[1].default_value = 0.46
     L.new(thr.outputs[0], broken.inputs[1])
+    if kind == "river":                            # rapids: the steeper the bed (whole part of u, 0-9) the more white water over the whole width
+        fl = node("ShaderNodeMath", -600, 450, operation='FLOOR')
+        L.new(sep.outputs["X"], fl.inputs[0])
+        steep = maprange(fl.outputs[0], 3.0, 8.0, -450, 450)
+        wh = node("ShaderNodeMath", -300, 450, operation='GREATER_THAN')
+        L.new(froth.outputs["Fac"], wh.inputs[0])
+        L.new(maprange(steep, 0.0, 1.0, -450, 380, 0.62, 0.40), wh.inputs[1])
+        gate = node("ShaderNodeMath", -150, 450, operation='MULTIPLY')
+        L.new(wh.outputs[0], gate.inputs[0])
+        L.new(steep, gate.inputs[1])
+        mx = node("ShaderNodeMath", 0, 450, operation='MAXIMUM')
+        L.new(broken.outputs[0], mx.inputs[0])
+        L.new(gate.outputs[0], mx.inputs[1])
+        broken = mx
     col = node("ShaderNodeMix", 0, 250)
     col.data_type = 'RGBA'
     L.new(deep_t, col.inputs[0])
@@ -18060,8 +18074,9 @@ def _plan_build_terrain(context, root, resolved, node, path):
             ln = math.hypot(bx - ax, by - ay) or 1.0
             nxn, nyn = -(by - ay) / ln * half * 1.25, (bx - ax) / ln * half * 1.25
             za, zb = bed[i] + 0.75, bed[i + 1] + 0.75
+            k_ = int(min(9, max(0, round((bed[i] - bed[i + 1]) / ln / 0.08 * 9.0))))          # how steep the bed is here, 0-9, carried in the whole part of u
             river_soup.poly('river', [(ax + nxn, ay + nyn, za), (bx + nxn, by + nyn, zb), (bx - nxn, by - nyn, zb), (ax - nxn, ay - nyn, za)],
-                            [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)], (0.0, 0.0, 1.0), 0)
+                            [(float(k_), 0.0), (k_ + 1.0, 0.0), (k_ + 1.0, 1.0), (float(k_), 1.0)], (0.0, 0.0, 1.0), 0)
         river_stats += 1
         river_defs.append({"pts": pts, "width": river["width"]})
     bridges = _terrain_bridges(pads, river_defs) if river_defs else []

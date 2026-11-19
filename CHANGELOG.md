@@ -5,6 +5,7 @@ reproduced exactly from its settings (see **Debug: Last Generation Params** in t
 
 ## Unreleased — terrain: look, relief, water and ground cover
 
+- **Rapids**: a river's bed steepness (0-9) rides in the whole part of the ribbon's u; the river shader turns steep stretches into white water across the whole width.
 - **Ground cover**: scatter kinds `grass` (tufts of blades, up to 900/ha) and `flower` (five colours) in meadow, forest, tundra, mountain and island biomes (capped at 6000 per kind); rules may carry `wet` (0-1) so trees prefer low, damp ground near water.
 - **Water**: lakes are a sheet only over the wet grid cells with a baked `depth` attribute, shaded from turquoise shallows to deep blue with growing opacity, shore foam and ripples (`LA_Lake`); rivers get edge foam and flow streaks from their ribbon UVs (`LA_River`). Shader only.
 - **Ground look**: the terrain material multiplies the baked colour by patches (~6 m), grain and a slow warm/cool tint, and bumps the normal with fine noise; shader only, no geometry.
