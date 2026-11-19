@@ -303,6 +303,12 @@ Press **House from Floor-Plan Picture...** in the Plans panel and choose a pictu
 
 For a house with several floors choose the ground floor and list the pictures of the floors above in *Upper floors* (separated by `;`, drawn to the same scale). Then add the stairs with *Edit a parameter* on `stairs`, e.g. `[{"floor": 0, "x": -3.5, "y": 2.4, "dir": "-y", "width": 1.0}]` (the flight starts at x, y and runs in `dir`; the floor above gets a hole over it). Walls must be straight and square to the picture; a door whose arc is not recognised stays an open doorway.
 
+### A level from a tile map picture
+
+Press **Level from Tile Map...** in the Plans panel and choose a picture of a whole level drawn from square tiles (the kind of map 16-bit action games used). Set **Tile size (px)** (usually 16) and **Tile size (m)**, then press **Build**.
+Each tile gets a role from its colour and texture: **floor** (flat), **green mass** (raised, for foliage) or **rough grey mass** (raised, for stone walls and machinery). The picture itself is the texture, read pixel-sharp, so the 3D level keeps the look of the tiles.
+In a plan, `params.roles` = `{"x,y": 0|1|2}` overrides single tiles, and `params.green` / `params.rough` move the thresholds (green share of the colour 0.375, texture roughness 22). The maps and tilesets of commercial games are not included; use pictures you are allowed to use.
+
 ### Walled towns
 
 The **Town** button makes a round town: a stone wall with towers (none in the gateway) and a gate with an approach road, and inside

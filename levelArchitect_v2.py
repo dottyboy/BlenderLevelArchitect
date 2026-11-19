@@ -16776,11 +16776,170 @@ def plan_from_floorplan_picture(path, plan_id="house", mpp=None, width=12.0, ext
     return root
 
 
+# ==============================================================================
+# `tilemap` building: a 2D tile map (a picture of a whole level made of square tiles, like the maps of 16-bit action games) becomes a
+# 3D level. Each tile gets a role from its colour and texture (floor, canopy = green mass, stone = grey rough mass), the roles give the
+# height (floor flat, canopy and stone raised), and the picture itself is the texture, read with nearest filtering, so the 3D level keeps
+# the exact pixel look of the tiles. `tilemap_analyze` reads (numpy only), `_build_tilemap` builds the one mesh with walls where heights differ.
+# ==============================================================================
+PLAN_TILEMAP_DEFAULTS = dict(image=None, tile=16, tile_m=1.0, canopy=2.4, stone=3.2, green=0.375, rough=22.0, roles=None)
+TILEMAP_ROLES = ("floor", "canopy", "stone")
+
+
+def tilemap_analyze(rgb, tile=16, green=0.375, rough=22.0, roles=None):
+    """Roles of the tiles of a map picture: an int array (rows top to bottom, tile columns), 0 floor, 1 canopy, 2 stone.
+    A tile is canopy when its green share of the colour is above `green`, stone when it is not green but its texture is rough
+    (mean standard deviation of the pixels above `rough`), floor otherwise. `roles` = {"x,y": 0|1|2} overrides single tiles (tile column x, row y from the top)."""
+    import numpy as np
+    rgb = np.asarray(rgb, dtype=float)
+    h, w = rgb.shape[:2]
+    ty, tx = h // tile, w // tile
+    if ty < 2 or tx < 2:
+        raise PlanError("the map picture is smaller than two tiles of %d px" % tile)
+    tiles = rgb[:ty * tile, :tx * tile, :3].reshape(ty, tile, tx, tile, 3).transpose(0, 2, 1, 3, 4)
+    mean = tiles.mean(axis=(2, 3))
+    std = tiles.std(axis=(2, 3)).mean(axis=2)
+    gshare = mean[..., 1] / np.maximum(mean.sum(axis=2), 1.0)
+    out = np.zeros((ty, tx), dtype=np.uint8)
+    out[gshare > green] = 1
+    out[(gshare <= green) & (std > rough)] = 2
+    for key, role in (roles or {}).items():
+        x, y = (int(v) for v in str(key).split(","))
+        if 0 <= x < tx and 0 <= y < ty and role in (0, 1, 2):
+            out[y, x] = role
+    return out
+
+
+def _tilemap_image_size(params):
+    import struct
+    path = (params or {}).get("image")
+    if not path:
+        raise PlanError("params.image: the map picture is missing")
+    path = bpy.path.abspath(path)
+    try:
+        with open(path, "rb") as f:
+            head = f.read(24)
+        if head[:8] == b"\x89PNG\r\n\x1a\n":
+            return struct.unpack(">II", head[16:24])
+    except OSError:
+        raise PlanError("params.image: cannot read %r" % path)
+    arr = _plan_image_pixels(path=path)
+    return arr.shape[1], arr.shape[0]
+
+
+def tilemap_size(params=None):
+    """(width, depth) in metres of the 3D level made from this map."""
+    p = {**PLAN_TILEMAP_DEFAULTS, **(params or {})}
+    w, h = _tilemap_image_size(p)
+    return (w // p["tile"]) * p["tile_m"], (h // p["tile"]) * p["tile_m"]
+
+
+def _build_tilemap(p):
+    """(mesh data as (verts, faces, uvs), role grid, layout) of a tile map; the origin is the middle of the map, y up = north = the top of the picture."""
+    import numpy as np
+    path = bpy.path.abspath(p["image"])
+    rgb = _plan_image_pixels(path=path)
+    tile, tm = int(p["tile"]), float(p["tile_m"])
+    if not 4 <= tile <= 128 or not 0.1 <= tm <= 20.0:
+        raise PlanError("params.tile must be 4..128 px and params.tile_m 0.1..20 m")
+    roles = tilemap_analyze(rgb, tile, p["green"], p["rough"], p.get("roles"))
+    ty, tx = roles.shape
+    if ty * tx > 90000:
+        raise PlanError("the map has %d tiles (at most 90000)" % (ty * tx))
+    iw, ih = rgb.shape[1], rgb.shape[0]
+    zs = np.array([0.0, float(p["canopy"]), float(p["stone"])])[roles]
+    verts, faces, uvs = [], [], []
+    ox, oy = tx * tm / 2.0, ty * tm / 2.0
+
+    def quad(pts, uv):
+        i = len(verts)
+        verts.extend(pts)
+        faces.append((i, i + 1, i + 2, i + 3))
+        uvs.extend(uv)
+    for j in range(ty):
+        for i in range(tx):
+            x0, x1 = i * tm - ox, (i + 1) * tm - ox
+            y1, y0 = oy - j * tm, oy - (j + 1) * tm                  # row 0 is the top of the picture = +y
+            u0, u1 = i * tile / iw, (i + 1) * tile / iw
+            v1, v0 = 1.0 - j * tile / ih, 1.0 - (j + 1) * tile / ih
+            z = float(zs[j, i])
+            uv = [(u0, v0), (u1, v0), (u1, v1), (u0, v1)]
+            quad([(x0, y0, z), (x1, y0, z), (x1, y1, z), (x0, y1, z)], uv)
+            for (di, dj), edge in (((1, 0), "e"), ((-1, 0), "w"), ((0, -1), "n"), ((0, 1), "s")):    # walls down to a lower neighbour
+                ni, nj = i + di, j + dj
+                zn = float(zs[nj, ni]) if 0 <= ni < tx and 0 <= nj < ty else -0.5
+                if zn >= z:
+                    continue
+                if edge == "e":
+                    pts = [(x1, y0, zn), (x1, y1, zn), (x1, y1, z), (x1, y0, z)]
+                elif edge == "w":
+                    pts = [(x0, y1, zn), (x0, y0, zn), (x0, y0, z), (x0, y1, z)]
+                elif edge == "n":
+                    pts = [(x1, y1, zn), (x0, y1, zn), (x0, y1, z), (x1, y1, z)]
+                else:
+                    pts = [(x0, y0, zn), (x1, y0, zn), (x1, y0, z), (x0, y0, z)]
+                quad(pts, [(u0, v0), (u1, v0), (u1, v1), (u0, v1)])
+    floor = int((roles == 0).sum())
+    layout = {"name": "tilemap", "tile_m": tm, "tiles": [tx, ty], "floor_share": floor / float(tx * ty), "size": [tx * tm, ty * tm],
+              "roles": roles.tolist()}
+    return (verts, faces, uvs), roles, layout
+
+
+def _tilemap_material(path):
+    name = "LA_Tilemap_" + os.path.basename(path)
+    mat = bpy.data.materials.get(name)
+    if mat is not None:
+        return mat
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    nt = mat.node_tree
+    bsdf = next(n for n in nt.nodes if n.type == 'BSDF_PRINCIPLED')
+    tex = nt.nodes.new("ShaderNodeTexImage")
+    tex.image = bpy.data.images.load(path, check_existing=True)
+    tex.interpolation = 'Closest'
+    tex.location = (-400, 0)
+    nt.links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
+    _set_input(bsdf, "Roughness", 1.0)
+    _set_input(bsdf, "Specular IOR Level", 0.0)
+    return mat
+
+
+def _plan_build_tilemap(context, node, world, seed, path):
+    where = "/".join(path)
+    p = {**PLAN_TILEMAP_DEFAULTS, **(node.get("params") or {})}
+    try:
+        (verts, faces, uvs), roles, layout = _build_tilemap(p)
+    except PlanError as exc:
+        raise PlanError("%s: %s" % (where, exc))
+    mesh = bpy.data.meshes.new("Tilemap_" + node["id"])
+    mesh.from_pydata(verts, [], faces)
+    uv_layer = mesh.uv_layers.new(name="UVMap")
+    flat = [c for uv in uvs for c in uv]
+    # loops follow the faces in order, four per quad, in the same order as the vertices were added
+    uv_layer.data.foreach_set("uv", flat)
+    mesh.update()
+    mesh.materials.append(_tilemap_material(bpy.path.abspath(p["image"])))
+    obj = bpy.data.objects.new(mesh.name, mesh)
+    context.scene.collection.objects.link(obj)
+    obj["gla_walk_layout"] = json.dumps({k: v for k, v in layout.items() if k != "roles"})
+    _plan_adopt_objects(context.scene, path, world, [obj])
+    return [obj]
+
+
+def plan_from_tilemap_picture(path, plan_id="tilemap", tile=16, tile_m=1.0, **extra):
+    """A plan tree (one `tilemap` building) from a picture of a tile map."""
+    return plan_node(plan_id, "building", "tilemap", transform={"x": 0.0, "y": 0.0, "z": 0.0, "rot": 0.0},
+                     params={"image": path, "tile": tile, "tile_m": tile_m, **extra})
+
+
+PLAN_DEFAULT_FOOTPRINTS["tilemap"] = lambda params: _footprint_rect(dict(zip(("width", "depth"), tilemap_size(params))))
+
+
 PLAN_BUILDERS = {"tower": _plan_build_tower, "castle": _plan_build_castle,
                  "house": _plan_build_house, "chapel": _plan_build_house, "stable": _plan_build_house,
                  "barn": _plan_build_house, "well": _plan_build_well, "keep": _plan_build_keep,
                  "tree": _plan_build_prop, "barrel": _plan_build_prop, "crate": _plan_build_prop, "haystack": _plan_build_prop,
-                 "hut": _plan_build_hut, "terrace_city": _plan_build_terrace_city, "swan_castle": _plan_build_swan_castle, "mansion": _plan_build_mansion, "rock_city": _plan_build_rock_city, "floor_plan": _plan_build_floor_plan}
+                 "hut": _plan_build_hut, "terrace_city": _plan_build_terrace_city, "swan_castle": _plan_build_swan_castle, "mansion": _plan_build_mansion, "rock_city": _plan_build_rock_city, "floor_plan": _plan_build_floor_plan, "tilemap": _plan_build_tilemap}
 
 
 # ------------------------------------------------------------------------------
@@ -18591,6 +18750,36 @@ class OBJECT_OT_PlanImportHouse(bpy.types.Operator, ImportHelper):
         return {'FINISHED'}
 
 
+class OBJECT_OT_PlanImportTilemap(bpy.types.Operator, ImportHelper):
+    """Builds a 3D level from a picture of a tile map (a whole level drawn from square tiles): floor stays flat, green masses and rough grey masses are raised, and the picture itself is the pixel-sharp texture."""
+    bl_idname = "object.gla_plan_import_tilemap"
+    bl_label = "Level from Tile Map"
+    bl_options = {'REGISTER', 'UNDO'}
+    filename_ext = ".png"
+    filter_glob: StringProperty(default="*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff;*.webp", options={'HIDDEN'})
+    tile: IntProperty(name="Tile size (px)", default=16, min=4, max=128, description="Width of one tile in the picture")
+    tile_m: FloatProperty(name="Tile size (m)", default=1.0, min=0.1, max=20.0, description="How many metres one tile is in 3D")
+    canopy: FloatProperty(name="Green mass height (m)", default=2.4, min=0.0, max=30.0)
+    stone: FloatProperty(name="Rough mass height (m)", default=3.2, min=0.0, max=30.0)
+
+    def execute(self, context):
+        try:
+            root = plan_from_tilemap_picture(self.filepath, "tilemap", self.tile, self.tile_m, canopy=self.canopy, stone=self.stone)
+            tilemap_size(root["params"])
+            base = re.sub(r"[^a-z0-9_]+", "_", os.path.splitext(os.path.basename(self.filepath))[0].lower()).strip("_") or "tilemap"
+            ids = set(plan_list_ids())
+            n, root["id"] = 1, base
+            while root["id"] in ids:
+                n += 1
+                root["id"] = "%s_%d" % (base, n)
+            plan_write_to_blend(context.scene, root)
+        except (PlanError, OSError) as exc:
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+        self.report({'INFO'}, "Tile map '%s' ready. Press Build." % root["id"])
+        return {'FINISHED'}
+
+
 class OBJECT_OT_PlanImport(bpy.types.Operator, ImportHelper):
     """Imports a floor-plan drawing (.svg or .dxf) as a plan: closed shapes become buildings or yards, lines roads, circles trees or towers."""
     bl_idname = "object.gla_plan_import"
@@ -19905,6 +20094,7 @@ class VIEW3D_PT_GLAPlans(bpy.types.Panel):
         row.operator("object.gla_plan_load", text="Load Plan...", icon='IMPORT')
         row.operator("object.gla_plan_import", text="Import Plan (SVG, DXF, image)...", icon='IMPORT')
         layout.operator("object.gla_plan_import_house", text="House from Floor-Plan Picture...", icon='HOME')
+        layout.operator("object.gla_plan_import_tilemap", text="Level from Tile Map...", icon='MESH_GRID')
 
 
 # ==============================================================================
@@ -19929,6 +20119,7 @@ classes = (
     OBJECT_OT_PlanLoad,
     OBJECT_OT_PlanImport,
     OBJECT_OT_PlanImportHouse,
+    OBJECT_OT_PlanImportTilemap,
     OBJECT_OT_GenerateLevelTower,
     OBJECT_OT_GenerateLevelCastle,
     OBJECT_OT_ExportGamePackage,

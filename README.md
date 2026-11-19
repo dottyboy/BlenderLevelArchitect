@@ -74,7 +74,7 @@ The full walkthrough is the **[User Guide](docs/USER_GUIDE.md)**.
 | **Towers, castles, ruins** | A round **Tower** (spiral stairs, railing, lanterns, furniture) and a walled **Castle**; one **Ruin** slider breaks them down with jagged tops, breaches and rubble, and doorways stay passable. |
 | **Plans: whole sites** | A site described as nested data — fortress, farm, hamlet, street, district, walled town, huts, terrace city, rock city — in one of **seven style packs** (or a mix), with regular, round or organic shapes, on a **Geometry Nodes terrain** in six biomes. Stored in the .blend and as JSON. |
 | **Buildings from plans** | **Mansion** from a room plan, **Villa** generator (random plans), **Swan castle**, and a **house traced from a picture** of its floor plan (several pictures for several floors). |
-| **Import** | SVG, DXF or a painted PNG for a whole village; a greyscale **heightmap** for the ground; a floor-plan picture for a house. |
+| **Import** | SVG, DXF or a painted PNG for a whole village; a greyscale **heightmap** for the ground; a floor-plan picture for a house; a **tile-map picture** (a level drawn from square tiles) for a 3D level that keeps its pixel look. |
 | **Engine export** | glTF/GLB, collision mesh, and **game packages**: glb + JSON of walkable areas, rooms, stairs, lights and props — per floor if you like. |
 | **Tested** | 1400+ automated checks (ray-cast passability, grid walk checks, normals, vertex budgets, round-trips) on Blender 4.2 LTS and 5.2. |
 

@@ -5692,6 +5692,39 @@ for bad, why in (({"floors": None}, "floors"), ({"floors": [fpd], "stairs": [{"f
     except addon.PlanError as exc:
         check("House picture: bad %s are refused" % why, why in str(exc), str(exc))
 
+
+# --- Level from a tile map picture
+print("\n--- Plans: a level from a tile map picture ---")
+import numpy as _np2
+_tm_img = _np2.zeros((96, 160, 3))
+_tm_img[:] = (104, 104, 88)                                    # floor tiles: flat brown-grey
+_tm_img[:32, :] = (88, 136, 104)                               # a band of green mass (flat, 2 tile rows)
+_tm_rng = _np2.random.default_rng(5)
+_tm_img[64:96, 96:160] = _tm_rng.integers(40, 200, (32, 64, 3))   # a block of rough grey noise = stone
+tmx = addon.tilemap_analyze(_tm_img, 16)
+check("Tile map: roles are found from colour and texture (green mass, floor, rough stone)",
+      tmx.shape == (6, 10) and (tmx[:2] == 1).all() and (tmx[2:4] == 0).all() and (tmx[4:, 6:] == 2).all(), str(tmx.tolist()))
+check("Tile map: single tiles can be overridden", addon.tilemap_analyze(_tm_img, 16, roles={"0,3": 2})[3, 0] == 2)
+_tm_name = "gla_tm_test.png"
+_tm_im = bpy.data.images.new(_tm_name, 160, 96)
+_tm_px = _np2.ones((96, 160, 4)); _tm_px[..., :3] = _tm_img[::-1] / 255.0
+_tm_im.pixels.foreach_set(_tm_px.ravel().astype(_np2.float32)); _tm_path = os.path.join(bpy.app.tempdir, _tm_name)
+_tm_im.filepath_raw = _tm_path; _tm_im.file_format = 'PNG'; _tm_im.save()
+tm_root = addon.plan_from_tilemap_picture(_tm_path, "tm_test", 16, 1.0)
+check("Tile map: the level is as big as the picture in tiles", addon.tilemap_size(tm_root["params"]) == (10.0, 6.0), str(addon.tilemap_size(tm_root["params"])))
+addon.plan_build(bpy.context, tm_root)
+tm_obj = [o for o in bpy.data.objects if o.type == "MESH" and o.data.name.startswith("Tilemap_tm_test")]
+check("Tile map: builds one mesh with the picture as its texture and UVs inside 0..1", len(tm_obj) == 1 and len(tm_obj[0].data.materials) == 1
+      and all(-1e-4 <= c <= 1 + 1e-4 for d_ in tm_obj[0].data.uv_layers[0].data for c in d_.uv))
+tzs = [v.co.z for v in tm_obj[0].data.vertices]
+check("Tile map: green mass is raised and the floor stays at 0", max(tzs) > 3.0 and min(tzs) <= 0.0 and abs(max(tzs) - 3.2) < 1e-3, str((min(tzs), max(tzs))))
+for bad in ({"image": None}, {"image": _tm_path, "tile": 2}):
+    try:
+        addon.plan_build(bpy.context, addon.plan_node("tm_bad", "building", "tilemap", params=bad))
+        check("Tile map: bad params are refused (%s)" % list(bad), False)
+    except addon.PlanError:
+        check("Tile map: bad params are refused (%s)" % list(bad), True)
+
 # ==============================================================================
 print()
 if failures:

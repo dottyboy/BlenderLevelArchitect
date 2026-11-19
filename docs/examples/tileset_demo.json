@@ -1,0 +1,40 @@
+{
+ "tile": 16,
+ "cols": 8,
+ "roles": [
+  "floor",
+  "floor",
+  "floor",
+  "floor",
+  "floor",
+  "floor",
+  "floor",
+  "water",
+  "canopy",
+  "canopy",
+  "canopy",
+  "stone",
+  "stone",
+  "stone",
+  "stone",
+  "floor"
+ ],
+ "names": [
+  "grass",
+  "grass",
+  "grass",
+  "dirt",
+  "dirt",
+  "paving",
+  "sand",
+  "water",
+  "canopy",
+  "canopy",
+  "canopy",
+  "brick",
+  "brick",
+  "brick window",
+  "rubble",
+  "paving"
+ ]
+}
