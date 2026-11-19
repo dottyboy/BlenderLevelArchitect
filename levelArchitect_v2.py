@@ -17633,6 +17633,122 @@ def _terrain_material(name):
     return mat
 
 
+def _water_shader(name, kind):
+    """Lake / river water: shallow turquoise to deep blue by the baked `depth` attribute (lake) or the ribbon's UV (river), foam along the
+    shore or banks, ripples as a normal bump. Shader only; kind is 'lake' or 'river'."""
+    mat = bpy.data.materials.get(name)
+    if mat is not None:
+        return mat
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    nt = mat.node_tree
+    bsdf = next(n for n in nt.nodes if n.type == 'BSDF_PRINCIPLED')
+    N, L = nt.nodes, nt.links
+
+    def node(kind_, x, y, **kw):
+        n = N.new(kind_)
+        n.location = (x, y)
+        for k, v in kw.items():
+            _set_prop(n, k, v)
+        return n
+
+    def maprange(src, lo, hi, x, y, lo_out=0.0, hi_out=1.0):
+        m = node("ShaderNodeMapRange", x, y)
+        m.inputs["From Min"].default_value, m.inputs["From Max"].default_value = lo, hi
+        m.inputs["To Min"].default_value, m.inputs["To Max"].default_value = lo_out, hi_out
+        L.new(src, m.inputs["Value"])
+        return m.outputs["Result"]
+    tc = node("ShaderNodeTexCoord", -1000, 0)
+    ripple = node("ShaderNodeTexNoise", -800, -200)
+    ripple.inputs["Scale"].default_value, ripple.inputs["Detail"].default_value = 1.6, 5.0
+    L.new(tc.outputs["Object"], ripple.inputs["Vector"])
+    froth = node("ShaderNodeTexNoise", -800, 100)
+    froth.inputs["Scale"].default_value, froth.inputs["Detail"].default_value = 0.9, 4.0
+    if kind == "lake":
+        attr = node("ShaderNodeAttribute", -1000, 300)
+        attr.attribute_name = "depth"
+        _set_prop(attr, 'attribute_type', 'GEOMETRY')
+        depth = attr.outputs["Fac"]
+        L.new(tc.outputs["Object"], froth.inputs["Vector"])
+        shore = maprange(depth, 0.04, 0.2, -300, 300, 1.0, 0.0)          # 1 right at the waterline
+        deep_t = maprange(depth, 0.0, 4.5, -600, 300)
+        alpha_t = maprange(depth, 0.0, 2.2, -600, 150, 0.4, 0.93)
+    else:
+        mp = node("ShaderNodeMapping", -800, 0)
+        mp.inputs["Scale"].default_value = (5.0, 1.5, 1.0)
+        L.new(tc.outputs["UV"], mp.inputs["Vector"])
+        L.new(mp.outputs["Vector"], froth.inputs["Vector"])
+        sep = node("ShaderNodeSeparateXYZ", -800, 300)
+        L.new(tc.outputs["UV"], sep.inputs["Vector"])
+        across = node("ShaderNodeMath", -600, 300, operation='SUBTRACT')
+        L.new(sep.outputs["Y"], across.inputs[0])
+        across.inputs[1].default_value = 0.5
+        edge = node("ShaderNodeMath", -450, 300, operation='ABSOLUTE')
+        L.new(across.outputs[0], edge.inputs[0])
+        shore = maprange(edge.outputs[0], 0.40, 0.48, -300, 300)
+        deep_t = maprange(edge.outputs[0], 0.5, 0.0, -600, 150)
+        alpha_t = maprange(edge.outputs[0], 0.5, 0.15, -600, 0, 0.45, 0.9)
+    # foam is the shore band broken up by the froth noise
+    broken = node("ShaderNodeMath", -150, 250, operation='MULTIPLY')
+    L.new(shore, broken.inputs[0])
+    thr = node("ShaderNodeMath", -300, 100, operation='GREATER_THAN')
+    L.new(froth.outputs["Fac"], thr.inputs[0])
+    thr.inputs[1].default_value = 0.46
+    L.new(thr.outputs[0], broken.inputs[1])
+    col = node("ShaderNodeMix", 0, 250)
+    col.data_type = 'RGBA'
+    L.new(deep_t, col.inputs[0])
+    col.inputs[6].default_value = (0.08, 0.42, 0.45, 1.0) if kind == "lake" else (0.10, 0.36, 0.40, 1.0)
+    col.inputs[7].default_value = (0.01, 0.07, 0.17, 1.0) if kind == "lake" else (0.03, 0.16, 0.24, 1.0)
+    fcol = node("ShaderNodeMix", 200, 250)
+    fcol.data_type = 'RGBA'
+    L.new(broken.outputs[0], fcol.inputs[0])
+    L.new(col.outputs[2], fcol.inputs[6])
+    fcol.inputs[7].default_value = (0.92, 0.95, 0.97, 1.0)
+    L.new(fcol.outputs[2], bsdf.inputs["Base Color"])
+    falpha = node("ShaderNodeMath", 200, 50, operation='MAXIMUM')
+    L.new(alpha_t, falpha.inputs[0])
+    L.new(broken.outputs[0], falpha.inputs[1])
+    L.new(falpha.outputs[0], bsdf.inputs["Alpha"])
+    bump = node("ShaderNodeBump", 200, -200)
+    bump.inputs["Strength"].default_value, bump.inputs["Distance"].default_value = 0.12, 0.2
+    L.new(ripple.outputs["Fac"], bump.inputs["Height"])
+    L.new(bump.outputs["Normal"], bsdf.inputs["Normal"])
+    _set_input(bsdf, "Roughness", 0.08)
+    mat.diffuse_color = (0.05, 0.25, 0.33, 0.8)
+    return mat
+
+
+def _terrain_water_mesh(heights, nx, ny, w, d, sea, name, margin=0.7):
+    """The lake sheet: only the grid cells that are under or just above the water line, at z = sea, with a `depth` attribute (sea - ground)
+    per vertex that the lake shader turns into colour, transparency and shore foam. None if no cell is wet."""
+    import numpy as np
+    wet = ((heights[:-1, :-1] < sea + margin) | (heights[:-1, 1:] < sea + margin) | (heights[1:, :-1] < sea + margin) | (heights[1:, 1:] < sea + margin))
+    wet &= ~((heights[:-1, :-1] > sea + 4 * margin) & (heights[:-1, 1:] > sea + 4 * margin) & (heights[1:, :-1] > sea + 4 * margin) & (heights[1:, 1:] > sea + 4 * margin))
+    js, is_ = np.nonzero(wet)
+    if len(js) == 0:
+        return None
+    used = {}
+    verts, depth, faces = [], [], []
+    sx, sy = w / nx, d / ny
+
+    def vid(i, j):
+        key = (i, j)
+        if key not in used:
+            used[key] = len(verts)
+            verts.append((-w / 2 + i * sx, -d / 2 + j * sy, sea))
+            depth.append(float(sea - heights[j, i]))
+        return used[key]
+    for j, i in zip(js.tolist(), is_.tolist()):
+        faces.append((vid(i, j), vid(i + 1, j), vid(i + 1, j + 1), vid(i, j + 1)))
+    mesh = bpy.data.meshes.new(name)
+    mesh.from_pydata(verts, [], faces)
+    mesh.update()
+    a = mesh.attributes.new("depth", 'FLOAT', 'POINT')
+    a.data.foreach_set("value", np.array(depth, dtype=np.float32))
+    return mesh
+
+
 def _water_material():
     mat = bpy.data.materials.get("LA_Water")
     if mat is None:
@@ -17884,7 +18000,7 @@ def _plan_build_terrain(context, root, resolved, node, path):
         heights = read_heights()
     if river_pads:
         rmesh = river_soup.to_mesh("River_" + node["id"])
-        rmesh.materials.append(_water_material())
+        rmesh.materials.append(_water_shader("LA_River", "river"))
         robj = bpy.data.objects.new(rmesh.name, rmesh)
         context.scene.collection.objects.link(robj)
         _plan_adopt_objects(context.scene, path + ("river",), info["world"], [robj])
@@ -17898,11 +18014,10 @@ def _plan_build_terrain(context, root, resolved, node, path):
     stats = {"min": float(heights.min()), "max": float(heights.max()), "rivers": river_stats, "bridges": len(bridges)}
     if tp["water"] and heights.min() < sea - 0.2:
         w, d = tp["width"], tp["depth"]
-        soup = _TowerMesh()
-        soup.poly('water', [(-w / 2, -d / 2, sea), (w / 2, -d / 2, sea), (w / 2, d / 2, sea), (-w / 2, d / 2, sea)],
-                  [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)], (0.0, 0.0, 1.0), 0)
-        wmesh = soup.to_mesh("Water_" + node["id"])
-        wmesh.materials.append(_water_material())
+        wmesh = _terrain_water_mesh(heights, nx, ny, w, d, sea, "Water_" + node["id"])
+        if wmesh is None:
+            wmesh = bpy.data.meshes.new("Water_" + node["id"])
+        wmesh.materials.append(_water_shader("LA_Lake", "lake"))
         wobj = bpy.data.objects.new(wmesh.name, wmesh)
         context.scene.collection.objects.link(wobj)
         _plan_adopt_objects(context.scene, path + ("water",), info["world"], [wobj])
