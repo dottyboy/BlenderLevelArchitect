@@ -7483,6 +7483,7 @@ _STYLE_CONTRAST = {'ALPINE_LOG': 0.5, 'STRAW': 0.5, 'BRANCH': 0.5, 'EARTH': 0.25
 ROOF_COLORS = ('TERRACOTTA', 'SLATE', 'STONE', 'THATCH', 'SANDROOF', 'TILE_GREY', 'METAL', 'SHINGLE', 'SOD', 'AIRCRETE', 'INK_ROOF')
 
 
+_INK_IMAGES = False                                              # True: ink materials use tileable images (exportable to glTF) instead of shaders
 _ACTIVE_SKIN = ""                                              # "ink" while a plan node of the ink style is being built: grass, leaves, water, rock and wood take the ink look too
 INK_PAPERS = {"white": (0.91, 0.91, 0.94), "old": (0.89, 0.84, 0.70), "grey": (0.74, 0.76, 0.80), "cream": (0.95, 0.93, 0.85)}
 _INK_PAPER = "white"                                            # the paper of the plan being built (plan field "paper")
@@ -7503,10 +7504,113 @@ def _skin_ink():
     return _ACTIVE_SKIN == "ink"
 
 
+def _ink_tile_array(kind, paper, size=512):
+    """A tileable ink-on-paper picture of one kind of surface (display-space RGB floats): stipple (leaf, cactus, terrain), wave lines (water), cracks and stipple (rock),
+    grain lines (wood) or fine lines (metal), black marks on the given paper colour."""
+    import numpy as np
+    rng = np.random.default_rng(7 + len(kind))
+    img = np.empty((size, size, 3))
+    img[:] = np.array(paper)
+    ink = np.array((0.05, 0.05, 0.07))
+    yy, xx = np.mgrid[0:size, 0:size].astype(float)
+    if kind in ("leaf", "cactus", "terrain"):
+        dens = {"leaf": 0.07, "cactus": 0.06, "terrain": 0.08}[kind]
+        dots = rng.random((size // 2, size // 2)) < dens
+        mask = np.kron(dots, np.ones((2, 2), bool)) | np.roll(np.kron(dots, np.ones((2, 2), bool)), (1, 1), (0, 1))
+    elif kind == "water":
+        warp = 0.10 * np.sin(2 * np.pi * xx / size * 3) + 0.05 * np.sin(2 * np.pi * (xx / size * 7 + yy / size * 2))
+        mask = np.mod(yy / size * 16 + warp, 1.0) < 0.07
+    elif kind == "wood":
+        warp = 0.18 * np.sin(2 * np.pi * yy / size * 2) + 0.06 * np.sin(2 * np.pi * (yy / size * 5 + xx / size))
+        mask = np.mod(xx / size * 12 + warp, 1.0) < 0.06
+    elif kind == "metal":
+        mask = np.mod(xx / size * 28, 1.0) < 0.05
+    else:                                                          # rock: cell edges of a tiling Voronoi pattern plus stipple
+        pts = rng.random((26, 2)) * size
+        d1 = np.full((size, size), 1e9)
+        d2 = np.full((size, size), 1e9)
+        for ox in (-size, 0, size):
+            for oy in (-size, 0, size):
+                for px, py in pts:
+                    d = np.hypot(xx - (px + ox), yy - (py + oy))
+                    d2 = np.minimum(d2, np.maximum(d, d1))
+                    d1 = np.minimum(d1, d)
+        mask = ((d2 - d1) < 3.5) | (rng.random((size, size)) < 0.015)
+    img[mask] = ink
+    return img
+
+
+def _ink_texture_image(kind, paper_name):
+    """The tileable ink picture of `kind` on the named paper as a packed Blender image (generated once)."""
+    name = "LA_InkTex_%s_%s" % (kind.title(), paper_name.title())
+    img = bpy.data.images.get(name)
+    if img is not None:
+        return img
+    import numpy as np
+    arr = _ink_tile_array(kind, _ink_paper(kind))
+    h, w = arr.shape[:2]
+    img = bpy.data.images.new(name, w, h, alpha=True)
+    img.colorspace_settings.name = 'sRGB'
+    rgba = np.concatenate([np.power(arr, 2.2), np.ones((h, w, 1))], -1).astype(np.float32)
+    img.pixels.foreach_set(rgba.ravel())
+    img.update()
+    img.pack()
+    return img
+
+
+def _ink_material_images(kind):
+    """The image-textured twin of an ink material: the tileable ink picture sampled by the object's UVs, so glTF export carries it. Terrain also takes a hint of its baked
+    colour (grass greenish) from the `Col` attribute."""
+    name = "LA_InkTex_" + kind.title() + ("" if _INK_PAPER == "white" else "_" + _INK_PAPER.title())
+    mat = bpy.data.materials.get(name)
+    if mat is not None:
+        return mat
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    nt = mat.node_tree
+    bsdf = next(n for n in nt.nodes if n.type == 'BSDF_PRINCIPLED')
+    tex = nt.nodes.new("ShaderNodeTexImage")
+    tex.image = _ink_texture_image(kind, _INK_PAPER)
+    tex.interpolation = 'Linear'
+    tex.location = (-300, 0)
+    zoom = {"leaf": 0.15, "cactus": 0.15, "rock": 0.2, "wood": 0.3, "metal": 0.3}.get(kind)      # small meshes carry a 0..1 UV per face: zoom into the picture so the marks stay visible
+    if zoom is not None:
+        uvn = nt.nodes.new("ShaderNodeTexCoord")
+        uvn.location = (-700, 0)
+        mp = nt.nodes.new("ShaderNodeMapping")
+        mp.location = (-500, 0)
+        mp.inputs["Scale"].default_value = (zoom, zoom, 1.0)
+        nt.links.new(uvn.outputs["UV"], mp.inputs["Vector"])
+        nt.links.new(mp.outputs["Vector"], tex.inputs["Vector"])
+    last = tex.outputs["Color"]
+    if kind == "terrain":
+        attr = nt.nodes.new("ShaderNodeAttribute")
+        attr.attribute_name = "Col"
+        _set_prop(attr, 'attribute_type', 'GEOMETRY')
+        attr.location = (-500, -200)
+        mixn = nt.nodes.new("ShaderNodeMix")
+        mixn.data_type = 'RGBA'
+        mixn.blend_type = 'MULTIPLY'
+        mixn.location = (-100, 0)
+        mixn.inputs[0].default_value = 0.35
+        nt.links.new(tex.outputs["Color"], mixn.inputs[6])
+        nt.links.new(attr.outputs["Color"], mixn.inputs[7])
+        last = mixn.outputs[2]
+    nt.links.new(last, bsdf.inputs["Base Color"])
+    _set_input(bsdf, "Roughness", 1.0)
+    _set_input(bsdf, "Specular IOR Level", 0.0)
+    if kind == "water":
+        _set_input(bsdf, "Alpha", 0.93)
+    mat.diffuse_color = (*_ink_paper(kind), 1.0)
+    return mat
+
+
 def _ink_material(kind):
     """Ink-on-paper surface materials (shader only): pale paper with black marks -- `leaf` stipple, `wood` grain lines, `rock` cracks and stipple, `metal` fine lines,
     `water` wave lines on a pale blue paper (slightly see-through), `terrain` stipple that is denser on grass (read from the baked colour) over paper that darkens
     with height."""
+    if _INK_IMAGES:
+        return _ink_material_images(kind)
     name = "LA_Ink_" + kind.title() + ("" if _INK_PAPER == "white" else "_" + _INK_PAPER.title())
     mat = bpy.data.materials.get(name)
     if mat is not None:
@@ -17985,6 +18089,9 @@ def _terrain_grid_mesh(tp, pads, name):
     mesh.update()
     for poly in mesh.polygons:
         poly.use_smooth = True
+    uvl = mesh.uv_layers.new(name="UVMap")                          # planar, one repeat per 8 m: image-textured (exportable) ground materials need it
+    xy = [(v[0] / 8.0, v[1] / 8.0) for v in verts]
+    uvl.data.foreach_set("uv", [c for loop in mesh.loops for c in xy[loop.vertex_index]])
     _terrain_write_attributes(mesh, nx, ny, pad_w, pad_h, edge, masks, hm)
     return mesh, (nx, ny)
 
@@ -18899,13 +19006,15 @@ def plan_build(context, root):
 
 
 def _plan_build_nodes(context, root, resolved, built, skipped, warnings):
-    global _ACTIVE_SKIN, _INK_PAPER
+    global _ACTIVE_SKIN, _INK_PAPER, _INK_IMAGES
     _INK_PAPER = root.get("paper", "white") if root.get("paper", "white") in INK_PAPERS else "white"
+    _INK_IMAGES = bool(root.get("ink_textures", False))
     try:
         return _plan_build_nodes_skinned(context, root, resolved, built, skipped, warnings)
     finally:
         _ACTIVE_SKIN = ""
         _INK_PAPER = "white"
+        _INK_IMAGES = False
 
 
 def _plan_build_nodes_skinned(context, root, resolved, built, skipped, warnings):
@@ -19190,6 +19299,7 @@ class OBJECT_OT_PlanCreate(bpy.types.Operator):
             plan["style"] = context.scene.wfc_plan_style
         if context.scene.wfc_plan_style == 'ink':
             plan["paper"] = context.scene.wfc_plan_paper
+            plan["ink_textures"] = bool(context.scene.wfc_ink_images)
         plan_write_to_blend(context.scene, plan)
         self.report({'INFO'}, "Created plan '%s'." % plan["id"])
         return {'FINISHED'}
@@ -19447,17 +19557,17 @@ class OBJECT_OT_ExportTilemapPackage(bpy.types.Operator, ExportHelper):
         return {'FINISHED'}
 
 
-def _ink_blockout_material(mat, paper):
+def _ink_blockout_material(mat, paper, images=False):
     """The ink material that stands in for `mat` (None = leave it alone), judged by the material's name: leaves, water, terrain, rock, wood, roofs, metal and
     masonry. The masonry replacements share the 2.08 m tile of the masonry textures, so existing UVs keep working."""
-    global _ACTIVE_SKIN, _INK_PAPER
+    global _ACTIVE_SKIN, _INK_PAPER, _INK_IMAGES
     if mat is None:
         return None
     n = mat.name.lower()
-    saved = (_ACTIVE_SKIN, _INK_PAPER)
-    _ACTIVE_SKIN, _INK_PAPER = "ink", paper
+    saved = (_ACTIVE_SKIN, _INK_PAPER, _INK_IMAGES)
+    _ACTIVE_SKIN, _INK_PAPER, _INK_IMAGES = "ink", paper, images
     try:
-        if "ink" in n or "tilemap" in n:                              # already ink, or a map picture that is its own texture
+        if "ink" in n and not images or "tilemap" in n:                              # already ink, or a map picture that is its own texture
             return None
         if "leaf" in n or "bush" in n:
             return _ink_material("leaf")
@@ -19481,10 +19591,10 @@ def _ink_blockout_material(mat, paper):
             return get_style_material("INK_WALL")
         return None
     finally:
-        _ACTIVE_SKIN, _INK_PAPER = saved
+        _ACTIVE_SKIN, _INK_PAPER, _INK_IMAGES = saved
 
 
-def ink_blockout(scene, paper="white", only_selected=False):
+def ink_blockout(scene, paper="white", only_selected=False, images=False):
     """Toggles the ink look over the scene's meshes: the first call replaces every recognised material by an ink one (the originals' names are kept on the
     object as `gla_ink_restore`), the next call puts the originals back. Returns ("on" | "off", number of objects changed)."""
     objs = [o for o in (scene.objects if not only_selected else [o for o in scene.objects if o.select_get()]) if o.type == 'MESH']
@@ -19504,7 +19614,7 @@ def ink_blockout(scene, paper="white", only_selected=False):
             names, did = [], False
             for slot in o.material_slots:
                 names.append(slot.material.name if slot.material else None)
-                new = _ink_blockout_material(slot.material, paper)
+                new = _ink_blockout_material(slot.material, paper, images)
                 if new is not None:
                     slot.material = new
                     did = True
@@ -19522,7 +19632,7 @@ class OBJECT_OT_InkBlockout(bpy.types.Operator):
     only_selected: BoolProperty(name="Selected only", default=False)
 
     def execute(self, context):
-        state, n = ink_blockout(context.scene, context.scene.wfc_plan_paper, self.only_selected)
+        state, n = ink_blockout(context.scene, context.scene.wfc_plan_paper, self.only_selected, context.scene.wfc_ink_images)
         self.report({'INFO'}, "Ink blockout %s: %d object(s)." % (state, n))
         return {'FINISHED'}
 
@@ -20848,6 +20958,7 @@ class VIEW3D_PT_GLAPlans(bpy.types.Panel):
         col.prop(context.scene, "wfc_plan_style", text="Style")
         if context.scene.wfc_plan_style == 'ink':
             col.prop(context.scene, "wfc_plan_paper", text="Paper")
+            col.prop(context.scene, "wfc_ink_images", text="Image textures (export-ready)")
         col.prop(context.scene, "wfc_plan_shape", text="Shape")
         col.operator("object.gla_ink_blockout", text="Ink Blockout (toggle)", icon='GREASEPENCIL')
         col.prop(context.scene, "wfc_plan_biome", text="Biome")
@@ -21574,6 +21685,9 @@ def register():
         name="Paper", items=[('white', "White paper", "Pale grey-white paper"), ('old', "Old paper", "Yellowed, aged paper"),
                              ('grey', "Grey paper", "Greyish paper"), ('cream', "Cream paper", "Warm cream paper")],
         default='white', description="Paper of an ink-style plan: grass and leaves tint it green, water blue, wood brown")
+    bpy.types.Scene.wfc_ink_images = BoolProperty(
+        name="Image textures", default=False,
+        description="Ink materials use tileable pictures (stipple, wave lines, cracks, grain) instead of shaders, so a glTF export carries them")
     bpy.types.Scene.wfc_structure_kind = EnumProperty(
         name="Structure",
         items=[
@@ -21706,6 +21820,7 @@ def unregister():
     del bpy.types.Scene.wfc_structure_kind
     del bpy.types.Scene.wfc_plan_style
     del bpy.types.Scene.wfc_plan_paper
+    del bpy.types.Scene.wfc_ink_images
     del bpy.types.Scene.wfc_plan_shape
     del bpy.types.Scene.wfc_plan_biome
     del bpy.types.Scene.wfc_plan_edit_node

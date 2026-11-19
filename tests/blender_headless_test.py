@@ -5882,6 +5882,25 @@ state_off, n_off = addon.ink_blockout(bpy.context.scene, "old")
 bo_after = {o.name: [s_.material.name if s_.material else None for s_ in o.material_slots] for o in bpy.data.objects if o.type == 'MESH'}
 check("Ink blockout: the second call restores every original material", state_off == "off" and n_off == n_on and bo_after == bo_before)
 
+# ink pictures for export: an ink plan with ink_textures uses image-textured materials, the terrain sheet has UVs and the glTF carries the pictures
+import struct as _struct
+ink_img = dict(addon.plan_node("ink_img", "terrain", "terrain", style="ink", params={"biome": "meadow", "width": 80.0, "depth": 80.0, "scatter": 1.0, "rivers": "none"},
+                               children=[addon.plan_node("ink_img_tree", "building", "tree", style="ink", params={"height": 6.0, "crown": "ROUND"})]), paper="old", ink_textures=True)
+addon.plan_build(bpy.context, ink_img)
+ink_img_objs = [o for o in bpy.data.objects if o.type == "MESH" and o.name.startswith("PB_ink_img")]
+ink_img_names = {m.name for o in ink_img_objs for m in o.data.materials if m}
+check("Ink images: an ink plan with ink_textures uses the image-textured materials (LA_InkTex_*)", any(n_.startswith("LA_InkTex_Terrain") for n_ in ink_img_names)
+      and any(n_.startswith("LA_InkTex_Leaf") for n_ in ink_img_names), str(sorted(ink_img_names)))
+check("Ink images: the terrain sheet has UVs (needed to carry a picture)", any(o.data.uv_layers for o in ink_img_objs if "Terrain" in o.name))
+for _o in bpy.data.objects:
+    _o.select_set(_o in ink_img_objs)
+_glb = os.path.join(bpy.app.tempdir, "ink_img.glb")
+bpy.ops.export_scene.gltf(filepath=_glb, export_format='GLB', use_selection=True)
+_d = open(_glb, "rb").read()
+_meta = json.loads(_d[20:20 + _struct.unpack("<I", _d[12:16])[0]])
+check("Ink images: the glTF export carries the ink pictures", len(_meta.get("images", [])) >= 3, str(len(_meta.get("images", []))))
+check("Ink images: the flags are switched off after the build", addon._INK_IMAGES is False and addon._INK_PAPER == "white")
+
 # ==============================================================================
 print()
 if failures:

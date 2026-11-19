@@ -21,6 +21,7 @@ row = gla.plan_node("row", "compound", "yard", footprint=[[-34, -16], [34, -16],
     gla.plan_node("tower", "building", "tower", transform={"x": -30, "y": 10, "z": 0, "rot": 0}, params={"props": False, "lights": False, "interior": False, "height": 8.0})])
 land = gla.plan_node("land", "terrain", "terrain", style=style, params={"biome": "meadow", "width": 200.0, "depth": 200.0, "scatter": 1.0}, children=[row])
 land["paper"] = os.environ.get("PAPER", "white")
+land["ink_textures"] = bool(os.environ.get("INK_TEX"))
 gla.plan_write_to_blend(sc, land); gla.plan_build(bpy.context, land)
 if os.environ.get("BLOCKOUT"):
     print("BLOCKOUT", gla.ink_blockout(sc, os.environ.get("PAPER", "white")))
