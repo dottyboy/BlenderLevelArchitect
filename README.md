@@ -215,9 +215,9 @@ Press **House from Floor-Plan Picture...** and pick a picture of an architect's 
 
 ### Seven style packs and a mix
 
-<p align="center"><img src="docs/img/styles_sheet.png" alt="The same village in Medieval, Egyptian, Mexican, Chinese, Inca, Futuristic and Alpine styles, and a mixed street" width="900"></p>
+<p align="center"><img src="docs/img/styles_sheet.png" alt="The same village in Medieval, Egyptian, Mexican, Chinese, Inca, Modern and Alpine styles, and a mixed street" width="900"></p>
 
-Medieval, Egyptian, Mexican adobe, Chinese (curved roofs), Inca, Futuristic and Alpine chalet — each is data (materials plus building
+Medieval, Egyptian, Mexican adobe, Chinese (curved roofs), Inca, Modern (the `futuristic` pack) and Alpine chalet — each is data (materials plus building
 proportions), so the same plan can be built in any of them, or in **Mixed**, where every building picks its own pack.
 
 ### Huts: straw, branches, timber, cob, earthbag, aircrete

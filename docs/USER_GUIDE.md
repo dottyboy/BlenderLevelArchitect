@@ -123,7 +123,7 @@ by script.
 | **Mexican adobe** | Plastered adobe, arched doors and windows, low hipped terracotta roofs |
 | **Chinese** | Red timber walls, sweeping curved roofs with upturned eaves in grey tile, wooden fences |
 | **Inca** | Fitted grey stone, steep thatched gables, small rectangular openings |
-| **Futuristic** | White panel walls with dark seams, flat metal roofs, big windows, two-storey houses |
+| **Modern** (`futuristic`) | White panel walls with dark seams, flat metal roofs, big windows, two-storey houses |
 | **Alpine chalet** | Log walls, low shingled roofs with wide overhangs, two storeys, chimneys, wooden fences |
 | **Mixed** | Every building, fence and road picks its own pack (deterministic from its seed) |
 

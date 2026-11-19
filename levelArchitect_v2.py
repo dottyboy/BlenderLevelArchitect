@@ -11121,7 +11121,7 @@ PLAN_STYLES = {
             'barn': dict(roof='GABLE', roof_pitch=1.0, wall_thickness=0.7, door_style='rect', chimney=False),
         }),
     'futuristic': dict(
-        label="Futuristic", wall='PANEL', trim='PANEL_DARK', wood='METAL', roof_color='METAL', fence='stone',
+        label="Modern", wall='PANEL', trim='PANEL_DARK', wood='METAL', roof_color='METAL', fence='stone',
         kinds={
             'house': dict(width=8.0, depth=7.0, wall_height=3.4, floors=2, roof='FLAT', parapet=0.25, wall_thickness=0.4,
                           door_style='rect', door_width=1.6, door_height=2.5, window_kind='rect', window_width=1.6,

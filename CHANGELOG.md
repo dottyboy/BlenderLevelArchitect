@@ -156,7 +156,7 @@ reproduced exactly from its settings (see **Debug: Last Generation Params** in t
 
 ## 0.47.0 — plans: styles, shapes, huts
 
-- **Seven style packs** — Medieval, Egyptian, Mexican adobe, Chinese, Inca, Futuristic, Alpine chalet — plus **Mixed** (every building,
+- **Seven style packs** — Medieval, Egyptian, Mexican adobe, Chinese, Inca, Modern (futuristic), Alpine chalet — plus **Mixed** (every building,
   fence and road picks its own pack). Packs are data: wall, trim, roof and wood materials (procedural, packed textures) and per-kind
   building proportions; explicit parameters always win. A *Style* dropdown in the Plans panel; layouts account for each style's sizes.
 - **New roofs**: hipped, **curved** (concave sweep with upturned eaves, used by the Chinese pack) and flat with a parapet; `roof_overhang`.
