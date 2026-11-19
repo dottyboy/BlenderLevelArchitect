@@ -3,7 +3,7 @@
 Game Level Architect — early testing release. Generation is fully seeded, so any level can be
 reproduced exactly from its settings (see **Debug: Last Generation Params** in the panel).
 
-## Unreleased — terrain: look, relief, water and ground cover; tile maps; ink style
+## 0.64.0 — terrain look, tile-map levels, the ink style
 
 - **Godot demo plays the ink dungeon too** (`--level ink`): floors are tracked (the platform of a two-height level can only be entered over its stairs, the height rises smoothly on them), the headless `--selftest` also walks the stairs and checks the cliff; `tools/export_demo_package.py -- ink` writes the package.
 - **Ink pictures (export-ready)**: with `ink_textures` on the plan (Plans panel checkbox *Image textures (export-ready)*, also an option of the blockout) the ink materials use **tileable pictures** (stipple, wave lines, cracks, grain, fine lines; `LA_InkTex_<kind>_<paper>`) sampled by UV instead of shaders, so a glTF export carries them; the terrain sheet now has planar UVs (one repeat per 8 m) and small meshes zoom into the picture. The masonry (walls, trim, roofs, wood) was already pictures.
