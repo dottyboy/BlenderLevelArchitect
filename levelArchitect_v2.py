@@ -17089,6 +17089,8 @@ def _plan_build_tilemap(context, node, world, seed, path):
     obj = bpy.data.objects.new(mesh.name, mesh)
     context.scene.collection.objects.link(obj)
     obj["gla_walk_layout"] = json.dumps({k: v for k, v in layout.items() if k not in ("roles", "trees", "props")})
+    obj["gla_tilemap"] = json.dumps({"id": node["id"], "tile_m": layout["tile_m"], "tiles": layout["tiles"], "rows": ["".join(str(v) for v in row) for row in layout["roles"]],
+                                     "props": layout["props"], "trees": [[round(v, 3) for v in t_] for t_ in layout["trees"]], "walk": layout["walk"]})
     made = [obj]
     mat = _tilemap_material(bpy.path.abspath(p["image"]))
     tm, (tx, ty) = layout["tile_m"], layout["tiles"]
@@ -17131,6 +17133,8 @@ def _plan_build_tilemap(context, node, world, seed, path):
         tobj = bpy.data.objects.new(tmesh.name, tmesh)
         context.scene.collection.objects.link(tobj)
         made.append(tobj)
+    for o_ in made:
+        o_["gla_tilemap_id"] = node["id"]
     _plan_adopt_objects(context.scene, path, world, made)
     return made
 
@@ -18959,6 +18963,93 @@ class OBJECT_OT_PlanImportHouse(bpy.types.Operator, ImportHelper):
         return {'FINISHED'}
 
 
+def _tilemap_far_tile(rows, start):
+    """The floor tile farthest from `start` by walking (4-neighbour breadth first search over floor tiles); None without a start."""
+    if start is None:
+        return None
+    ty, tx = len(rows), len(rows[0])
+    seen = {tuple(start): 0}
+    queue = deque([tuple(start)])
+    far = tuple(start)
+    while queue:
+        x, y = queue.popleft()
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nx_, ny_ = x + dx, y + dy
+            if 0 <= nx_ < tx and 0 <= ny_ < ty and rows[ny_][nx_] == "0" and (nx_, ny_) not in seen:
+                seen[(nx_, ny_)] = seen[(x, y)] + 1
+                queue.append((nx_, ny_))
+                far = (nx_, ny_)
+    return list(far)
+
+
+def tilemap_game_package(data, glb_name=""):
+    """gla-export/1 description of a tile-map level from the `gla_tilemap` data of its ground object: the floor tiles merged into walkable rectangles,
+    the entrance at the start of the biggest floor region, the exit at the tile farthest from it, props (statues, bushes) and tree positions.
+    Engine coordinates: x right, y up, z = -blender y; the origin is the middle of the map."""
+    tm, (tx, ty) = float(data["tile_m"]), data["tiles"]
+    rows = data["rows"]
+    ox, oy = tx * tm / 2.0, ty * tm / 2.0
+    cells = {(i, j) for j, row in enumerate(rows) for i, ch in enumerate(row) if ch == "0"}
+    rects = []
+    for x0, y0, x1, y1 in _merge_cells_to_rects(cells):           # tile columns/rows, inclusive, rows counted from the top (north)
+        rects.append([round(x0 * tm - ox, 4), round(-(oy - y0 * tm), 4), round((x1 + 1) * tm - ox, 4), round(-(oy - (y1 + 1) * tm), 4)])
+    centre = lambda t_: [round((t_[0] + 0.5) * tm - ox, 4), 0.0, round(-(oy - (t_[1] + 0.5) * tm), 4)] if t_ else None
+    start = data["walk"].get("start")
+    far = _tilemap_far_tile(rows, start)
+    props = [{"kind": pr["kind"], "pos": centre([(pr["rect"][0] + pr["rect"][2]) / 2.0, (pr["rect"][1] + pr["rect"][3]) / 2.0]), "tiles": len(pr["tiles"])} for pr in data["props"]]
+    return {
+        "format": GAME_PACKAGE_FORMAT,
+        "generator": "Game Level Architect " + ".".join(str(v) for v in bl_info["version"]),
+        "kind": "tilemap",
+        "glb": glb_name,
+        "tile_size": tm,
+        "interior": False,
+        "coordinates": "engine: x right, y up, z = -blender_y",
+        "floors": [{"z": 0, "y": 0.0, "cells": len(cells), "walk_rects": rects}],
+        "entrance": {"floor": 0, "pos": centre(start)},
+        "exit": {"floor": 0, "pos": centre(far)},
+        "stairs": [], "rooms": [], "lights": [],
+        "props": props,
+        "trees": [[t_[0], t_[2], -t_[1]] for t_ in data["trees"]],
+        "walk": data["walk"],
+        "tilemap": {"tiles": [tx, ty], "tile_m": tm},
+    }
+
+
+class OBJECT_OT_ExportTilemapPackage(bpy.types.Operator, ExportHelper):
+    """Exports the selected tile-map level (its ground, props and trees) as glTF plus a JSON description (walkable rectangles, entrance, exit, props, trees) in the "gla-export/1" format."""
+    bl_idname = "object.export_tilemap_package"
+    bl_label = "Export Tile Map Package (glb + json)"
+    bl_options = {'REGISTER'}
+
+    filename_ext = ".glb"
+    filter_glob: StringProperty(default="*.glb", options={'HIDDEN'})
+
+    def execute(self, context):
+        scene = context.scene
+        ground = next((o for o in ([context.active_object] if context.active_object else []) + list(scene.objects) if "gla_tilemap" in o.keys()), None)
+        if ground is None:
+            self.report({'ERROR'}, "Build a tile-map level first (Plans panel: Level from Tile Map).")
+            return {'CANCELLED'}
+        if not hasattr(bpy.ops.export_scene, "gltf"):
+            self.report({'ERROR'}, "glTF exporter isn't available -- enable Import-Export: glTF 2.0.")
+            return {'CANCELLED'}
+        data = json.loads(ground["gla_tilemap"])
+        targets = [o for o in scene.objects if o.get("gla_tilemap_id") == data["id"] and o.type == 'MESH']
+        stem = os.path.splitext(self.filepath)[0]
+        previous = scene.wfc_export_binary
+        scene.wfc_export_binary = True
+        try:
+            _run_gltf_export(context, stem + ".glb", targets, False)
+        finally:
+            scene.wfc_export_binary = previous
+        package = tilemap_game_package(data, os.path.basename(stem) + ".glb")
+        with open(stem + ".json", "w", encoding="utf-8") as fh:
+            json.dump(package, fh, indent=1)
+        self.report({'INFO'}, "Exported '%s.glb' and '%s.json' (%d walk rectangles, %d props, %d trees)." % (stem, stem, len(package["floors"][0]["walk_rects"]), len(package["props"]), len(package["trees"])))
+        return {'FINISHED'}
+
+
 class OBJECT_OT_PlanImportTilemap(bpy.types.Operator, ImportHelper):
     """Builds a 3D level from a picture of a tile map (a whole level drawn from square tiles): floor stays flat, green masses and rough grey masses are raised, and the picture itself is the pixel-sharp texture."""
     bl_idname = "object.gla_plan_import_tilemap"
@@ -20304,6 +20395,7 @@ class VIEW3D_PT_GLAPlans(bpy.types.Panel):
         row.operator("object.gla_plan_import", text="Import Plan (SVG, DXF, image)...", icon='IMPORT')
         layout.operator("object.gla_plan_import_house", text="House from Floor-Plan Picture...", icon='HOME')
         layout.operator("object.gla_plan_import_tilemap", text="Level from Tile Map...", icon='MESH_GRID')
+        layout.operator("object.export_tilemap_package", text="Export Tile Map Package (glb + json)", icon='PACKAGE')
 
 
 # ==============================================================================
@@ -20329,6 +20421,7 @@ classes = (
     OBJECT_OT_PlanImport,
     OBJECT_OT_PlanImportHouse,
     OBJECT_OT_PlanImportTilemap,
+    OBJECT_OT_ExportTilemapPackage,
     OBJECT_OT_GenerateLevelTower,
     OBJECT_OT_GenerateLevelCastle,
     OBJECT_OT_ExportGamePackage,

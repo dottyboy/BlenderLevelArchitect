@@ -5753,6 +5753,17 @@ _forest[:16 * 4] = (104, 104, 88)
 _fm = addon.tilemap_analyze(_forest, 16)
 _fl = addon._build_tilemap({**addon.PLAN_TILEMAP_DEFAULTS, "image": _tm_path})[2]                      # a normal map still builds with trees off the fringe
 check("Tile map: a layout carries props, trees and the walk check", all(k in _fl for k in ("props", "trees", "walk")))
+# the game package of a tile-map level: floor tiles as exact walk rectangles, entrance and exit on the floor, props and trees listed
+_pk_root = addon.plan_from_tilemap_picture(_tm_path, "tm_pkg", 16, 1.0)
+addon.plan_build(bpy.context, _pk_root)
+_pk_ground = [o for o in bpy.data.objects if o.type == "MESH" and "gla_tilemap" in o.keys() and json.loads(o["gla_tilemap"])["id"] == "tm_pkg"]
+check("Tile map: the ground object carries its map (gla_tilemap) and every built object is tagged with the plan id", len(_pk_ground) == 1
+      and all(o.get("gla_tilemap_id") == "tm_pkg" for o in bpy.data.objects if o.type == "MESH" and o.data.name.startswith("Tilemap_tm_pkg")))
+_pk = addon.tilemap_game_package(json.loads(_pk_ground[0]["gla_tilemap"]), "x.glb")
+_area = sum((r[2] - r[0]) * (r[3] - r[1]) for r in _pk["floors"][0]["walk_rects"])
+check("Tile map: the walk rectangles cover exactly the floor tiles", abs(_area - _pk["floors"][0]["cells"] * _pk["tile_size"] ** 2) < 1e-6 and _pk["format"] == addon.GAME_PACKAGE_FORMAT, str((_area, _pk["floors"][0]["cells"])))
+_inside = lambda pos: any(r[0] <= pos[0] <= r[2] and r[1] <= pos[2] <= r[3] for r in _pk["floors"][0]["walk_rects"])
+check("Tile map: entrance and exit are on walkable ground and differ", _inside(_pk["entrance"]["pos"]) and _inside(_pk["exit"]["pos"]) and _pk["entrance"]["pos"] != _pk["exit"]["pos"], str((_pk["entrance"], _pk["exit"])))
 for bad in ({"image": None}, {"image": _tm_path, "tile": 2}):
     try:
         addon.plan_build(bpy.context, addon.plan_node("tm_bad", "building", "tilemap", params=bad))
